@@ -3407,6 +3407,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.6",
  "log",
+ "repose-canvas",
  "repose-core",
  "repose-render-wgpu",
  "wgpu",

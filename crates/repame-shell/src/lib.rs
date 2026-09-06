@@ -5,7 +5,7 @@
 //! gamepad polling). Per-game UI stays in the game crate as Repose views.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 pub use repame_sim::{Sim, SimTime};
@@ -23,17 +23,27 @@ pub trait ShellHooks {
     fn on_frame(&mut self, _sim: &mut Sim, _dt: Duration) {}
 }
 
-/// Desktop entry point. Mounts `root` as the Repose view, advances `sim`
-/// with wall-clock deltas, polls gamepads through the shared
-/// `repose-platform` backend (mapping to game input lands per pilot).
-pub fn run_desktop<H>(title: &str, size: (u32, u32), hooks: H, sim: Sim) -> Result<()>
-where
-    H: ShellHooks + 'static,
-{
-    let _poller = GamepadPoller::new();
-    let _started = Instant::now();
-    let _ = (title, size, hooks, sim);
-    todo!("runner wiring lands with the rozvp pilot (repose-platform desktop runner + sim loop)")
+/// Desktop entry point. Mounts `root` on the repose-platform runner with
+/// the given window title/size. The root closure owns stepping (sim,
+/// rigs) and must call `request_frame()` for continuous frames; see
+/// the rozvp pilot runner for the reference wiring.
+#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
+pub fn run_desktop(
+    title: &str,
+    size: (u32, u32),
+    root: impl FnMut(
+        &mut repose_core::runtime::Scheduler,
+        &repose_core::RenderContext,
+    ) -> repose_core::View
+    + 'static,
+) -> Result<()> {
+    let config = repose_app::AppConfig {
+        window_title: title.to_string(),
+        window_size: size,
+        ..Default::default()
+    };
+    repose_platform::run_desktop_app_with_config(root, config)?;
+    Ok(())
 }
 
 /// Gamepad polling unified on the shared `repose-platform` backend: one

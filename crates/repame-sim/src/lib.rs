@@ -61,15 +61,22 @@ impl Sim {
         let mut ran = 0;
         while self.accumulator >= self.step {
             self.accumulator -= self.step;
-            {
-                let mut time = self.world.resource_mut::<SimTime>();
-                time.delta_secs = self.step.as_secs_f32();
-                time.elapsed_secs += self.step.as_secs_f64();
-            }
-            self.schedule.run(&mut self.world);
+            self.tick();
             ran += 1;
         }
         ran
+    }
+
+    /// Run the schedule exactly once, advancing sim time by one step.
+    /// Tick-model games (integer logic steps) drive this directly instead
+    /// of the wall-clock [`Sim::step`] accumulator.
+    pub fn tick(&mut self) {
+        {
+            let mut time = self.world.resource_mut::<SimTime>();
+            time.delta_secs = self.step.as_secs_f32();
+            time.elapsed_secs += self.step.as_secs_f64();
+        }
+        self.schedule.run(&mut self.world);
     }
 }
 

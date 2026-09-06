@@ -8,7 +8,8 @@
 use std::time::Duration;
 
 use bevy_ecs::prelude::*;
-use bevy_ecs::schedule::Schedule;
+use bevy_ecs::schedule::{IntoScheduleConfigs, Schedule};
+use bevy_ecs::system::ScheduleSystem;
 
 pub use bevy_ecs;
 
@@ -51,6 +52,20 @@ impl Sim {
     /// Register a system into the per-step schedule.
     pub fn add_system<M>(&mut self, system: impl IntoSystem<(), (), M>) -> &mut Self {
         self.schedule.add_systems(system);
+        self
+    }
+
+    /// Register systems with a guaranteed execution order.
+    ///
+    /// A bare `Schedule` does not preserve `add_system` insertion order for
+    /// systems with conflicting accesses, so multi-step pipelines (economy,
+    /// combat) must register as one `(a, b, c).chain()` tuple through here
+    /// instead of separate `add_system` calls.
+    pub fn add_chained_systems<M>(
+        &mut self,
+        systems: impl IntoScheduleConfigs<ScheduleSystem, M>,
+    ) -> &mut Self {
+        self.schedule.add_systems(systems);
         self
     }
 

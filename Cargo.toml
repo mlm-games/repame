@@ -34,6 +34,10 @@ symphonia = { version = "0.6", features = ["all"] }
 web-workers = "0.3"
 anyhow = "1"
 log = "0.4"
+rand = "0.10"
+easer = "0.3"
+noise = "0.9"
+serde = { version = "1", features = ["derive"] }
 
 repame-sim = { path = "crates/repame-sim", version = "0.1" }
 repame-audio = { path = "crates/repame-audio", version = "0.1" }

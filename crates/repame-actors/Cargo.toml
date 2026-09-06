@@ -1,0 +1,14 @@
+[package]
+name = "repame-actors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+renamite-player.workspace = true
+renamite-player-ui.workspace = true
+repose-core.workspace = true
+anyhow.workspace = true
+log.workspace = true

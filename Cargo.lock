@@ -3288,6 +3288,8 @@ dependencies = [
  "repose-core",
  "repose-platform",
  "repose-ui",
+ "wasm-bindgen",
+ "winit",
 ]
 
 [[package]]

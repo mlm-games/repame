@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+repository = "https://github.com/mlm-games/repame"
+rust-version = "1.93"
+
+[workspace.dependencies]
+# ECS sim (headless, renderer-free). Stays portable to full Bevy.
+bevy_ecs = "0.19"
+# Repose UI shell (local path: dogfoods unreleased Repose, incl. the
+# `gamepad` backend in repose-platform. Pin to crates.io `0.28` for releases.)
+repose-core = { path = "../repose/crates/repose-core", version = "0.28" }
+repose-ui = { path = "../repose/crates/repose-ui", version = "0.28" }
+repose-material = { path = "../repose/crates/repose-material", version = "0.28" }
+repose-canvas = { path = "../repose/crates/repose-canvas", version = "0.28" }
+repose-docking = { path = "../repose/crates/repose-docking", version = "0.28" }
+repose-platform = { path = "../repose/crates/repose-platform", version = "0.28" }
+repose-render-wgpu = { path = "../repose/crates/repose-render-wgpu", version = "0.28" }
+repose-text = { path = "../repose/crates/repose-text", version = "0.28" }
+repose-app = { path = "../repose/crates/repose-app", version = "0.28" }
+repose-tree = { path = "../repose/crates/repose-tree", version = "0.28" }
+wgpu = "30"
+glam = "0.33"
+bytemuck = { version = "1", features = ["derive"] }
+gilrs = "0.11"
+kira = "0.12"
+anyhow = "1"
+log = "0.4"
+
+repame-sim = { path = "crates/repame-sim", version = "0.1" }
+repame-sprite = { path = "crates/repame-sprite", version = "0.1" }
+repame-shell = { path = "crates/repame-shell", version = "0.1" }

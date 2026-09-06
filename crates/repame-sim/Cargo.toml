@@ -1,0 +1,12 @@
+[package]
+name = "repame-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bevy_ecs.workspace = true
+glam.workspace = true
+log.workspace = true

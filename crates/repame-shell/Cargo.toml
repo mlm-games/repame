@@ -1,0 +1,17 @@
+[package]
+name = "repame-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+repame-sim.workspace = true
+repame-sprite.workspace = true
+repose-core.workspace = true
+repose-ui.workspace = true
+repose-platform = { workspace = true, features = ["gamepad"] }
+repose-app.workspace = true
+anyhow.workspace = true
+log.workspace = true

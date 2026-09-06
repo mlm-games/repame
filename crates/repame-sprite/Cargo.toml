@@ -1,0 +1,16 @@
+[package]
+name = "repame-sprite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+repose-core.workspace = true
+repose-render-wgpu.workspace = true
+anyhow.workspace = true
+log.workspace = true

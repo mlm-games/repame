@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "repame audio - game-idiomatic sound (banks, music, rig events) on the house cpal+symphonia stack"
+description = "game-idiomatic sound (banks, music, rig events) via cpal+symphonia"
 publish = false
 
 [dependencies]
@@ -16,7 +16,7 @@ symphonia.workspace = true
 web-workers.workspace = true
 
 [dev-dependencies]
-renamite-player = { path = "../../../renamite/crates/renamite-player", version = "0.2" }
+renamite-player.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 cpal = { workspace = true, features = ["wasm-bindgen", "audioworklet"] }

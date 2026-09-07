@@ -1,0 +1,14 @@
+[package]
+name = "repame-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "sim-side action map, edge state, and contexts for all games"
+publish = false
+
+[dependencies]
+repame-sim.workspace = true
+bevy_ecs.workspace = true
+repose-core.workspace = true

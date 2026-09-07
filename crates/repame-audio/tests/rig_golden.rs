@@ -1,13 +1,13 @@
-//! Golden chain: real `zombie.ren` -> renamite events -> rig map -> bank.
+//! Golden chain: vendored `zombie.ren` -> renamite events -> rig map -> bank.
 //!
-//! Couples to the rozvp asset by path (explicit, fails loud if moved):
-//! walk must emit `footstep`, and the `eating` input must reach the
-//! attack state that emits `bite`. Both must resolve to started voices.
+//! The asset is a copy of rozvp's zombie rig (vendored so this crate is
+//! self-contained): walk must emit `footstep`, and the `eating` input must
+//! reach the attack state that emits `bite`. Both must resolve to started voices.
 
 use renamite_player::Player;
 use repame_audio::{CueDef, RigAudio, SoundBank, audio_link, synth_sine_wav};
 
-static ZOMBIE_REN: &str = include_str!("../../../../rozvp/assets/anims/zombie.ren");
+static ZOMBIE_REN: &str = include_str!("assets/zombie.ren");
 
 fn wired() -> (SoundBank, RigAudio, Player, repame_audio::ThreadAudioLink) {
     let player = Player::from_ren_str(ZOMBIE_REN).expect("zombie.ren parses");

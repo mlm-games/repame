@@ -3182,20 +3182,11 @@ checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 [[package]]
 name = "renamite-animation"
 version = "0.2.8"
-dependencies = [
- "glam 0.33.6",
- "renamite-geometry 0.2.8",
- "serde",
-]
-
-[[package]]
-name = "renamite-animation"
-version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "235e887d738b55f70b65b59275ed78226c34199f2da919302c3c8cff22c1e609"
 dependencies = [
  "glam 0.33.6",
- "renamite-geometry 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "renamite-geometry",
  "serde",
 ]
 
@@ -3206,23 +3197,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebaf381904e652373dbc21032a45b0b6db42410675125bbd9e7c6a5a934c6ae3"
 dependencies = [
  "glam 0.33.6",
- "renamite-animation 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "renamite-animation",
  "renamite-history",
- "renamite-machine 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-model 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "renamite-machine",
+ "renamite-model",
  "serde",
  "smallvec",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "renamite-geometry"
-version = "0.2.8"
-dependencies = [
- "glam 0.33.6",
- "kurbo",
- "linesweeper",
- "serde",
  "thiserror 2.0.20",
 ]
 
@@ -3246,10 +3226,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8edb887a526303d14ac175aa3453fbb5daba547b2d2bb8ff355dfc8c2fe1dd1b"
 dependencies = [
  "glam 0.33.6",
- "renamite-animation 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-geometry 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-machine 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-model 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "renamite-animation",
+ "renamite-geometry",
+ "renamite-machine",
+ "renamite-model",
  "serde",
  "slotmap",
  "smallvec",
@@ -3259,37 +3239,13 @@ dependencies = [
 [[package]]
 name = "renamite-io-ren"
 version = "0.2.8"
-dependencies = [
- "renamite-machine 0.2.8",
- "renamite-model 0.2.8",
- "ron",
- "serde",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "renamite-io-ren"
-version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1135e543d2e4fd40ec9eddb78d4f18a6d0d2e013fb60c39574c27cedd4fd4ac"
 dependencies = [
- "renamite-machine 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-model 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "renamite-machine",
+ "renamite-model",
  "ron",
  "serde",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "renamite-machine"
-version = "0.2.8"
-dependencies = [
- "glam 0.33.6",
- "renamite-animation 0.2.8",
- "renamite-geometry 0.2.8",
- "renamite-model 0.2.8",
- "serde",
- "slotmap",
  "thiserror 2.0.20",
 ]
 
@@ -3300,25 +3256,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65e8f31e988ab01861de3ccc7675850f02b1213fd97fef3899f0036543d6fe1e"
 dependencies = [
  "glam 0.33.6",
- "renamite-animation 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-geometry 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-model 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "renamite-animation",
+ "renamite-geometry",
+ "renamite-model",
  "serde",
- "slotmap",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "renamite-model"
-version = "0.2.8"
-dependencies = [
- "glam 0.33.6",
- "kurbo",
- "renamite-animation 0.2.8",
- "renamite-geometry 0.2.8",
- "renamite-text 0.2.8",
- "serde",
- "serde_json",
  "slotmap",
  "thiserror 2.0.20",
 ]
@@ -3331,26 +3272,12 @@ checksum = "25406f6665dbf2e3529f86d10184074dba70eabdf316dc964170e50ff93aa028"
 dependencies = [
  "glam 0.33.6",
  "kurbo",
- "renamite-animation 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-geometry 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-text 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "renamite-animation",
+ "renamite-geometry",
+ "renamite-text",
  "serde",
  "serde_json",
  "slotmap",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "renamite-player"
-version = "0.2.8"
-dependencies = [
- "glam 0.33.6",
- "kurbo",
- "renamite-animation 0.2.8",
- "renamite-geometry 0.2.8",
- "renamite-io-ren 0.2.8",
- "renamite-machine 0.2.8",
- "renamite-model 0.2.8",
  "thiserror 2.0.20",
 ]
 
@@ -3362,11 +3289,11 @@ checksum = "0a8968700641cbb408c746f464b1964131c1098586b404cdae89140dea484859"
 dependencies = [
  "glam 0.33.6",
  "kurbo",
- "renamite-animation 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-geometry 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-io-ren 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-machine 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-model 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "renamite-animation",
+ "renamite-geometry",
+ "renamite-io-ren",
+ "renamite-machine",
+ "renamite-model",
  "thiserror 2.0.20",
 ]
 
@@ -3378,7 +3305,7 @@ checksum = "6d15af33696a3a365e4ba7e067169383283655a96fd268cad469c4f86aea2f2c"
 dependencies = [
  "glam 0.33.6",
  "renamite-behavior-common",
- "renamite-player 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "renamite-player",
  "renamite-render-bridge",
  "repose-canvas",
  "repose-core",
@@ -3396,23 +3323,12 @@ dependencies = [
  "lyon_path",
  "lyon_tessellation",
  "renamite-behavior-common",
- "renamite-geometry 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "renamite-model 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "renamite-geometry",
+ "renamite-model",
  "repose-canvas",
  "repose-core",
  "rustc-hash 2.1.3",
  "slotmap",
-]
-
-[[package]]
-name = "renamite-text"
-version = "0.2.8"
-dependencies = [
- "kurbo",
- "serde",
- "thiserror 2.0.20",
- "ttf-parser",
- "web-workers",
 ]
 
 [[package]]
@@ -3440,7 +3356,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "log",
- "renamite-player 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "renamite-player",
  "renamite-player-ui",
  "repose-core",
 ]
@@ -3456,7 +3372,7 @@ dependencies = [
  "anyhow",
  "cpal",
  "log",
- "renamite-player 0.2.8",
+ "renamite-player",
  "symphonia",
  "web-workers",
 ]
@@ -3473,6 +3389,15 @@ dependencies = [
  "repame-sprite",
  "repose-core",
  "serde",
+]
+
+[[package]]
+name = "repame-input"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "repame-sim",
+ "repose-core",
 ]
 
 [[package]]

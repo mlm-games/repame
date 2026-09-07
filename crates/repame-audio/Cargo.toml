@@ -6,7 +6,6 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "game-idiomatic sound (banks, music, rig events) via cpal+symphonia"
-publish = false
 
 [dependencies]
 anyhow.workspace = true

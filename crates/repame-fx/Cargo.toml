@@ -6,7 +6,6 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "sim-side particles, trauma shake, flash, floaters, transitions for all games"
-publish = false
 
 [dependencies]
 repame-sim.workspace = true

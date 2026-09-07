@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "headless bevy_ecs sim with fixed-timestep stepping and snapshot-out convention"
 
 [dependencies]
 bevy_ecs.workspace = true

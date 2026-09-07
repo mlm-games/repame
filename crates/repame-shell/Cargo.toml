@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "Repose platform runner wrappers, sim stepping, viewport mount, and gamepad polling"
 
 [dependencies]
 repame-sim.workspace = true

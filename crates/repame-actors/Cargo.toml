@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "live vector actors (.ren rigs played through renamite-player with Repose views)"
 
 [dependencies]
 renamite-player.workspace = true

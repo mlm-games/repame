@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "CPU-side rectangle packing and GPU upload queue"
 
 [dependencies]
 # pure packing logic + upload queue.

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "instanced batch, Camera2d, CPU picking, and postfx hook"
 
 [dependencies]
 wgpu.workspace = true

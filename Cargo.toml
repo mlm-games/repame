@@ -11,9 +11,8 @@ repository = "https://github.com/mlm-games/repame"
 rust-version = "1.98"
 
 [workspace.dependencies]
-# ECS sim (headless, renderer-free). Stays portable to full Bevy.
 bevy_ecs = "0.19"
-# Repose UI shell (crates.io 0.29, incl. the `gamepad` backend).
+# Repose UI shell (incl. the `gamepad` backend).
 repose-core = "0.29"
 repose-ui = "0.29"
 repose-material = "0.29"
@@ -38,11 +37,14 @@ rand = "0.10"
 easer = "0.3"
 noise = "0.9"
 serde = { version = "1", features = ["derive"] }
+renamite-player = { version = "0.2" }
+renamite-player-ui = { version = "0.2" }
 
 repame-sim = { path = "crates/repame-sim", version = "0.1" }
 repame-atlas = { path = "crates/repame-atlas", version = "0.1" }
 repame-audio = { path = "crates/repame-audio", version = "0.1" }
 repame-sprite = { path = "crates/repame-sprite", version = "0.1" }
 repame-shell = { path = "crates/repame-shell", version = "0.1" }
-renamite-player = { path = "../renamite/crates/renamite-player", version = "0.2" }
-renamite-player-ui = { path = "../renamite/crates/renamite-player-ui", version = "0.2" }
+
+# renamite-player = { path = "../renamite/crates/renamite-player", version = "0.2" }
+# renamite-player-ui = { path = "../renamite/crates/renamite-player-ui", version = "0.2" }

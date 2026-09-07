@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LINUX_DEPS: libasound2-dev libudev-dev pkg-config libx11-dev libxcb1-dev libxi-dev libxinerama-dev libxrandr-dev libxcursor-dev libfontconfig-dev libwayland-dev libxkbcommon-dev
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ${{ env.LINUX_DEPS }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fmt check
+        run: cargo fmt --all -- --check
+
+      - name: Test
+        run: cargo test --all-features
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check wasm target
+        run: cargo check --target wasm32-unknown-unknown --all-features

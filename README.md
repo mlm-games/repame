@@ -1,30 +1,28 @@
 # repame
 
 Shared crates for writing games on the Repose stack: headless `bevy_ecs` sim,
-custom wgpu viewports, Repose UI shell. No Bevy renderer, no `bevy_ui`.
+custom wgpu viewports, and a repose UI shell. Bevy renderer is not used here, mainly for:
+1. wgpu internal version rivalry.
+2. more dogfooding.
 
-Pattern proven by [resims](../resims): sim snapshot out, pixels in through a
-`repose_render_wgpu::Callback` viewport view, everything else is Repose views
-(including debug panels via `repose-devtools`).
+Pattern initially tested using [resims](https://github.com/mlm-games/resims)'s old branch, which used sim snapshot out, pixels in through a `repose_render_wgpu::Callback` viewport view, everything else should be Repose views (including debug panels).
 
 ## Crates
 
 | Crate | Role |
 |---|---|
-| `repame-sim` | Headless sim: `bevy_ecs` `World` + `Schedule` stepping, fixed-timestep accumulator, snapshot-out convention. Game logic stays engine-shaped and portable to full Bevy. |
-| `repame-sprite` | 2D viewport: instanced sprite batch (texture atlas + per-instance transform/uv/color), `Camera2d`, CPU picking, fullscreen postfx hook. Covers the 2D games (rozvp, Opensus, nt-recreated-bevy, Floppy-Warriors) and 2D remakes. |
-| `repame-shell` | App wiring: Repose platform runners + sim stepping + viewport mount, gamepad (`gilrs`) to input mapping, save-path helpers. |
+| `repame-sim` | Headless sim: `bevy_ecs` `World` + `Schedule` stepping, fixed-timestep accumulator, snapshot-out convention. |
+| `repame-sprite` | 2D viewport: instanced sprite batch (texture atlas + per-instance transform/uv/color), `Camera2d`, CPU picking, fullscreen postfx hook. Atm mainly aiming to cover my 2D games (rozvp, Opensus, Floppy-Warriors's rust version) and 2D remakes (nt-recreated-bevy) and stabilise later once core bugs are fixed. |
+| `repame-shell` | App wiring: Repose platform runners + sim stepping + viewport mount, gamepad to input mapping (done internally in repose), save-path helpers, etc. |
 
-Planned, not yet scaffolded: `repame-view3d` (glTF/skinning/PBR viewport for rustbox + 3D remakes).
+Planned, not yet scaffolded: `repame-view3d` (glTF/skinning/PBR viewport for rustbox, and for more 3D games later). Should be usable externally too, but do consider, that it is in a very early phase, and might have many bugs (though the api might not change heavily)
+
+# Internal notes
 
 ## Pilot
 
-**rozvp** (PvZ clone): smallest render surface (20 sprites, no physics/gamepad),
-migrates behind a `repose-shell` feature strangler-style. UI is already Repose
-via `repose-bevy`, so the pilot is nearly pure viewport swap.
-
-
+rozvp (PvZ clone): UI was already Repose via `repose-bevy`, so the pilot is nearly pure viewport swap. Old branch is preserved for reference to a `repose-bevy` game.
 
 ## License
 
-TODO: pick license before first push (resims is GPL-3.0, repose is MPL-2.0).
+MPL-2.0

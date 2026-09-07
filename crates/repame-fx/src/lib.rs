@@ -1,7 +1,7 @@
 //! Sim-side game feel for all repame games: CPU particles, trauma
 //! shake, fullscreen flash, damage floaters, and state transitions.
 //!
-//! Design notes (all bevy-bound or GPU-only, so referenced not reused):
+//! Design notes (all bevy-bound or GPU-only, so referenced, not used as the shell is different and this is mainly for dogfooding repose with (translated or my) bevy games that already work):
 //! - `bevy_hanabi`: init/update/render modifier chain, spawner settings,
 //!   runtime effect properties, GPU spawn events. Here that becomes
 //!   [`EffectDef`] (init/update/render) + [`Spawner`] runtime state, all

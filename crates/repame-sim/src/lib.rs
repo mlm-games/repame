@@ -5,7 +5,7 @@
 //! Systems are plain functions registered on the schedule; no `bevy_app`,
 //! no window, no renderer. The sim stays portable to full Bevy later.
 
-use std::time::Duration;
+use web_time::Duration;
 
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{IntoScheduleConfigs, Schedule};

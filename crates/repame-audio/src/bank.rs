@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 use anyhow::Result;
 use web_workers::sync::mpsc::Sender;

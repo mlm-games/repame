@@ -5,7 +5,7 @@
 //! gamepad polling). Per-game UI stays in the game crate as Repose views.
 
 use std::collections::HashSet;
-use std::time::Duration;
+use web_time::Duration;
 
 use anyhow::Result;
 pub use repame_sim::{Sim, SimTime};

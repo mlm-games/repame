@@ -11,3 +11,4 @@ description = "headless bevy_ecs sim with fixed-timestep stepping and snapshot-o
 bevy_ecs.workspace = true
 glam.workspace = true
 log.workspace = true
+web-time.workspace = true

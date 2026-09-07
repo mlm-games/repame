@@ -33,6 +33,7 @@ symphonia = { version = "0.6", features = ["all"] }
 web-workers = "0.3"
 anyhow = "1"
 log = "0.4"
+web-time = "1"
 rand = "0.10"
 noise = "0.9"
 serde = { version = "1", features = ["derive"] }

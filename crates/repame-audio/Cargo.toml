@@ -10,6 +10,7 @@ description = "game-idiomatic sound (banks, music, rig events) via cpal+symphoni
 [dependencies]
 anyhow.workspace = true
 log.workspace = true
+web-time.workspace = true
 cpal.workspace = true
 symphonia.workspace = true
 web-workers.workspace = true

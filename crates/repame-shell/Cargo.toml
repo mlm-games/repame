@@ -16,6 +16,7 @@ repose-platform = { workspace = true, features = ["gamepad"] }
 repose-app.workspace = true
 anyhow.workspace = true
 log.workspace = true
+web-time.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

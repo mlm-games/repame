@@ -1,0 +1,10 @@
+[package]
+name = "repame-atlas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# pure packing logic + upload queue.

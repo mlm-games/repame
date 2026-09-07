@@ -3190,7 +3190,7 @@ checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "renamite-animation"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "glam 0.33.6",
  "renamite-geometry",
@@ -3199,7 +3199,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-behavior-common"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "glam 0.33.6",
  "renamite-animation",
@@ -3213,7 +3213,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-geometry"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "glam 0.33.6",
  "kurbo",
@@ -3224,7 +3224,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-history"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "glam 0.33.6",
  "renamite-animation",
@@ -3239,7 +3239,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-io-ren"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "renamite-machine",
  "renamite-model",
@@ -3250,7 +3250,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-machine"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "glam 0.33.6",
  "renamite-animation",
@@ -3263,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-model"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "glam 0.33.6",
  "kurbo",
@@ -3278,7 +3278,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-player"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "glam 0.33.6",
  "kurbo",
@@ -3292,7 +3292,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-player-ui"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "glam 0.33.6",
  "renamite-behavior-common",
@@ -3305,7 +3305,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-render-bridge"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "glam 0.33.6",
  "kurbo",
@@ -3322,7 +3322,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-text"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "kurbo",
  "serde",
@@ -3347,6 +3347,10 @@ dependencies = [
  "renamite-player-ui",
  "repose-core",
 ]
+
+[[package]]
+name = "repame-atlas"
+version = "0.1.0"
 
 [[package]]
 name = "repame-audio"
@@ -3407,9 +3411,11 @@ dependencies = [
  "bytemuck",
  "glam 0.33.6",
  "log",
+ "repame-atlas",
  "repose-canvas",
  "repose-core",
  "repose-render-wgpu",
+ "repose-ui",
  "wgpu",
 ]
 

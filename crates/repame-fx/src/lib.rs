@@ -29,8 +29,8 @@ pub mod trauma;
 
 pub use effect::{EaseKind, EffectDef, Gradient, Jittered, SpawnerDef};
 pub use flash::Flash;
-pub use numbers::{spawn_number, step_numbers, DamageNumber};
-pub use particles::{burst, particle_sprites, step_particles, tick_spawners, Particle, Spawner};
+pub use numbers::{DamageNumber, spawn_number, step_numbers};
+pub use particles::{Particle, Spawner, burst, particle_sprites, step_particles, tick_spawners};
 pub use transitions::TransitionFx;
 pub use trauma::Trauma;
 

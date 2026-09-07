@@ -9,11 +9,19 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use glam::{Mat4, Vec2, Vec3};
-use repose_canvas::{Canvas, DrawScope};
+use repose_canvas::{Canvas, DrawScope, Embedded};
 use repose_core::locals::effective_density_scale;
 use repose_core::{Color, Modifier, Rect, View};
+use repose_render_wgpu::{Callback, CallbackResources, ScreenDescriptor, WgpuCallback};
+use repose_ui::Box as UiBox;
+use repose_ui::ViewExt;
+
+pub mod batch;
+use batch::draw_batch;
+pub use batch::{AtlasUpload, BatchDesc, SpriteBatch, TextureFilter, instance_rows, screen_camera};
 
 /// 2D orthographic camera. Owned by the UI (Repose signal), copied into the
 /// snapshot per frame.
@@ -67,12 +75,21 @@ impl Camera2d {
 }
 
 /// One batched sprite. `uv` is in atlas texels normalized to 0..1.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct SpriteInstance {
     /// World-space center, rotation radians, size in world units.
     pub center: Vec2,
     pub rotation: f32,
     pub size: Vec2,
+    /// Normalized anchor (origin): `[0.5, 0.5]` centers the quad on
+    /// `center` (legacy default), `[0, 0]` pins the top-left corner -
+    /// bevy `Anchor` semantics, y-down.
+    pub anchor: Vec2,
+    /// Mirror around the anchor axes (left-walking hordes, etc.).
+    /// Solid canvas fills are flip-invariant; the GPU batch mirrors
+    /// geometry (UVs untouched).
+    pub flip_x: bool,
+    pub flip_y: bool,
     pub uv_min: Vec2,
     pub uv_max: Vec2,
     /// RGBA tint, same byte semantics as the legacy canvas path
@@ -80,6 +97,23 @@ pub struct SpriteInstance {
     pub color: [f32; 4],
     /// Atlas page index for multi-texture batches.
     pub page: u32,
+}
+
+impl Default for SpriteInstance {
+    fn default() -> Self {
+        Self {
+            center: Vec2::ZERO,
+            rotation: 0.0,
+            size: Vec2::ONE,
+            anchor: Vec2::new(0.5, 0.5),
+            flip_x: false,
+            flip_y: false,
+            uv_min: Vec2::ZERO,
+            uv_max: Vec2::ONE,
+            color: [1.0, 1.0, 1.0, 1.0],
+            page: 0,
+        }
+    }
 }
 
 /// World-anchored text floater (damage numbers, `+25`).
@@ -166,6 +200,48 @@ pub fn dp_to_world(
     ]
 }
 
+/// One painted frame's geometry, shared between [`Viewport2d`] /
+/// [`Viewport2dGpu`] (writers) and world-anchored siblings like
+/// [`ActorFrame`] (readers). Everything needed to map either direction,
+/// so board sprites, picks, and actor surfaces stay glued - including
+/// under camera shake.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameGeom {
+    /// Dp contain-fit of the world extent: `(scale, off_x, off_y)`.
+    pub fit: (f32, f32, f32),
+    /// Look-point shift in world units: `cam.center - world / 2`
+    /// (trauma shake included; zero when the camera is default).
+    pub look: [f32; 2],
+    /// Physical px per dp at paint time.
+    pub density: f32,
+    /// Painted viewport size in physical px (drives the GPU camera).
+    pub viewport_px: [f32; 2],
+}
+
+impl Default for FrameGeom {
+    fn default() -> Self {
+        Self {
+            fit: (1.0, 0.0, 0.0),
+            look: [0.0, 0.0],
+            density: 1.0,
+            viewport_px: [1.0, 1.0],
+        }
+    }
+}
+
+/// World-anchored surface rect in dp: `([off_x, off_y], [w, h])` for a
+/// `size` box centered on `center`. Pure; `ActorFrame` is its view form.
+pub fn surface_dp(center: [f32; 2], size: [f32; 2], geom: FrameGeom) -> ([f32; 2], [f32; 2]) {
+    let (s, ox, oy) = geom.fit;
+    (
+        [
+            ox + (center[0] - size[0] * 0.5 - geom.look[0]) * s,
+            oy + (center[1] - size[1] * 0.5 - geom.look[1]) * s,
+        ],
+        [size[0] * s, size[1] * s],
+    )
+}
+
 fn rgba8(c: [f32; 4]) -> Color {
     Color::from_rgba(
         (c[0].clamp(0.0, 1.0) * 255.0) as u8,
@@ -180,34 +256,40 @@ fn rgba8(c: [f32; 4]) -> Color {
 /// `Viewport3d`).
 ///
 /// Layout contract: fills its parent. Draws `background`, then sprites,
-/// then world texts, then the fullscreen tint — all through the dp
+/// then world texts, then the fullscreen tint - all through the dp
 /// contain-fit of [`FrameInput::world_size`]. Pointer presses are reported
-/// via `on_event` in world coords. The dp fit is published to `fit_out`
-/// for dp-space siblings (actor surfaces); rig layout and click mapping
-/// therefore share one transform by construction.
+/// via `on_event` in world coords. Each paint publishes a [`FrameGeom`]
+/// snapshot to `geom_out` for dp-space siblings ([`ActorFrame`]); the
+/// viewport, picks, and actor surfaces therefore share one transform by
+/// construction.
 #[allow(non_snake_case)] // Repose view convention (cf. resims `Viewport3d`).
 pub fn Viewport2d(
     input: FrameInput,
-    fit_out: Rc<Cell<(f32, f32, f32)>>,
+    geom_out: Rc<Cell<FrameGeom>>,
     on_event: impl Fn(PickEvent) + 'static,
 ) -> View {
     let input = Rc::new(input);
     let world_size = input.world_size;
     let cam_center = [input.cam.center.x, input.cam.center.y];
-    // Last painted frame: fit (dp), density. Events map through these so
-    // picks agree with what's on screen by construction.
-    let painted: Rc<Cell<((f32, f32, f32), f32)>> = Rc::new(Cell::new(((1.0, 0.0, 0.0), 1.0)));
-    let pick_state = painted.clone();
+    let pick_geom = geom_out.clone();
     let draw_input = input.clone();
+    let draw_geom = geom_out.clone();
 
     let modifier = Modifier::new().fill_max_size().on_pointer_down(
         move |ev: repose_core::input::PointerEvent| {
             // Region-local px -> window px (robust to a non-zero viewport
-            // origin) -> dp -> world through the painted fit.
+            // origin) -> dp -> world through the painted frame geometry.
             let w = ev.position_in_window();
-            let ((s, ox, oy), d) = pick_state.get();
-            let dp = [w.x / d, w.y / d];
-            let world = dp_to_world(dp, world_size, cam_center, (s, ox, oy));
+            let g = pick_geom.get();
+            let world = dp_to_world(
+                [w.x / g.density, w.y / g.density],
+                world_size,
+                [
+                    g.look[0] + world_size[0] * 0.5,
+                    g.look[1] + world_size[1] * 0.5,
+                ],
+                g.fit,
+            );
             on_event(PickEvent::Click {
                 world: Vec2::new(world[0], world[1]),
                 screen: [w.x, w.y],
@@ -216,15 +298,22 @@ pub fn Viewport2d(
     );
     Canvas(modifier, move |scope: &mut DrawScope| {
         // DrawScope size is physical px (layout/paint run in px); the fit
-        // is dp (1 world unit == 1 dp). Convert down, publish dp, and
-        // scale back up once for drawing.
+        // is dp (1 world unit == 1 dp). Convert down, publish geometry,
+        // and scale back up once for drawing.
         let d = effective_density_scale();
         let fit = contain_fit(
             [scope.size.width / d, scope.size.height / d],
             draw_input.world_size,
         );
-        fit_out.set(fit);
-        painted.set((fit, d));
+        draw_geom.set(FrameGeom {
+            fit,
+            look: [
+                cam_center[0] - draw_input.world_size[0] * 0.5,
+                cam_center[1] - draw_input.world_size[1] * 0.5,
+            ],
+            density: d,
+            viewport_px: [scope.size.width, scope.size.height],
+        });
         let s = fit.0 * d;
         let project = |wx: f32, wy: f32| -> [f32; 2] {
             let [dx, dy] = world_to_dp(
@@ -248,9 +337,11 @@ pub fn Viewport2d(
             );
         }
         for spr in draw_input.sprites.iter() {
+            // Anchor-aware top-left (default anchor keeps legacy centering);
+            // solid fills are flip-invariant, so flip lives in the batch.
             let [tx, ty] = project(
-                spr.center.x - spr.size.x * 0.5,
-                spr.center.y - spr.size.y * 0.5,
+                spr.center.x - spr.anchor.x * spr.size.x,
+                spr.center.y - spr.anchor.y * spr.size.y,
             );
             scope.draw_rect(
                 Rect {
@@ -285,6 +376,149 @@ pub fn Viewport2d(
             );
         }
     })
+}
+
+/// GPU twin of [`Viewport2d`]: same snapshot in, same picks out, but
+/// sprites draw as textured atlas quads through [`SpriteBatch`].
+///
+/// Layout contract: fills its parent. The payload is rebuilt from the
+/// snapshot every frame (like the canvas draw closure): `prepare`
+/// rebuilds the batch, and camera from the last painted viewport (cold
+/// start falls back to [`FrameInput::viewport_px`]), and `paint`
+/// records the fresh viewport into `geom_out` and issues the shared
+/// draw calls. Atlas uploads ride along per frame; games drain their
+/// atlas queue once per frame, so each upload applies exactly once.
+/// Geometry crosses the render thread behind a mutex (`WgpuCallback`
+/// payloads must be `Send + Sync`), picks read it back on the UI side.
+/// Background, world texts, and tint stay canvas-view features for now:
+/// GPU consumers compose them as sibling views.
+#[allow(non_snake_case)]
+pub fn Viewport2dGpu(
+    input: FrameInput,
+    geom_out: Arc<Mutex<FrameGeom>>,
+    uploads: Vec<AtlasUpload>,
+    desc: BatchDesc,
+    on_event: impl Fn(PickEvent) + 'static,
+) -> View {
+    let input = Arc::new(input);
+    let world_size = input.world_size;
+    let pick_geom = geom_out.clone();
+    let payload = GpuViewport {
+        input: input.clone(),
+        geom: geom_out,
+        uploads,
+        desc,
+    };
+    let modifier = Modifier::new().fill_max_size().on_pointer_down(
+        move |ev: repose_core::input::PointerEvent| {
+            let w = ev.position_in_window();
+            let Ok(g) = pick_geom.lock() else {
+                return;
+            };
+            let world = dp_to_world(
+                [w.x / g.density, w.y / g.density],
+                world_size,
+                [
+                    g.look[0] + world_size[0] * 0.5,
+                    g.look[1] + world_size[1] * 0.5,
+                ],
+                g.fit,
+            );
+            on_event(PickEvent::Click {
+                world: Vec2::new(world[0], world[1]),
+                screen: [w.x, w.y],
+            });
+        },
+    );
+    Embedded(modifier, Callback::new(payload))
+}
+
+struct GpuViewport {
+    input: Arc<FrameInput>,
+    geom: Arc<Mutex<FrameGeom>>,
+    uploads: Vec<AtlasUpload>,
+    desc: BatchDesc,
+}
+
+impl WgpuCallback for GpuViewport {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        screen: &ScreenDescriptor,
+        resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let vp = self
+            .geom
+            .lock()
+            .map(|g| g.viewport_px)
+            .unwrap_or([1.0, 1.0]);
+        let vp = if vp[0] > 1.0 && vp[1] > 1.0 {
+            vp
+        } else {
+            self.input.viewport_px
+        };
+        let mut batch = SpriteBatch::new(self.desc);
+        batch.set_camera(screen_camera(vp));
+        for s in &self.input.sprites {
+            batch.push_sprite(s);
+        }
+        batch.extend_uploads(self.uploads.clone());
+        batch.prepare(device, queue, encoder, screen, resources)
+    }
+
+    fn paint(
+        &self,
+        info: repose_core::PaintCallbackInfo,
+        rpass: &mut wgpu::RenderPass<'static>,
+        resources: &CallbackResources,
+    ) {
+        // Fresh viewport geometry for picks + next frame's camera.
+        let d = info.pixels_per_point.max(0.0001);
+        let vp = [info.viewport.w, info.viewport.h];
+        let fit = contain_fit([vp[0] / d, vp[1] / d], self.input.world_size);
+        let cam = [self.input.cam.center.x, self.input.cam.center.y];
+        if let Ok(mut g) = self.geom.lock() {
+            *g = FrameGeom {
+                fit,
+                look: [
+                    cam[0] - self.input.world_size[0] * 0.5,
+                    cam[1] - self.input.world_size[1] * 0.5,
+                ],
+                density: d,
+                viewport_px: vp,
+            };
+        }
+        draw_batch(rpass, resources);
+    }
+}
+
+/// A world-anchored surface: `child` (painting in its own local coords)/// is boxed to a `size` rect centered on a world `center`, positioned
+/// through the viewport's [`FrameGeom`]. Siblings of [`Viewport2d`] -
+/// e.g. live actor surfaces - track sim positions without game-side unit
+/// math, glued to sprites and picks even under camera shake. `mirror_x`
+/// flips around the surface center (left-walking hordes reusing
+/// right-facing art).
+#[allow(non_snake_case)]
+pub fn ActorFrame(
+    center: [f32; 2],
+    size: [f32; 2],
+    geom: Rc<Cell<FrameGeom>>,
+    mirror_x: bool,
+    child: View,
+) -> View {
+    let ([ox, oy], [w, h]) = surface_dp(center, size, geom.get());
+    // `.absolute()` is load-bearing: without it taffy ignores the offsets
+    // and every surface stacks at the same fixed spot.
+    let mut modifier = Modifier::new()
+        .size(w, h)
+        .absolute()
+        .offset(Some(ox), Some(oy), None, None);
+    if mirror_x {
+        modifier = modifier.scale2(-1.0, 1.0);
+    }
+    UiBox(modifier).child(child)
 }
 
 #[cfg(test)]
@@ -324,6 +558,44 @@ mod tests {
         assert!(
             (back[0] - 400.0).abs() < 1e-4 && (back[1] - 300.0).abs() < 1e-4,
             "shifted round trip, got {back:?}"
+        );
+    }
+
+    #[test]
+    fn surface_dp_matches_board_point_under_shake() {
+        // Actor surfaces and board sprites share FrameGeom: the surface
+        // center must land exactly on the board-space point, including
+        // with a shifted look point (trauma shake).
+        let geom = FrameGeom {
+            fit: (1.0, 100.0, 0.0),
+            look: [0.0, 0.0],
+            density: 1.25,
+            viewport_px: [1250.0, 750.0],
+        };
+        let ([ox, oy], [w, h]) = surface_dp([400.0, 300.0], [64.0, 80.0], geom);
+        assert!(
+            (ox - 468.0).abs() < 1e-4 && (oy - 260.0).abs() < 1e-4,
+            "offset, got ({ox},{oy})"
+        );
+        assert!(
+            (w - 64.0).abs() < 1e-4 && (h - 80.0).abs() < 1e-4,
+            "size, got ({w},{h})"
+        );
+        // Surface center == board point for the same world pos.
+        let board = world_to_dp([400.0, 300.0], [800.0, 600.0], [400.0, 300.0], geom.fit);
+        assert!(
+            (ox + w * 0.5 - board[0]).abs() < 1e-4 && (oy + h * 0.5 - board[1]).abs() < 1e-4,
+            "surface glued to board point"
+        );
+        let shaken = FrameGeom {
+            look: [10.0, -10.0],
+            ..geom
+        };
+        let ([sx, sy], _) = surface_dp([400.0, 300.0], [64.0, 80.0], shaken);
+        let sboard = world_to_dp([400.0, 300.0], [800.0, 600.0], [410.0, 290.0], shaken.fit);
+        assert!(
+            (sx + w * 0.5 - sboard[0]).abs() < 1e-4 && (sy + h * 0.5 - sboard[1]).abs() < 1e-4,
+            "surface glued under shake"
         );
     }
 }

@@ -1,12 +1,13 @@
 // Instanced textured quads for the repame-sprite batch.
-//! Full pipeline (atlas management, instance upload, postfx hook) lands
-//! with the rozvp pilot; this file fixes the shader-side contract first:
-//! per-vertex corner + per-instance transform rows, uv rect, tint, page.
+//! Consumed by `batch.rs`: per-vertex corner + per-instance transform
+//! rows, uv rect, tint, page. The camera uniform maps y-down world
+//! space to clip, `page` selects the atlas array layer per instance.
 
 struct VertexOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) tint: vec4<f32>,
+    @location(2) page: f32,
 };
 
 struct Instance {
@@ -38,15 +39,12 @@ fn vs_main(@location(0) corner: vec2<f32>, inst: Instance) -> VertexOut {
     out.pos = camera.view_proj * vec4<f32>(world, 1.0);
     out.uv = mix(inst.uv_min, inst.uv_max, corner + vec2<f32>(0.5, 0.5));
     out.tint = inst.tint;
-    // `inst.page` selects the atlas layer in the fragment stage.
-    out.tint.a = out.tint.a + inst.page * 0.0;
+    out.page = inst.page;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    // Array-layer selection is threaded through properly once the atlas
-    // manager lands; single-page path keeps the contract compiling now.
-    let tex = textureSample(atlas, atlas_sampler, in.uv, 0);
+    let tex = textureSample(atlas, atlas_sampler, in.uv, i32(in.page + 0.5));
     return tex * in.tint;
 }

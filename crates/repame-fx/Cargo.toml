@@ -11,8 +11,8 @@ publish = false
 [dependencies]
 repame-sim.workspace = true
 repame-sprite.workspace = true
+repose-core.workspace = true
 rand.workspace = true
-easer.workspace = true
 noise.workspace = true
 serde.workspace = true
 glam.workspace = true

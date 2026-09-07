@@ -80,7 +80,7 @@ fn lerp_rgba(a: [f32; 4], b: [f32; 4], f: f32) -> [f32; 4] {
     ]
 }
 
-/// Size/alpha curve over life, via `easer` (Penner) functions.
+/// Size/alpha curve over life.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub enum EaseKind {
     #[default]
@@ -93,14 +93,14 @@ pub enum EaseKind {
 impl EaseKind {
     /// Ease life fraction 0..1 into curve value 0..1.
     pub fn apply(self, t: f32) -> f32 {
-        use easer::functions::{Back, Cubic, Easing, Linear, Quad};
-        let t = t.clamp(0.0, 1.0) as f64;
-        match self {
-            EaseKind::Linear => Linear::ease_in(t, 0.0, 1.0, 1.0) as f32,
-            EaseKind::QuadOut => Quad::ease_out(t, 0.0, 1.0, 1.0) as f32,
-            EaseKind::CubicOut => Cubic::ease_out(t, 0.0, 1.0, 1.0) as f32,
-            EaseKind::BackOut => Back::ease_out(t, 0.0, 1.0, 1.0) as f32,
-        }
+        use repose_core::animation::Easing;
+        let ease = match self {
+            EaseKind::Linear => Easing::Linear,
+            EaseKind::QuadOut => Easing::EaseOut,
+            EaseKind::CubicOut => Easing::CubicOut,
+            EaseKind::BackOut => Easing::BackOut,
+        };
+        ease.interpolate(t.clamp(0.0, 1.0))
     }
 }
 

@@ -1096,15 +1096,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
-name = "easer"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fba524f8b83c9c5bde02c2bb1627de9d1f81980489a6d54168cdfd08c258f917"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3474,13 +3465,13 @@ dependencies = [
 name = "repame-fx"
 version = "0.1.0"
 dependencies = [
- "easer",
  "getrandom 0.4.3",
  "glam 0.33.6",
  "noise",
  "rand 0.10.2",
  "repame-sim",
  "repame-sprite",
+ "repose-core",
  "serde",
 ]
 

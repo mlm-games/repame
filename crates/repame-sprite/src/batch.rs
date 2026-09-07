@@ -744,7 +744,7 @@ mod tests {
             255, 255, 255, 255,
         ];
         // Page 1: solid magenta.
-        let page1 = vec![255, 0, 255, 255].repeat(4);
+        let page1 = [255, 0, 255, 255].repeat(4);
         let mut batch = SpriteBatch::new(BatchDesc {
             layer_size: 2,
             layers: 2,

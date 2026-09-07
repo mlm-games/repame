@@ -74,7 +74,10 @@ mod tests {
     use repose_core::input::{Key, Modifiers};
 
     fn chord() -> Binding {
-        Binding::Key(repose_core::shortcuts::KeyChord::new(Key::Space, Modifiers::default()))
+        Binding::Key(repose_core::shortcuts::KeyChord::new(
+            Key::Space,
+            Modifiers::default(),
+        ))
     }
 
     #[test]

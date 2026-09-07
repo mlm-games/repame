@@ -30,8 +30,14 @@ impl PartialEq for Binding {
             }
             (Binding::Pad(a), Binding::Pad(b)) => a == b,
             (
-                Binding::Axis { axis: a, threshold: t },
-                Binding::Axis { axis: b, threshold: u },
+                Binding::Axis {
+                    axis: a,
+                    threshold: t,
+                },
+                Binding::Axis {
+                    axis: b,
+                    threshold: u,
+                },
             ) => a == b && t == u,
             _ => false,
         }

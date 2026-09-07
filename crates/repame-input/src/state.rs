@@ -6,15 +6,16 @@ use bevy_ecs::prelude::*;
 use repose_core::input::{GamepadAxis, GamepadButton, PointerButton};
 use repose_core::shortcuts::KeyChord;
 
+use super::ActionLike;
 use super::binding::Binding;
 use super::map::ActionMap;
-use super::ActionLike;
 
 /// Sim-side gameplay input: fed from repose events each frame, read by
 /// fixed-step systems each tick. Edges (`just_pressed`/`just_released`)
-/// live exactly one tick: call [`begin_tick`](Self::begin_tick) first in
-/// the schedule (see [`begin_tick_system`](super::begin_tick_system)),
-/// then feed events, then run gameplay systems.
+/// clear at the END of each tick ([`end_tick`](Self::end_tick),
+/// registered last), so compose-fed events survive until the tick's
+/// systems run. Frame-scope readers call
+/// [`clear_edges`](Self::clear_edges) after consuming.
 #[derive(Resource, Debug)]
 pub struct ActionState<A: ActionLike> {
     map: ActionMap<A>,
@@ -43,16 +44,30 @@ impl<A: ActionLike> ActionState<A> {
         &self.map
     }
 
-    /// Edge rollover for the new tick: edges clear, levels persist.
-    pub fn begin_tick(&mut self) {
+    /// Edge rollover for the tick end: edges clear, levels persist.
+    /// Frame-scope readers use [`clear_edges`](Self::clear_edges) instead.
+    pub fn end_tick(&mut self) {
         self.just_pressed.clear();
         self.just_released.clear();
     }
 
+    /// Clear edges outside the schedule (after frame-scope consumption).
+    pub fn clear_edges(&mut self) {
+        self.end_tick();
+    }
+
     /// Switch the active context set (phase gating, e.g. menu vs play).
     /// Empty set with contexts defined means only context-free actions fire.
+    /// Pending edges drop only when the set actually changes: re-setting
+    /// the same contexts every frame (the normal pump pattern) keeps them.
+    /// Levels (`pressed`) always track hardware truthfully.
     pub fn set_contexts(&mut self, contexts: &[&str]) {
-        self.active_contexts = contexts.iter().map(|s| s.to_string()).collect();
+        let next: HashSet<String> = contexts.iter().map(|s| s.to_string()).collect();
+        if next != self.active_contexts {
+            self.active_contexts = next;
+            self.just_pressed.clear();
+            self.just_released.clear();
+        }
     }
 
     fn live(&self, action: &A) -> bool {
@@ -60,9 +75,6 @@ impl<A: ActionLike> ActionState<A> {
     }
 
     fn press(&mut self, action: &A) {
-        if !self.live(action) {
-            return;
-        }
         if self.pressed.insert(action.clone()) {
             self.just_pressed.insert(action.clone());
         }
@@ -112,12 +124,18 @@ impl<A: ActionLike> ActionState<A> {
             .map
             .actions()
             .flat_map(|a| {
-                self.map.bindings_for(a).iter().filter_map(move |b| match b {
-                    Binding::Axis { axis: ba, threshold } if *ba == axis => {
-                        Some((a.clone(), Binding::axis_active(*threshold, value)))
-                    }
-                    _ => None,
-                })
+                self.map
+                    .bindings_for(a)
+                    .iter()
+                    .filter_map(move |b| match b {
+                        Binding::Axis {
+                            axis: ba,
+                            threshold,
+                        } if *ba == axis => {
+                            Some((a.clone(), Binding::axis_active(*threshold, value)))
+                        }
+                        _ => None,
+                    })
             })
             .collect();
         for (action, active) in flips {
@@ -134,14 +152,14 @@ impl<A: ActionLike> ActionState<A> {
         self.axes.get(&axis).copied().unwrap_or(0.0)
     }
 
-    /// Held (and not consumed).
+    /// Held (and live in the active context, not consumed).
     pub fn pressed(&self, action: &A) -> bool {
-        self.pressed.contains(action) && !self.consumed.contains(action)
+        self.pressed.contains(action) && self.live(action)
     }
 
-    /// Started this tick (and not consumed).
+    /// Started this tick (and live in the active context, not consumed).
     pub fn just_pressed(&self, action: &A) -> bool {
-        self.just_pressed.contains(action) && !self.consumed.contains(action)
+        self.just_pressed.contains(action) && self.live(action)
     }
 
     /// Released this tick.
@@ -196,18 +214,20 @@ mod tests {
     }
 
     #[test]
-    fn edges_live_one_tick() {
+    fn edges_clear_at_tick_end() {
         let mut st = ActionState::new(jump_map());
         st.key(&space(), true);
         assert!(st.just_pressed(&"jump"));
         assert!(st.pressed(&"jump"));
-        st.begin_tick();
+        // Edge survives (no schedule ran yet); systems read, then clear.
+        assert!(st.just_pressed(&"jump"));
+        st.end_tick();
         assert!(!st.just_pressed(&"jump"));
         assert!(st.pressed(&"jump"));
         st.key(&space(), false);
         assert!(st.just_released(&"jump"));
         assert!(!st.pressed(&"jump"));
-        st.begin_tick();
+        st.end_tick();
         assert!(!st.just_released(&"jump"));
     }
 
@@ -216,8 +236,9 @@ mod tests {
         let mut st = ActionState::new(jump_map());
         st.pad(GamepadButton::South, true);
         assert!(st.just_pressed(&"jump"));
+        st.end_tick();
         st.pad(GamepadButton::South, false);
-        st.begin_tick();
+        st.end_tick();
         st.key(&space(), true);
         assert!(st.just_pressed(&"jump"));
     }
@@ -264,6 +285,22 @@ mod tests {
         st.set_contexts(&["gameplay"]);
         st.key(&space(), true);
         assert!(st.pressed(&"jump"));
+    }
+
+    #[test]
+    fn context_switch_drops_pending_edges() {
+        let mut map = jump_map();
+        map.in_context("gameplay", "jump");
+        let mut st = ActionState::new(map);
+        st.set_contexts(&["gameplay"]);
+        st.key(&space(), true);
+        assert!(st.just_pressed(&"jump"));
+        st.set_contexts(&["menu"]);
+        assert!(!st.just_pressed(&"jump"));
+        assert!(!st.pressed(&"jump"));
+        st.key(&space(), false);
+        st.set_contexts(&["gameplay"]);
+        assert!(!st.just_released(&"jump"));
     }
 
     #[test]

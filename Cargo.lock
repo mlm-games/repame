@@ -3576,9 +3576,9 @@ dependencies = [
 
 [[package]]
 name = "repose-text"
-version = "0.29.1"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c215ffd65fb74fb8e5cf3c28eec039ce9179cade4101efc2f1cc883ad570af45"
+checksum = "58b06d303d245d92636f3f516522b1228276a91d1dcb3037e16739c8bb015af3"
 dependencies = [
  "font-awl",
  "js-sys",

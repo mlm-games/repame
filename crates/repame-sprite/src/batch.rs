@@ -109,6 +109,47 @@ pub fn instance_rows(
     )
 }
 
+/// UV rect for one cell of a sprite-sheet grid: `hframes` columns by
+/// `vframes` rows, `frame` counted row-major from the top-left. Out-of-range
+/// frames clamp to the last cell; degenerate grids yield the full texture.
+pub fn frame_uv(hframes: u32, vframes: u32, frame: u32) -> ([f32; 2], [f32; 2]) {
+    let hf = hframes.max(1);
+    let vf = vframes.max(1);
+    let f = frame.min(hf * vf - 1);
+    let col = f % hf;
+    let row = f / hf;
+    (
+        [col as f32 / hf as f32, row as f32 / vf as f32],
+        [(col + 1) as f32 / hf as f32, (row + 1) as f32 / vf as f32],
+    )
+}
+
+/// World-space axis-aligned bounds of a sprite quad: `([min_x, min_y],
+/// [max_x, max_y])`. Uses the same [`instance_rows`] math as the GPU batch,
+/// so the box matches the drawn quad (exact for unrotated sprites, the
+/// outer box for rotated ones). Useful for click hit-testing and layout.
+pub fn sprite_aabb(
+    center: [f32; 2],
+    size: [f32; 2],
+    rotation: f32,
+    anchor: [f32; 2],
+    flip_x: bool,
+    flip_y: bool,
+) -> ([f32; 2], [f32; 2]) {
+    let (row0, row1) = instance_rows(center, size, rotation, anchor, flip_x, flip_y);
+    let mut min = [f32::INFINITY, f32::INFINITY];
+    let mut max = [f32::NEG_INFINITY, f32::NEG_INFINITY];
+    for corner in [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]] {
+        let x = row0[0] * corner[0] + row0[1] * corner[1] + row0[3];
+        let y = row1[0] * corner[0] + row1[1] * corner[1] + row1[3];
+        min[0] = min[0].min(x);
+        min[1] = min[1].min(y);
+        max[0] = max[0].max(x);
+        max[1] = max[1].max(y);
+    }
+    (min, max)
+}
+
 /// Y-down orthographic camera: world (0,0) is the top-left of the
 /// viewport, matching canvas orientation by construction (same matrix
 /// `Camera2d::view_proj` builds).
@@ -663,6 +704,36 @@ mod tests {
         let br = apply(rows, [0.5, 0.5]);
         assert_eq!(tl, [368.0, 260.0]);
         assert_eq!(br, [432.0, 340.0]);
+    }
+
+    #[test]
+    fn frame_uv_indexes_row_major() {
+        // 4x2 sheet: frame 5 is column 1, row 1.
+        let (mn, mx) = frame_uv(4, 2, 5);
+        assert_eq!(mn, [0.25, 0.5]);
+        assert_eq!(mx, [0.5, 1.0]);
+        // First cell starts at the origin; clamping holds the last cell.
+        assert_eq!(frame_uv(4, 2, 0).0, [0.0, 0.0]);
+        assert_eq!(frame_uv(4, 2, 99), frame_uv(4, 2, 7));
+        assert_eq!(frame_uv(0, 0, 3), ([0.0, 0.0], [1.0, 1.0]));
+    }
+
+    #[test]
+    fn sprite_aabb_matches_unrotated_quad() {
+        let (mn, mx) = sprite_aabb([400.0, 300.0], [64.0, 80.0], 0.0, [0.5, 0.5], false, false);
+        assert_eq!(mn, [368.0, 260.0]);
+        assert_eq!(mx, [432.0, 340.0]);
+        // A quarter turn swaps the footprint: 64x80 becomes 80x64.
+        let (mn, mx) = sprite_aabb(
+            [0.0, 0.0],
+            [64.0, 80.0],
+            std::f32::consts::FRAC_PI_2,
+            [0.5, 0.5],
+            false,
+            false,
+        );
+        assert!((mn[0] + 40.0).abs() < 1e-4 && (mn[1] + 32.0).abs() < 1e-4);
+        assert!((mx[0] - 40.0).abs() < 1e-4 && (mx[1] - 32.0).abs() < 1e-4);
     }
 
     #[test]

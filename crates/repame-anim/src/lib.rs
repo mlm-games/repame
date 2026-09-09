@@ -220,6 +220,198 @@ pub fn frame_key_for(path: &str, frame: u32) -> AtlasId {
     frame_key(stem(path), frame)
 }
 
+/// What happens when playback reaches the end of the strip.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LoopMode {
+    /// Wrap to the start (and keep playing).
+    #[default]
+    Loop,
+    /// Hold the last frame and stop (emits finished once).
+    Once,
+    /// Bounce back and forth between the ends.
+    PingPong,
+}
+
+/// Frame player for one animation strip: owns timing state, reads its
+/// shape (`frames`, `fps`) from an [`AnimDef`]. The game advances it with
+/// variable frame time and reads [`AnimPlayer::frame`] for the catalog.
+///
+/// - `speed_scale = 1` plays at normal speed, `0.5` at half speed, `2` at
+///   double speed. A negative value plays in reverse; `0` freezes.
+/// - `frame` is the current cell index; `frame_progress` is `0..1` until
+///   the next cell (`1..0` when playing in reverse).
+/// - `play` resumes a paused animation; `play_backwards` flips to reverse
+///   (jumping to the last cell when stopped); `stop` resets to cell `0`.
+#[derive(Clone, Debug)]
+pub struct AnimPlayer {
+    frames: u32,
+    fps: f32,
+    pos: f32,
+    playing: bool,
+    speed_scale: f32,
+    loop_mode: LoopMode,
+    forward: bool,
+    finished: bool,
+}
+
+impl AnimPlayer {
+    /// New player at cell `0`, paused. Call [`AnimPlayer::play`] to start.
+    pub fn new(def: &AnimDef, loop_mode: LoopMode) -> Self {
+        Self {
+            frames: def.frames,
+            fps: def.fps,
+            pos: 0.0,
+            playing: false,
+            speed_scale: 1.0,
+            loop_mode,
+            forward: true,
+            finished: false,
+        }
+    }
+
+    /// Start (or resume) playing from the current position. Restarts from
+    /// cell `0` when a finished one-shot is replayed.
+    pub fn play(&mut self) {
+        if self.finished {
+            self.pos = 0.0;
+            self.forward = true;
+            self.finished = false;
+        }
+        self.playing = true;
+    }
+
+    /// Play in reverse: flips the direction and resumes. Jumps to the
+    /// last cell first when stopped or after a finished one-shot.
+    pub fn play_backwards(&mut self) {
+        if (!self.playing || self.finished) && self.frames > 0 {
+            self.pos = (self.frames.saturating_sub(1)) as f32;
+        }
+        self.forward = false;
+        self.finished = false;
+        self.playing = true;
+    }
+
+    /// Pause, keeping the current cell and progress. [`AnimPlayer::play`]
+    /// resumes from the same spot.
+    pub fn pause(&mut self) {
+        self.playing = false;
+    }
+
+    /// Stop and reset to cell `0`.
+    pub fn stop(&mut self) {
+        self.playing = false;
+        self.pos = 0.0;
+        self.forward = true;
+        self.finished = false;
+    }
+
+    /// Speed multiplier (negative plays in reverse, `0` freezes).
+    pub fn set_speed_scale(&mut self, s: f32) {
+        self.speed_scale = if s.is_finite() { s } else { 0.0 };
+    }
+
+    pub fn speed_scale(&self) -> f32 {
+        self.speed_scale
+    }
+
+    /// True while time advances (even at `speed_scale == 0`).
+    pub fn is_playing(&self) -> bool {
+        self.playing
+    }
+
+    /// True after a one-shot animation reaches its end.
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Current cell index.
+    pub fn frame(&self) -> u32 {
+        if self.frames == 0 {
+            return 0;
+        }
+        (self.pos.floor() as u32).min(self.frames - 1)
+    }
+
+    /// Progress `0..1` toward the next cell (`1..0` in reverse).
+    pub fn frame_progress(&self) -> f32 {
+        let f = (self.pos - self.pos.floor()).clamp(0.0, 1.0);
+        if self.backward() { 1.0 - f } else { f }
+    }
+
+    fn backward(&self) -> bool {
+        self.speed_scale < 0.0 || !self.forward
+    }
+
+    /// Set the cell and progress directly without resetting anything else.
+    /// Unlike [`AnimPlayer::stop`], playback state is preserved.
+    pub fn set_frame_and_progress(&mut self, frame: u32, progress: f32) {
+        if self.frames == 0 {
+            return;
+        }
+        let f = frame.min(self.frames - 1) as f32;
+        self.pos = (f + progress.clamp(0.0, 1.0)).clamp(0.0, (self.frames - 1) as f32);
+        self.finished = false;
+    }
+
+    /// Advance by `dt` seconds. Returns `(frame_changed, ended)`: `ended`
+    /// is true when a one-shot finishes or a looping animation wraps this
+    /// tick. No-op while paused, at `speed_scale == 0`, or on empty strips.
+    pub fn advance(&mut self, dt: f32) -> (bool, bool) {
+        if !self.playing || self.frames <= 1 || self.fps <= 0.0 {
+            return (false, false);
+        }
+        if !dt.is_finite() || dt <= 0.0 {
+            return (false, false);
+        }
+        let before = self.frame();
+        let step = dt * self.fps * self.speed_scale;
+        if step == 0.0 {
+            return (false, false);
+        }
+        let last = (self.frames - 1) as f32;
+        let pos_before = self.pos;
+        match self.loop_mode {
+            LoopMode::Loop => {
+                self.pos = (self.pos + step).rem_euclid(self.frames as f32);
+                let wrapped = if step > 0.0 {
+                    pos_before + step >= self.frames as f32
+                } else {
+                    pos_before + step < 0.0
+                };
+                (self.frame() != before, wrapped)
+            }
+            LoopMode::Once => {
+                self.pos += step;
+                if self.pos >= self.frames as f32 || self.pos < 0.0 {
+                    self.pos = if step > 0.0 { last } else { 0.0 };
+                    self.playing = false;
+                    self.finished = true;
+                    (self.frame() != before, true)
+                } else {
+                    (self.frame() != before, false)
+                }
+            }
+            LoopMode::PingPong => {
+                // Triangle wave with period 2*(N-1): 0..N-1..0.
+                let period = 2.0 * last;
+                let tri0 = if self.forward {
+                    self.pos
+                } else {
+                    period - self.pos
+                }
+                .rem_euclid(period);
+                let raw = tri0 + step;
+                let ended = raw >= period || raw < 0.0;
+                let tri = raw.rem_euclid(period);
+                self.forward = tri <= last;
+                self.pos = if self.forward { tri } else { period - tri };
+                self.pos = self.pos.clamp(0.0, last);
+                (self.frame() != before, ended)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +516,116 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn player_loops_and_reports_progress() {
+        let def = AnimDef {
+            frames: 4,
+            w: 16,
+            h: 16,
+            fps: 10.0,
+            xorigin: 8.0,
+            yorigin: 8.0,
+        };
+        let mut p = AnimPlayer::new(&def, LoopMode::Loop);
+        assert!(!p.is_playing());
+        p.play();
+        assert_eq!(p.frame(), 0);
+        assert_eq!(p.frame_progress(), 0.0);
+        // Half a cell at 10 fps.
+        let (changed, ended) = p.advance(0.05);
+        assert!(!changed && !ended);
+        assert!((p.frame_progress() - 0.5).abs() < 1e-6);
+        // Full wrap: 4 cells at 10 fps = 0.4 s per loop.
+        let mut looped = false;
+        for _ in 0..8 {
+            let (_, e) = p.advance(0.05);
+            looped |= e;
+        }
+        assert!(looped);
+        assert!(p.is_playing() && !p.is_finished());
+    }
+
+    #[test]
+    fn player_once_holds_last_frame() {
+        let def = AnimDef {
+            frames: 3,
+            w: 8,
+            h: 8,
+            fps: 10.0,
+            xorigin: 0.0,
+            yorigin: 0.0,
+        };
+        let mut p = AnimPlayer::new(&def, LoopMode::Once);
+        p.play();
+        let mut ended = false;
+        for _ in 0..10 {
+            let (_, e) = p.advance(0.05);
+            ended |= e;
+        }
+        assert!(ended);
+        assert_eq!(p.frame(), 2);
+        assert!(p.is_finished() && !p.is_playing());
+        // Replay restarts from cell 0.
+        p.play();
+        assert_eq!(p.frame(), 0);
+        assert!(!p.is_finished());
+    }
+
+    #[test]
+    fn player_pingpong_bounces() {
+        let def = AnimDef {
+            frames: 3,
+            w: 8,
+            h: 8,
+            fps: 10.0,
+            xorigin: 0.0,
+            yorigin: 0.0,
+        };
+        let mut p = AnimPlayer::new(&def, LoopMode::PingPong);
+        p.play();
+        // 0.1 s per cell: 0,1,2,1,0,1,...
+        let mut seq = vec![p.frame()];
+        for _ in 0..5 {
+            p.advance(0.1);
+            seq.push(p.frame());
+        }
+        assert_eq!(seq, vec![0, 1, 2, 1, 0, 1]);
+    }
+
+    #[test]
+    fn player_speed_scale_and_backwards() {
+        let def = AnimDef {
+            frames: 4,
+            w: 8,
+            h: 8,
+            fps: 10.0,
+            xorigin: 0.0,
+            yorigin: 0.0,
+        };
+        let mut p = AnimPlayer::new(&def, LoopMode::Loop);
+        p.set_speed_scale(2.0);
+        p.play();
+        p.advance(0.05);
+        assert_eq!(p.frame(), 1, "double speed advances a full cell");
+        p.set_speed_scale(-1.0);
+        p.advance(0.05);
+        assert_eq!(p.frame(), 0, "reverse steps back");
+        // Reverse progress runs 1 -> 0.
+        p.set_frame_and_progress(1, 0.5);
+        assert!((p.frame_progress() - 0.5).abs() < 1e-6);
+        p.play_backwards();
+        assert_eq!(p.frame(), 1, "backwards resumes in place while playing");
+        p.advance(0.1);
+        assert_eq!(p.frame(), 0, "reverse steps back");
+        // Fresh backwards play starts at the last cell.
+        let mut q = AnimPlayer::new(&def, LoopMode::Loop);
+        q.play_backwards();
+        assert_eq!(q.frame(), 3);
+        assert!(q.is_playing());
+        p.stop();
+        assert_eq!(p.frame(), 0);
+        assert!(!p.is_playing());
+    }
     /// Full nt catalog pack: proves the real content budget. Reads
     /// `$NT_ASSETS/images/anims.json` (else the nt checkout next to
     /// Repos); skips gracefully when absent.

@@ -25,7 +25,7 @@ mod state;
 
 pub use audio::Audio;
 pub use bank::{CueDef, SoundBank, Variation, spatial_2d};
-pub use channels::{AudioChannel, AudioChannels};
+pub use channels::{AudioChannel, AudioChannels, db_to_linear, linear_to_db};
 pub use command::{
     EngineEvent, GameAudioLink, PlayCmd, RealtimeCommand, SharedFrames, ThreadAudioLink, audio_link,
 };
@@ -39,6 +39,6 @@ pub use state::AudioState;
 pub mod prelude {
     pub use crate::{
         Audio, AudioChannel, AudioChannels, AudioFormat, AudioSource, AudioState, CueDef, Music,
-        RigAudio, SoundBank, StemDef, Variation,
+        RigAudio, SoundBank, StemDef, Variation, db_to_linear, linear_to_db,
     };
 }

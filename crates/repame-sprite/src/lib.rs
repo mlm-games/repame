@@ -21,7 +21,7 @@ use repose_ui::ViewExt;
 
 pub mod batch;
 use batch::draw_batch;
-pub use batch::{AtlasUpload, BatchDesc, SpriteBatch, TextureFilter, instance_rows, screen_camera};
+pub use batch::{AtlasUpload, BatchDesc, SpriteBatch, TextureFilter, frame_uv, instance_rows, screen_camera, sprite_aabb};
 
 pub mod fullscreen;
 pub use fullscreen::{FullscreenDesc, FullscreenPass, FullscreenTexture};
@@ -34,6 +34,9 @@ pub mod post;
 pub struct Camera2d {
     /// World-space center the camera looks at.
     pub center: Vec2,
+    /// Shake/look-around offset added to `center`. Applied after limits,
+    /// so trauma shake can push past them.
+    pub offset: Vec2,
     /// World units per screen pixel at zoom 1. Combined with viewport size
     /// to build the ortho projection.
     pub units_per_pixel: f32,
@@ -44,15 +47,72 @@ impl Default for Camera2d {
     fn default() -> Self {
         Self {
             center: Vec2::ZERO,
+            offset: Vec2::ZERO,
             units_per_pixel: 1.0,
             zoom: 1.0,
         }
     }
 }
 
+/// Scroll limits in world units.
+/// Clamp applies to `center` only — `offset` bypasses limits by design.
+#[derive(Clone, Copy, Debug)]
+pub struct CameraLimits {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub enabled: bool,
+}
+
+impl Default for CameraLimits {
+    fn default() -> Self {
+        Self {
+            left: 0.0,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            enabled: false,
+        }
+    }
+}
+
+/// Clamp a look center into scroll limits (no-op when disabled or
+/// inverted). Pure, so games and tests can pin it.
+pub fn apply_limits(center: [f32; 2], limits: CameraLimits) -> [f32; 2] {
+    if !limits.enabled {
+        return center;
+    }
+    [
+        center[0].clamp(limits.left.min(limits.right), limits.left.max(limits.right)),
+        center[1].clamp(limits.top.min(limits.bottom), limits.top.max(limits.bottom)),
+    ]
+}
+
+/// Exponential smoothing toward a target at `speed` world units per
+/// second. `speed <= 0` snaps; `dt <= 0` holds.
+pub fn smooth_toward(current: [f32; 2], target: [f32; 2], speed: f32, dt: f32) -> [f32; 2] {
+    if dt <= 0.0 {
+        return current;
+    }
+    if speed <= 0.0 || !speed.is_finite() {
+        return target;
+    }
+    let t = 1.0 - (-speed * dt).exp();
+    [
+        current[0] + (target[0] - current[0]) * t,
+        current[1] + (target[1] - current[1]) * t,
+    ]
+}
+
 impl Camera2d {
-    /// Y-down view-projection (Godot/canvas convention: world +y points
-    /// screen-down). Guards degenerate inputs (zero viewport/zoom) so a
+    /// Effective look point: `center + offset`. All framing (canvas, GPU,
+    /// picks) uses this, so shake/look-around rides the offset channel.
+    pub fn effective_center(&self) -> [f32; 2] {
+        [self.center.x + self.offset.x, self.center.y + self.offset.y]
+    }
+
+    /// Y-down view-projection: world +y points screen-down. Guards degenerate inputs (zero viewport/zoom) so a
     /// bad snapshot can never div-by-zero; callers driving viewports
     /// should prefer [`fit_view_proj`] (contain-fit + look), which is the
     /// single framing contract canvas, GPU, and picks share.
@@ -71,7 +131,11 @@ impl Camera2d {
             -1000.0,
             1000.0,
         );
-        let view = Mat4::from_translation(Vec3::new(-self.center.x, -self.center.y, 0.0));
+        let view = Mat4::from_translation(Vec3::new(
+            -(self.center.x + self.offset.x),
+            -(self.center.y + self.offset.y),
+            0.0,
+        ));
         proj * view
     }
 
@@ -79,7 +143,8 @@ impl Camera2d {
     /// Guards zero viewports (returns the look point instead of NaN).
     pub fn screen_to_world(&self, viewport_px: [f32; 2], px: [f32; 2]) -> Vec2 {
         if viewport_px[0] <= 0.0 || viewport_px[1] <= 0.0 {
-            return self.center;
+            let [cx, cy] = self.effective_center();
+            return Vec2::new(cx, cy);
         }
         let ndc = Vec2::new(
             (px[0] / viewport_px[0]) * 2.0 - 1.0,
@@ -149,9 +214,9 @@ pub struct WorldText {
 ///
 /// Framing contract (single source of truth): canvas, GPU, and picks all
 /// derive from `world_size` + `cam` through [`effective_fit`] /
-/// [`fit_view_proj`] / [`world_to_dp`]. `cam.center` is the look point
-/// (rest/shake included); `cam.zoom` / `cam.units_per_pixel` scale the
-/// fit uniformly on every backend.
+/// [`fit_view_proj`] / [`world_to_dp`]. `cam.effective_center()` is the
+/// look point (rest + `offset` shake included); `cam.zoom` /
+/// `cam.units_per_pixel` scale the fit uniformly on every backend.
 #[derive(Clone, Default, Debug)]
 pub struct FrameInput {
     pub cam: Camera2d,
@@ -319,8 +384,8 @@ pub struct FrameGeom {
     /// Effective dp fit of the world extent: `(scale, off_x, off_y)` from
     /// [`effective_fit`] (contain-fit scaled by zoom/units_per_pixel).
     pub fit: (f32, f32, f32),
-    /// Look-point shift in world units: `cam.center - world / 2`
-    /// (trauma shake included; zero when the camera is default).
+    /// Look-point shift in world units: `cam.effective_center() - world / 2`
+    /// (rest + offset shake included; zero when the camera is default).
     pub look: [f32; 2],
     /// Physical px per dp at paint time.
     pub density: f32,
@@ -403,7 +468,7 @@ pub fn Viewport2d(
     Canvas(modifier, move |scope: &mut DrawScope| {
         let d = effective_density_scale();
         let cam = draw_input.cam;
-        let cam_center = [cam.center.x, cam.center.y];
+        let cam_center = cam.effective_center();
         let fit = effective_fit(
             [scope.size.width / d, scope.size.height / d],
             draw_input.world_size,
@@ -600,7 +665,7 @@ impl WgpuCallback for GpuViewport {
             self.input.viewport_px
         };
         let fit = effective_fit(dp, self.input.world_size, &self.input.cam);
-        let cam_center = [self.input.cam.center.x, self.input.cam.center.y];
+        let cam_center = self.input.cam.effective_center();
         let mut batch = SpriteBatch::new(self.desc);
         batch.set_camera(fit_view_proj(dp, self.input.world_size, cam_center, fit));
         for s in &self.input.sprites {
@@ -657,7 +722,7 @@ impl WgpuCallback for GpuViewport {
             self.input.world_size,
             &self.input.cam,
         );
-        let cam = [self.input.cam.center.x, self.input.cam.center.y];
+        let cam = self.input.cam.effective_center();
         if let Ok(mut g) = self.geom.lock() {
             *g = FrameGeom {
                 fit,
@@ -777,6 +842,7 @@ mod tests {
         }];
         let cam = Camera2d {
             center: Vec2::new(64.0, 64.0),
+            offset: Vec2::ZERO,
             units_per_pixel: 0.5,
             zoom: 1.0,
         };
@@ -917,6 +983,7 @@ mod tests {
     fn camera_guards_never_div_by_zero() {
         let bad = Camera2d {
             center: Vec2::ZERO,
+            offset: Vec2::ZERO,
             units_per_pixel: 0.0,
             zoom: 0.0,
         };
@@ -929,6 +996,7 @@ mod tests {
     fn fit_matrix_canvas_gpu_picks_agree() {
         let cam = Camera2d {
             center: Vec2::new(410.0, 290.0),
+            offset: Vec2::ZERO,
             units_per_pixel: 1.0,
             zoom: 2.0,
         };
@@ -936,7 +1004,7 @@ mod tests {
         let density = 1.25;
         let vp_phys = [1250.0, 750.0];
         let canvas_dp = [vp_phys[0] / density, vp_phys[1] / density];
-        let cam_center = [cam.center.x, cam.center.y];
+        let cam_center = cam.effective_center();
         let fit = effective_fit(canvas_dp, world_size, &cam);
         assert!((fit.0 - 2.0).abs() < 1e-4, "effective fit, got {fit:?}");
         let vp = fit_view_proj(canvas_dp, world_size, cam_center, fit);
@@ -983,5 +1051,61 @@ mod tests {
             (wx - 0.0).abs() < 1e-4 && (wy - 60.0).abs() < 1e-4,
             "local pick, got ({wx},{wy})"
         );
+    }
+
+    #[test]
+    fn offset_shifts_look_and_draw_together() {
+        // Shake rides the offset channel: the same world point draws and
+        // picks with the offset applied.
+        let world_size = [800.0, 600.0];
+        let canvas_dp = [1000.0, 600.0];
+        let mut cam = Camera2d {
+            center: Vec2::new(400.0, 300.0),
+            offset: Vec2::new(10.0, -10.0),
+            units_per_pixel: 1.0,
+            zoom: 1.0,
+        };
+        assert_eq!(cam.effective_center(), [410.0, 290.0]);
+        let fit = effective_fit(canvas_dp, world_size, &cam);
+        let dp = world_to_dp([400.0, 300.0], world_size, cam.effective_center(), fit);
+        let back = dp_to_world(dp, world_size, cam.effective_center(), fit);
+        assert!((back[0] - 400.0).abs() < 1e-4 && (back[1] - 300.0).abs() < 1e-4);
+        cam.offset = Vec2::ZERO;
+        let dp2 = world_to_dp([400.0, 300.0], world_size, cam.effective_center(), fit);
+        // Offset 10 world units at scale 1 moves the drawing by 10 dp.
+        assert!((dp[0] - dp2[0] + 10.0).abs() < 1e-4);
+        assert!((dp[1] - dp2[1] - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn limits_clamp_center_not_offset() {
+        let limits = CameraLimits {
+            left: 100.0,
+            top: 100.0,
+            right: 700.0,
+            bottom: 500.0,
+            enabled: true,
+        };
+        assert_eq!(apply_limits([50.0, 300.0], limits), [100.0, 300.0]);
+        assert_eq!(apply_limits([400.0, 900.0], limits), [400.0, 500.0]);
+        assert_eq!(apply_limits([400.0, 300.0], limits), [400.0, 300.0]);
+        assert_eq!(
+            apply_limits([50.0, 50.0], CameraLimits { enabled: false, ..limits }),
+            [50.0, 50.0]
+        );
+    }
+
+    #[test]
+    fn smoothing_converges_without_overshoot() {
+        let target = [100.0, 0.0];
+        let p1 = smooth_toward([0.0, 0.0], target, 5.0, 0.016);
+        assert!(p1[0] > 0.0 && p1[0] < 100.0, "eases forward, got {p1:?}");
+        let mut p = [0.0, 0.0];
+        for _ in 0..600 {
+            p = smooth_toward(p, target, 5.0, 0.016);
+        }
+        assert!((p[0] - 100.0).abs() < 1e-2, "settles, got {p:?}");
+        assert_eq!(smooth_toward([1.0, 2.0], target, 0.0, 0.016), target);
+        assert_eq!(smooth_toward([1.0, 2.0], target, 5.0, 0.0), [1.0, 2.0]);
     }
 }

@@ -89,7 +89,9 @@ impl Audio {
     }
 
     /// Voice ids that completed since the last call (reap accounting,
-    /// music handoff).
+    /// music handoff). Only natural completions appear here: voices cut
+    /// short by `stop` never report, so completion-gated logic must also
+    /// handle the stopped path.
     pub fn take_finished(&mut self) -> Vec<u64> {
         std::mem::take(&mut self.finished)
     }

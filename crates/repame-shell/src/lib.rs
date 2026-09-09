@@ -117,7 +117,6 @@ impl GamepadPoller {
                 GamepadEvent::Button { id, .. } | GamepadEvent::Axis { id, .. } => {
                     self.connected.insert(id.0);
                 }
-                _ => {}
             }
         }
         events

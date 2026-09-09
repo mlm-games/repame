@@ -98,6 +98,18 @@ impl Sim {
         self.accumulator
     }
 
+    /// Render-interpolation fraction: `accumulator / step` clamped to
+    /// `0..1`. The sim itself does not interpolate — snapshots read
+    /// the last ticked state — but games can use this to blend the two
+    /// most recent snapshots for smooth rendering.
+    pub fn alpha(&self) -> f32 {
+        let step = self.step.as_secs_f64();
+        if step <= 0.0 {
+            return 0.0;
+        }
+        (self.accumulator.as_secs_f64() / step).clamp(0.0, 1.0) as f32
+    }
+
     /// Run the schedule exactly once, advancing sim time by one step.
     /// Tick-model games (integer logic steps) drive this directly instead
     /// of the wall-clock [`Sim::step`] accumulator.
@@ -131,5 +143,14 @@ mod tests {
         let ran = sim.step(Duration::from_secs(10));
         assert_eq!(ran, 4);
         assert_eq!(sim.leftover(), Duration::ZERO);
+    }
+
+    #[test]
+    fn alpha_is_interpolation_fraction() {
+        let mut sim = Sim::new(Duration::from_millis(16));
+        sim.step(Duration::from_millis(8));
+        assert!((sim.alpha() - 0.5).abs() < 1e-6, "got {}", sim.alpha());
+        sim.step(Duration::from_millis(8));
+        assert!(sim.alpha() < 1e-6, "step boundary, got {}", sim.alpha());
     }
 }

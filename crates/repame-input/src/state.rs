@@ -181,6 +181,55 @@ impl<A: ActionLike> ActionState<A> {
         self.axes.get(&axis).copied().unwrap_or(0.0)
     }
 
+    /// Action strength in `0..1`: `1.0` for held buttons, `|value|`
+    /// clamped for active axis bindings (strongest binding wins), `0.0`
+    /// when inactive or gated by context/consumption.
+    pub fn strength(&self, action: &A) -> f32 {
+        if !self.live(action) {
+            return 0.0;
+        }
+        let mut best = 0.0f32;
+        for b in self.map.bindings_for(action) {
+            let s = match b {
+                Binding::Key(_) | Binding::Mouse(_) | Binding::Pad(_) => {
+                    if self.binding_down(b) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                Binding::Axis { axis, threshold } => {
+                    let v = self.axis_value(*axis);
+                    if Binding::axis_active(*threshold, v) {
+                        v.abs().clamp(0.0, 1.0).max(1e-6)
+                    } else {
+                        0.0
+                    }
+                }
+            };
+            best = best.max(s);
+        }
+        best.clamp(0.0, 1.0)
+    }
+
+    /// Signed 2D input vector from four actions: `x = pos_x - neg_x`,
+    /// `y = pos_y - neg_y` from strengths, deadzoned by `deadzone` and
+    /// length-clamped to `1.0` (analog-friendly movement from d-pad or
+    /// sticks).
+    pub fn vector(&self, neg_x: &A, pos_x: &A, neg_y: &A, pos_y: &A, deadzone: f32) -> (f32, f32) {
+        let mut x = self.strength(pos_x) - self.strength(neg_x);
+        let mut y = self.strength(pos_y) - self.strength(neg_y);
+        let len = (x * x + y * y).sqrt();
+        if len < deadzone.max(0.0) {
+            return (0.0, 0.0);
+        }
+        if len > 1.0 {
+            x /= len;
+            y /= len;
+        }
+        (x, y)
+    }
+
     /// Held (and live in the active context, not consumed).
     pub fn pressed(&self, action: &A) -> bool {
         self.pressed.contains(action) && self.live(action)
@@ -367,5 +416,47 @@ mod tests {
         assert!(st.just_released(&"jump"));
         st.consume(&"jump");
         assert!(!st.just_released(&"jump"));
+    }
+
+    #[test]
+    fn strength_and_vector_behaviour() {
+        use repose_core::input::Key;
+        let mut map = ActionMap::new();
+        map.bind(
+            "right",
+            Binding::Axis {
+                axis: GamepadAxis::LeftStickX,
+                threshold: 0.2,
+            },
+        );
+        map.bind(
+            "left",
+            Binding::Axis {
+                axis: GamepadAxis::LeftStickX,
+                threshold: -0.2,
+            },
+        );
+        map.bind(
+            "jump",
+            Binding::Key(KeyChord::new(Key::Space, Modifiers::default())),
+        );
+        let mut st = ActionState::new(map);
+        // Rest: all zero.
+        assert_eq!(st.strength(&"right"), 0.0);
+        assert_eq!(st.vector(&"left", &"right", &"jump", &"jump", 0.2), (0.0, 0.0));
+        // Half deflection right: proportional strength.
+        st.axis(GamepadAxis::LeftStickX, 0.5);
+        assert!((st.strength(&"right") - 0.5).abs() < 1e-6);
+        assert_eq!(st.strength(&"left"), 0.0);
+        let (x, y) = st.vector(&"left", &"right", &"jump", &"jump", 0.2);
+        assert!((x - 0.5).abs() < 1e-6 && y.abs() < 1e-6);
+        // Vector deadzone snaps small-but-active sticks to zero.
+        assert_eq!(st.vector(&"left", &"right", &"jump", &"jump", 0.6), (0.0, 0.0));
+        // Below deadzone the vector snaps to zero even if bound.
+        st.axis(GamepadAxis::LeftStickX, 0.1);
+        assert_eq!(st.strength(&"right"), 0.0);
+        // Button: full strength.
+        st.key(&space(), true);
+        assert_eq!(st.strength(&"jump"), 1.0);
     }
 }

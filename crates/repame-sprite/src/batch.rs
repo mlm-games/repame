@@ -110,8 +110,26 @@ pub fn instance_rows(
 }
 
 /// UV rect for one cell of a sprite-sheet grid: `hframes` columns by
-/// `vframes` rows, `frame` counted row-major from the top-left. Out-of-range
-/// frames clamp to the last cell; degenerate grids yield the full texture.
+/// `vframes` rows, `frame` counted row-major from the top-left.
+///
+/// Returns `(uv_min, uv_max)` normalized to `0..1`, ready for
+/// [`SpriteInstance`](super::SpriteInstance) `uv_min`/`uv_max`. The grid
+/// covers the whole texture: cell `(col, row)` spans
+/// `col/hframes..(col+1)/hframes` by `row/vframes..(row+1)/vframes`.
+///
+/// - Out-of-range `frame` values clamp to the last cell instead of
+///   wrapping; advance the frame index with your animation clock.
+/// - Degenerate grids (`hframes` or `vframes` of `0`) yield the full
+///   texture, matching a single-frame sprite.
+///
+/// ```rust
+/// use repame_sprite::{frame_uv, sprite_aabb};
+///
+/// // 4x2 sheet: frame 5 is column 1, row 1.
+/// let (mn, mx) = frame_uv(4, 2, 5);
+/// assert_eq!(mn, [0.25, 0.5]);
+/// assert_eq!(mx, [0.5, 1.0]);
+/// ```
 pub fn frame_uv(hframes: u32, vframes: u32, frame: u32) -> ([f32; 2], [f32; 2]) {
     let hf = hframes.max(1);
     let vf = vframes.max(1);
@@ -124,10 +142,23 @@ pub fn frame_uv(hframes: u32, vframes: u32, frame: u32) -> ([f32; 2], [f32; 2]) 
     )
 }
 
-/// World-space axis-aligned bounds of a sprite quad: `([min_x, min_y],
-/// [max_x, max_y])`. Uses the same [`instance_rows`] math as the GPU batch,
-/// so the box matches the drawn quad (exact for unrotated sprites, the
-/// outer box for rotated ones). Useful for click hit-testing and layout.
+/// World-space axis-aligned bounds of a sprite quad.
+///
+/// Returns `([min_x, min_y], [max_x, max_y])` through the same
+/// [`instance_rows`] math as the GPU batch, so the box matches the drawn
+/// quad: exact for unrotated sprites, the outer box for rotated ones.
+/// `flip_x`/`flip_y` do not change the box (mirroring preserves extents).
+///
+/// Useful for click hit-testing and layout: a press at world point `p`
+/// hits the sprite when `min <= p <= max`.
+///
+/// ```rust
+/// use repame_sprite::{frame_uv, sprite_aabb};
+///
+/// let (mn, mx) = sprite_aabb([400.0, 300.0], [64.0, 80.0], 0.0, [0.5, 0.5], false, false);
+/// assert_eq!(mn, [368.0, 260.0]);
+/// assert_eq!(mx, [432.0, 340.0]);
+/// ```
 pub fn sprite_aabb(
     center: [f32; 2],
     size: [f32; 2],

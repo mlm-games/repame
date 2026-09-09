@@ -223,25 +223,45 @@ pub fn frame_key_for(path: &str, frame: u32) -> AtlasId {
 /// What happens when playback reaches the end of the strip.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LoopMode {
-    /// Wrap to the start (and keep playing).
+    /// Wrap to the start and keep playing. The default: walk cycles, idle
+    /// loops, spinning coins.
     #[default]
     Loop,
-    /// Hold the last frame and stop (emits finished once).
+    /// Hold the last cell and stop. Reports finished once through the
+    /// `ended` flag of [`advance`](AnimPlayer::advance) and stays there
+    /// until [`play`](AnimPlayer::play) restarts it: one-shot attacks,
+    /// death animations, UI pop-ins.
     Once,
-    /// Bounce back and forth between the ends.
+    /// Bounce between the ends (cell `0` to cell `N-1` and back) and keep
+    /// playing: patrol pacing, bobbing pickups, swinging lanterns.
     PingPong,
 }
 
-/// Frame player for one animation strip: owns timing state, reads its
-/// shape (`frames`, `fps`) from an [`AnimDef`]. The game advances it with
-/// variable frame time and reads [`AnimPlayer::frame`] for the catalog.
+/// Frame player for one animation strip.
 ///
-/// - `speed_scale = 1` plays at normal speed, `0.5` at half speed, `2` at
-///   double speed. A negative value plays in reverse; `0` freezes.
-/// - `frame` is the current cell index; `frame_progress` is `0..1` until
-///   the next cell (`1..0` when playing in reverse).
-/// - `play` resumes a paused animation; `play_backwards` flips to reverse
-///   (jumping to the last cell when stopped); `stop` resets to cell `0`.
+/// Owns playback timing over a strip shape (`frames` cells at `fps`,
+/// copied from an [`AnimDef`] at construction). The game drives it with
+/// variable frame time and reads [`frame`](AnimPlayer::frame) to look up
+/// the atlas cell in the catalog:
+///
+/// ```ignore
+/// player.advance(dt);
+/// let uv = catalog.uv("hero", player.frame() as i32).unwrap();
+/// ```
+///
+/// Playback state at a glance:
+///
+/// - [`play`](AnimPlayer::play) starts or resumes; [`pause`](AnimPlayer::pause)
+///   freezes in place; [`stop`](AnimPlayer::stop) resets to cell `0`.
+/// - `speed_scale` multiplies the rate: `1` is normal speed, `0.5` half
+///   speed, `2` double speed. A negative value plays in reverse and `0`
+///   freezes the frame while staying "playing" (see
+///   [`is_playing`](AnimPlayer::is_playing)).
+/// - [`frame`](AnimPlayer::frame) is the current cell; [`frame_progress`](AnimPlayer::frame_progress)
+///   is `0..1` toward the next cell (`1..0` in reverse).
+///
+/// **Note:** a player snapshots `frames`/`fps` at construction. Streaming a
+/// replacement definition for the same name needs a fresh player.
 #[derive(Clone, Debug)]
 pub struct AnimPlayer {
     frames: u32,
@@ -255,7 +275,10 @@ pub struct AnimPlayer {
 }
 
 impl AnimPlayer {
-    /// New player at cell `0`, paused. Call [`AnimPlayer::play`] to start.
+    /// New player over `def`'s strip with the given loop behavior.
+    ///
+    /// Starts paused at cell `0` with `speed_scale` of `1.0`. Call
+    /// [`play`](AnimPlayer::play) to start the clock.
     pub fn new(def: &AnimDef, loop_mode: LoopMode) -> Self {
         Self {
             frames: def.frames,
@@ -269,8 +292,11 @@ impl AnimPlayer {
         }
     }
 
-    /// Start (or resume) playing from the current position. Restarts from
-    /// cell `0` when a finished one-shot is replayed.
+    /// Start (or resume) playing from the current position.
+    ///
+    /// Resuming a paused animation continues from the kept cell and
+    /// progress. Replaying a finished one-shot ([`is_finished`](AnimPlayer::is_finished))
+    /// restarts it from cell `0` first.
     pub fn play(&mut self) {
         if self.finished {
             self.pos = 0.0;
@@ -280,8 +306,13 @@ impl AnimPlayer {
         self.playing = true;
     }
 
-    /// Play in reverse: flips the direction and resumes. Jumps to the
-    /// last cell first when stopped or after a finished one-shot.
+    /// Play in reverse: flips the direction and resumes from the current
+    /// cell.
+    ///
+    /// Jumps to the last cell first when stopped or after a finished
+    /// one-shot, so a fresh player starts at the end of the strip. This is
+    /// shorthand for a negative [`speed_scale`](AnimPlayer::set_speed_scale)
+    /// starting at the far end.
     pub fn play_backwards(&mut self) {
         if (!self.playing || self.finished) && self.frames > 0 {
             self.pos = (self.frames.saturating_sub(1)) as f32;
@@ -291,13 +322,20 @@ impl AnimPlayer {
         self.playing = true;
     }
 
-    /// Pause, keeping the current cell and progress. [`AnimPlayer::play`]
-    /// resumes from the same spot.
+    /// Pause, keeping the current cell and progress.
+    ///
+    /// [`play`](AnimPlayer::play) (or [`play_backwards`](AnimPlayer::play_backwards))
+    /// resumes from the exact same spot. See also [`stop`](AnimPlayer::stop),
+    /// which resets instead of holding.
     pub fn pause(&mut self) {
         self.playing = false;
     }
 
     /// Stop and reset to cell `0`.
+    ///
+    /// Clears the finished flag, restores forward direction, and zeroes the
+    /// progress. The `speed_scale` is kept. See also
+    /// [`pause`](AnimPlayer::pause), which holds the position instead.
     pub fn stop(&mut self) {
         self.playing = false;
         self.pos = 0.0;
@@ -305,26 +343,48 @@ impl AnimPlayer {
         self.finished = false;
     }
 
-    /// Speed multiplier (negative plays in reverse, `0` freezes).
+    /// Speed multiplier for [`advance`](AnimPlayer::advance).
+    ///
+    /// `1.0` is normal speed, `0.5` half speed, `2.0` double speed. A
+    /// negative value plays in reverse; `0.0` freezes the frame while the
+    /// player stays "playing". Non-finite values (`NaN`, infinity) are
+    /// treated as `0.0` so a bad calculation pauses instead of corrupting
+    /// the clock.
     pub fn set_speed_scale(&mut self, s: f32) {
         self.speed_scale = if s.is_finite() { s } else { 0.0 };
     }
 
+    /// Current speed multiplier (see [`set_speed_scale`](AnimPlayer::set_speed_scale)).
+    /// Defaults to `1.0`.
     pub fn speed_scale(&self) -> f32 {
         self.speed_scale
     }
 
-    /// True while time advances (even at `speed_scale == 0`).
+    /// Whether the clock is running.
+    ///
+    /// Returns `true` after [`play`](AnimPlayer::play) until
+    /// [`pause`](AnimPlayer::pause), [`stop`](AnimPlayer::stop), or a
+    /// one-shot reaching its end, even at `speed_scale` of `0`, where time
+    /// is frozen but the intent to play remains.
     pub fn is_playing(&self) -> bool {
         self.playing
     }
 
-    /// True after a one-shot animation reaches its end.
+    /// Whether a [`Once`](LoopMode::Once) animation has reached its end.
+    ///
+    /// Set when the one-shot finishes and cleared by [`play`](AnimPlayer::play)
+    /// (which restarts the strip) or [`stop`](AnimPlayer::stop). Looping
+    /// animations never set this; watch the `ended` flag of
+    /// [`advance`](AnimPlayer::advance) for their wrap moments instead.
     pub fn is_finished(&self) -> bool {
         self.finished
     }
 
-    /// Current cell index.
+    /// Current cell index, always a valid strip cell.
+    ///
+    /// Returns `0` for an empty strip. Otherwise floors the internal clock
+    /// and clamps to the last cell, so it never points past the strip even
+    /// on the exact end boundary.
     pub fn frame(&self) -> u32 {
         if self.frames == 0 {
             return 0;
@@ -332,7 +392,13 @@ impl AnimPlayer {
         (self.pos.floor() as u32).min(self.frames - 1)
     }
 
-    /// Progress `0..1` toward the next cell (`1..0` in reverse).
+    /// Progress toward the next cell, from `0.0` to `1.0`.
+    ///
+    /// Playing forward, the value rises from `0.0` (just entered the cell)
+    /// to `1.0` (about to leave it). Playing in reverse it runs `1.0`
+    /// down to `0.0`. Useful for blending or for syncing effects to a
+    /// mid-cell moment. To jump cells while keeping a specific progress,
+    /// use [`set_frame_and_progress`](AnimPlayer::set_frame_and_progress).
     pub fn frame_progress(&self) -> f32 {
         let f = (self.pos - self.pos.floor()).clamp(0.0, 1.0);
         if self.backward() { 1.0 - f } else { f }
@@ -342,8 +408,24 @@ impl AnimPlayer {
         self.speed_scale < 0.0 || !self.forward
     }
 
-    /// Set the cell and progress directly without resetting anything else.
-    /// Unlike [`AnimPlayer::stop`], playback state is preserved.
+    /// Set the cell and progress together, preserving playback state.
+    ///
+    /// Unlike [`stop`](AnimPlayer::stop), nothing else resets: whether the
+    /// player is playing, its direction, and its finished flag are kept
+    /// (except that the finished flag clears, since the position is fresh).
+    /// Out-of-range inputs clamp (`frame` to the last cell, `progress` to
+    /// `0..1`), and an empty strip ignores the call.
+    ///
+    /// Useful for handing the exact cycle position to a fresh player, e.g.
+    /// when swapping to a same-length variant skin mid-motion:
+    ///
+    /// ```ignore
+    /// let f = player.frame();
+    /// let p = player.frame_progress();
+    /// let mut other = AnimPlayer::new(catalog.def("hero_alt").unwrap(), LoopMode::Loop);
+    /// other.set_frame_and_progress(f, p);
+    /// other.play();
+    /// ```
     pub fn set_frame_and_progress(&mut self, frame: u32, progress: f32) {
         if self.frames == 0 {
             return;
@@ -353,9 +435,25 @@ impl AnimPlayer {
         self.finished = false;
     }
 
-    /// Advance by `dt` seconds. Returns `(frame_changed, ended)`: `ended`
-    /// is true when a one-shot finishes or a looping animation wraps this
-    /// tick. No-op while paused, at `speed_scale == 0`, or on empty strips.
+    /// Advance the clock by `dt` seconds.
+    ///
+    /// Returns `(frame_changed, ended)`:
+    ///
+    /// - `frame_changed` is true when the advance crossed into a different
+    ///   cell. Use it to refresh atlas lookups and to fire per-step effects
+    ///   (footstep sounds, particles) exactly once per cell.
+    /// - `ended` is true when a [`Once`](LoopMode::Once) animation finishes
+    ///   on this advance, or when a [`Loop`](LoopMode::Loop) /
+    ///   [`PingPong`](LoopMode::PingPong) animation wraps or bounces. A
+    ///   looping animation never sets [`is_finished`](AnimPlayer::is_finished),
+    ///   so this flag is the way to count its laps.
+    ///
+    /// The call is a no-op (returning `(false, false)`) while paused, at a
+    /// `speed_scale` of `0`, on strips with fewer than two cells, at
+    /// non-positive `fps`, or for non-positive/non-finite `dt`. Oversized
+    /// `dt` values (hitch frames) cross as many cells as they cover: a loop
+    /// wraps once per advance at most for the flag, while the cell always
+    /// lands exactly.
     pub fn advance(&mut self, dt: f32) -> (bool, bool) {
         if !self.playing || self.frames <= 1 || self.fps <= 0.0 {
             return (false, false);

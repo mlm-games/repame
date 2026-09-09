@@ -6,8 +6,8 @@
 //!
 //! Today the composite is chromatic aberration (`offset = amount * 0.02`
 //! horizontal RGB split, ported from `game-utils-bevy`'s
-//! `screen_effects.wgsl` — which itself ran on Bevy's generalized
-//! post-process API, not a Bevy-built-in effect); the mechanism
+//! `screen_effects.wgsl` (which itself ran on the generalized
+//! post-process API, not a built-in effect); the mechanism
 //! (offscreen target + fullscreen triangle + uniform words) is shared
 //! by future grades. Amount `0.0` skips the composite entirely: the batch draws
 //! straight into the main pass, exactly the old path.

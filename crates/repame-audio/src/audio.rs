@@ -88,10 +88,17 @@ impl Audio {
         self.music.update(dt_secs);
     }
 
-    /// Voice ids that completed since the last call (reap accounting,
-    /// music handoff). Only natural completions appear here: voices cut
-    /// short by `stop` never report, so completion-gated logic must also
-    /// handle the stopped path.
+    /// Voice ids that completed since the last call.
+    ///
+    /// Drains the internal completion queue: each id appears exactly once,
+    /// on the first call after its voice ends. Feed the result back into
+    /// bank/music accounting or your own completion-gated logic (play the
+    /// next line when the current one ends).
+    ///
+    /// Only natural completions appear here. Voices cut short by `stop`
+    /// are removed silently and never report, so logic that waits for a
+    /// completion must also handle the stopped path. Otherwise it waits
+    /// forever after a manual stop.
     pub fn take_finished(&mut self) -> Vec<u64> {
         std::mem::take(&mut self.finished)
     }

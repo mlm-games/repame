@@ -176,14 +176,30 @@ impl<A: ActionLike> ActionState<A> {
         }
     }
 
-    /// Latest value for an axis (0.0 if never fed).
+    /// Latest raw value fed for an axis (`0.0` if never fed).
+    ///
+    /// This is the raw deflection in `-1..1` (sticks) or `0..1` (triggers),
+    /// with no threshold or deadzone applied. Use [`ActionState::strength`]
+    /// for the per-action intensity with thresholds applied.
     pub fn axis_value(&self, axis: GamepadAxis) -> f32 {
         self.axes.get(&axis).copied().unwrap_or(0.0)
     }
 
-    /// Action strength in `0..1`: `1.0` for held buttons, `|value|`
-    /// clamped for active axis bindings (strongest binding wins), `0.0`
-    /// when inactive or gated by context/consumption.
+    /// Intensity of an action, from `0.0` (inactive) to `1.0` (fully held).
+    ///
+    /// For button bindings (key, mouse, pad) the value is `0` or `1`. For
+    /// axis bindings it is the stick deflection `|value|` clamped to
+    /// `0..1`, so the further the stick is pushed past its threshold, the
+    /// closer the value is to `1`. When several bindings drive one action,
+    /// the strongest active binding wins.
+    ///
+    /// Returns `0.0` while the action is gated out by its context or has
+    /// been [`consumed`](ActionState::consume), matching
+    /// [`pressed`](ActionState::pressed).
+    ///
+    /// In most cases where you need a direction (twin-stick movement,
+    /// menus), use [`vector`](ActionState::vector) instead of combining
+    /// strengths by hand.
     pub fn strength(&self, action: &A) -> f32 {
         if !self.live(action) {
             return 0.0;
@@ -212,10 +228,28 @@ impl<A: ActionLike> ActionState<A> {
         best.clamp(0.0, 1.0)
     }
 
-    /// Signed 2D input vector from four actions: `x = pos_x - neg_x`,
-    /// `y = pos_y - neg_y` from strengths, deadzoned by `deadzone` and
-    /// length-clamped to `1.0` (analog-friendly movement from d-pad or
-    /// sticks).
+    /// Movement vector from four actions: `(x, y)` with
+    /// `x = strength(pos_x) - strength(neg_x)` and
+    /// `y = strength(pos_y) - strength(neg_y)`.
+    ///
+    /// This is useful for vector input such as a joystick, d-pad, arrows,
+    /// or WASD driving movement. The result has a circular deadzone and its
+    /// length limited to `1`, so diagonal input never moves faster than
+    /// axis-aligned input:
+    ///
+    /// - Lengths below `deadzone` (range `0..1`) snap to `(0, 0)`, which
+    ///   keeps a resting stick from drifting the player. Use `0.2` for a
+    ///   standard stick feel, `0.0` to disable.
+    /// - Lengths above `1` (opposite pairs can't exceed this, but two
+    ///   full-strength diagonals can in theory) are normalized back to `1`.
+    ///
+    /// **Note:** `y` follows screen convention (`pos_y` is down-positive).
+    /// For world-up movement, negate `y` or swap the pair at the call site.
+    ///
+    /// ```ignore
+    /// let (x, y) = state.vector(&MoveLeft, &MoveRight, &MoveUp, &MoveDown, 0.2);
+    /// player.vel = Vec2::new(x, y) * SPEED;
+    /// ```
     pub fn vector(&self, neg_x: &A, pos_x: &A, neg_y: &A, pos_y: &A, deadzone: f32) -> (f32, f32) {
         let mut x = self.strength(pos_x) - self.strength(neg_x);
         let mut y = self.strength(pos_y) - self.strength(neg_y);
@@ -231,18 +265,36 @@ impl<A: ActionLike> ActionState<A> {
     }
 
     /// Held (and live in the active context, not consumed).
+    ///
+    /// Returns `true` for every tick while any of the action's bindings is
+    /// held down. Actions gated out by [`set_contexts`](ActionState::set_contexts)
+    /// or hidden by [`consume`](ActionState::consume) read as released here
+    /// even while the hardware is held. The level below keeps tracking the
+    /// hardware truthfully, so re-entering the context (or
+    /// [`clear_consumed`](ActionState::clear_consumed)) reports held again
+    /// without a new press.
     pub fn pressed(&self, action: &A) -> bool {
         self.pressed.contains(action) && self.live(action)
     }
 
     /// Started this tick (and live in the active context, not consumed).
+    ///
+    /// Returns `true` only on the tick the action was pressed: the edge is
+    /// set by the press event and cleared at the end of the tick by
+    /// [`end_tick`](ActionState::end_tick), so holding the button does not
+    /// re-trigger it. If several ticks run in one frame, only systems in
+    /// the first tick observe the edge.
     pub fn just_pressed(&self, action: &A) -> bool {
         self.just_pressed.contains(action) && self.live(action)
     }
 
-    /// Released this tick (and live in the active context, not consumed —
-    /// same gating as `pressed`/`just_pressed` so context-gated and
-    /// UI-consumed releases never leak to late readers).
+    /// Released this tick (and live in the active context, not consumed).
+    /// Same gating as `pressed`/`just_pressed`, so context-gated and
+    /// UI-consumed releases never leak to late readers.
+    ///
+    /// Returns `true` only on the tick the last held binding was released
+    /// (see the OR release rule in the module docs). Like `just_pressed`,
+    /// the edge clears at [`end_tick`](ActionState::end_tick).
     pub fn just_released(&self, action: &A) -> bool {
         self.just_released.contains(action) && self.live(action)
     }

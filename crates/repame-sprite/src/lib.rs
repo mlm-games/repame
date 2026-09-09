@@ -28,18 +28,44 @@ pub use fullscreen::{FullscreenDesc, FullscreenPass, FullscreenTexture};
 
 pub mod post;
 
-/// 2D orthographic camera. Owned by the UI (Repose signal), copied into the
+/// 2D orthographic camera. Owned by the UI (signals), copied into the
 /// snapshot per frame.
+///
+/// The camera's look point is [`effective_center`](Camera2d::effective_center)
+/// (`center + offset`); `zoom` and `units_per_pixel` scale the view
+/// uniformly. All three viewport consumers (canvas drawing, the GPU batch
+/// matrix, and pointer picks) derive from these fields through one shared
+/// transform, so they can never disagree.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera2d {
-    /// World-space center the camera looks at.
+    /// World-space point the camera follows (the follow target, room
+    /// center, or player position). Defaults to `(0, 0)`.
+    ///
+    /// Scroll limits (see [`apply_limits`]) clamp this field; put
+    /// momentary displacement such as trauma shake in [`offset`](Camera2d::offset)
+    /// instead so it can push past the limits.
     pub center: Vec2,
-    /// Shake/look-around offset added to `center`. Applied after limits,
-    /// so trauma shake can push past them.
+    /// Momentary displacement added to [`center`](Camera2d::center).
+    /// Defaults to `(0, 0)`.
+    ///
+    /// Useful for looking around or camera shake animations: applied after
+    /// limits, so a shake impulse still moves the view even when the follow
+    /// target is pinned at a scroll edge. Decays back to zero under
+    /// game-side trauma handling.
     pub offset: Vec2,
-    /// World units per screen pixel at zoom 1. Combined with viewport size
-    /// to build the ortho projection.
+    /// World units per screen pixel at zoom 1. Defaults to `1.0`.
+    ///
+    /// Combined with the viewport size to build the orthographic
+    /// projection: a smaller value shows less of the world (larger
+    /// sprites). Together with `zoom`, the visible world width is
+    /// `viewport_dp * units_per_pixel / zoom`. Non-positive values fall
+    /// back to `1.0` so a bad snapshot can never divide by zero.
     pub units_per_pixel: f32,
+    /// Magnification. Defaults to `1.0`.
+    ///
+    /// Higher values zoom in: `2.0` shows half the world width on each
+    /// axis (a quarter of the area); `0.5` shows twice as much. Applied on
+    /// canvas and GPU alike. Non-positive values fall back to `1.0`.
     pub zoom: f32,
 }
 
@@ -54,14 +80,23 @@ impl Default for Camera2d {
     }
 }
 
-/// Scroll limits in world units.
-/// Clamp applies to `center` only — `offset` bypasses limits by design.
+/// Scroll limits in world units. Disabled by default.
+///
+/// The clamp applies to [`center`](Camera2d::center) only: pass the follow
+/// target through [`apply_limits`] before writing it into the camera, and
+/// keep momentary displacement in [`offset`](Camera2d::offset) so shake
+/// bypasses the clamp by design.
 #[derive(Clone, Copy, Debug)]
 pub struct CameraLimits {
+    /// Smallest visible center `x`. Defaults to `0.0`.
     pub left: f32,
+    /// Smallest visible center `y`. Defaults to `0.0`.
     pub top: f32,
+    /// Largest visible center `x`. Defaults to `0.0`.
     pub right: f32,
+    /// Largest visible center `y`. Defaults to `0.0`.
     pub bottom: f32,
+    /// Master switch. Defaults to `false` (no clamping).
     pub enabled: bool,
 }
 
@@ -77,8 +112,19 @@ impl Default for CameraLimits {
     }
 }
 
-/// Clamp a look center into scroll limits (no-op when disabled or
-/// inverted). Pure, so games and tests can pin it.
+/// Clamp a follow target into scroll limits.
+///
+/// Returns `center` unchanged when limits are disabled or when a pair is
+/// inverted (`left > right` is normalized, never a trap). Each axis clamps
+/// independently, so a corner target slides along the clamped edge.
+///
+/// ```rust
+/// use repame_sprite::{CameraLimits, apply_limits};
+///
+/// let limits = CameraLimits { left: 100.0, top: 100.0, right: 700.0, bottom: 500.0, enabled: true };
+/// assert_eq!(apply_limits([50.0, 300.0], limits), [100.0, 300.0]);
+/// assert_eq!(apply_limits([400.0, 300.0], limits), [400.0, 300.0]);
+/// ```
 pub fn apply_limits(center: [f32; 2], limits: CameraLimits) -> [f32; 2] {
     if !limits.enabled {
         return center;
@@ -89,8 +135,22 @@ pub fn apply_limits(center: [f32; 2], limits: CameraLimits) -> [f32; 2] {
     ]
 }
 
-/// Exponential smoothing toward a target at `speed` world units per
-/// second. `speed <= 0` snaps; `dt <= 0` holds.
+/// Ease the camera toward its follow target.
+///
+/// Moves `current` toward `target` with exponential smoothing at `speed`
+/// world units per second: fast when far away, settling gently without
+/// overshooting. Large `speed` values approach a snap; the motion is
+/// frame-rate independent for a fixed `dt`.
+///
+/// - `speed <= 0` (or non-finite) snaps directly to `target`.
+/// - `dt <= 0` holds `current` (a paused frame never moves the camera).
+///
+/// ```rust
+/// use repame_sprite::smooth_toward;
+///
+/// let p = smooth_toward([0.0, 0.0], [100.0, 0.0], 5.0, 0.016);
+/// assert!(p[0] > 0.0 && p[0] < 100.0);
+/// ```
 pub fn smooth_toward(current: [f32; 2], target: [f32; 2], speed: f32, dt: f32) -> [f32; 2] {
     if dt <= 0.0 {
         return current;
@@ -106,8 +166,11 @@ pub fn smooth_toward(current: [f32; 2], target: [f32; 2], speed: f32, dt: f32) -
 }
 
 impl Camera2d {
-    /// Effective look point: `center + offset`. All framing (canvas, GPU,
-    /// picks) uses this, so shake/look-around rides the offset channel.
+    /// Effective look point: `center + offset`.
+    ///
+    /// All framing (canvas drawing, the GPU batch matrix, pointer picks,
+    /// actor surfaces) uses this value, so shake and look-around applied
+    /// through `offset` move every consumer together.
     pub fn effective_center(&self) -> [f32; 2] {
         [self.center.x + self.offset.x, self.center.y + self.offset.y]
     }
@@ -294,7 +357,7 @@ pub fn effective_fit(canvas_dp: [f32; 2], world: [f32; 2], cam: &Camera2d) -> (f
 /// GPU camera for the shared framing contract: the exact matrix form of
 /// [`world_to_dp`] over `canvas_dp` (dp = physical px / density).
 /// Canvas draws via `world_to_dp`, GPU draws via this matrix, picks invert
-/// via `dp_to_world` — one transform, three consumers.
+/// via `dp_to_world`. One transform, three consumers.
 pub fn fit_view_proj(
     canvas_dp: [f32; 2],
     world_size: [f32; 2],

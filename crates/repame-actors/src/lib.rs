@@ -11,11 +11,11 @@
 //! source graph-wide.
 //!
 //! Two embeddings, one data path:
-//! - [`actors_view`] — presentational (rozvp zombie semantics):
-//!   transparent surface, exact artboard fit, no input, no auto-tick.
+//! - [`actors_view`]: presentational (rozvp zombie semantics).
+//!   Transparent surface, exact artboard fit, no input, no auto-tick.
 //!   Playback is ticked game-side (e.g. from sim markers) so pause
 //!   freezes and there is no double-tick speedup.
-//! - [`actors_view_with`] — full control via [`ActorViewOpts`]: editor
+//! - [`actors_view_with`]: full control via [`ActorViewOpts`]. Editor
 //!   chrome (checkerboard backplate), margin fit with resize refit,
 //!   scroll-zoom + pointer forwarding, and per-frame auto-tick.
 //!
@@ -132,7 +132,7 @@ pub fn actors_view(host: PlayerHostRef, ctx: RenderContext) -> View {
 pub fn actors_view_with(host: PlayerHostRef, ctx: RenderContext, opts: ActorViewOpts) -> View {
     let draw = host.clone();
     // Margin fit must survive redraws (user zoom), so refit only on
-    // resize — mirrors upstream's private `ensure_fit`.
+    // resize. Mirrors upstream's private `ensure_fit`.
     let last_size = Rc::new(Cell::new([-1.0f64, -1.0f64]));
 
     let mut modifier = Modifier::new().fill_max_size();

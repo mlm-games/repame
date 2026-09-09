@@ -25,6 +25,9 @@ pub struct ActionState<A: ActionLike> {
     consumed: HashSet<A>,
     axes: HashMap<GamepadAxis, f32>,
     active_contexts: HashSet<String>,
+    /// Currently-held button bindings (key/mouse/pad). Releases only drop
+    /// the action when *no* binding for it remains down (OR semantics).
+    down_buttons: Vec<Binding>,
 }
 
 impl<A: ActionLike> ActionState<A> {
@@ -37,6 +40,7 @@ impl<A: ActionLike> ActionState<A> {
             consumed: HashSet::new(),
             axes: HashMap::new(),
             active_contexts: HashSet::new(),
+            down_buttons: Vec::new(),
         }
     }
 
@@ -87,6 +91,18 @@ impl<A: ActionLike> ActionState<A> {
     }
 
     fn fire_binding(&mut self, binding: &Binding, down: bool) {
+        match binding {
+            Binding::Key(_) | Binding::Mouse(_) | Binding::Pad(_) => {
+                if down {
+                    if !self.down_buttons.iter().any(|b| b == binding) {
+                        self.down_buttons.push(binding.clone());
+                    }
+                } else {
+                    self.down_buttons.retain(|b| b != binding);
+                }
+            }
+            Binding::Axis { .. } => {}
+        }
         let actions: Vec<A> = self
             .map
             .actions()
@@ -94,12 +110,30 @@ impl<A: ActionLike> ActionState<A> {
             .cloned()
             .collect();
         for action in actions {
-            if down {
+            if self.action_down(&action) {
                 self.press(&action);
             } else {
                 self.release(&action);
             }
         }
+    }
+
+    fn binding_down(&self, binding: &Binding) -> bool {
+        match binding {
+            Binding::Key(_) | Binding::Mouse(_) | Binding::Pad(_) => {
+                self.down_buttons.iter().any(|b| b == binding)
+            }
+            Binding::Axis { axis, threshold } => {
+                Binding::axis_active(*threshold, self.axis_value(*axis))
+            }
+        }
+    }
+
+    fn action_down(&self, action: &A) -> bool {
+        self.map
+            .bindings_for(action)
+            .iter()
+            .any(|b| self.binding_down(b))
     }
 
     /// Feed a keyboard chord press/release from the runner.
@@ -118,28 +152,23 @@ impl<A: ActionLike> ActionState<A> {
     }
 
     /// Feed an axis value; threshold bindings flip on crossing.
+    /// Re-evaluates every action bound to this axis with OR semantics, so
+    /// a second binding holding the action keeps it pressed.
     pub fn axis(&mut self, axis: GamepadAxis, value: f32) {
         self.axes.insert(axis, value);
-        let flips: Vec<(A, bool)> = self
+        let actions: Vec<A> = self
             .map
             .actions()
-            .flat_map(|a| {
-                self.map
-                    .bindings_for(a)
-                    .iter()
-                    .filter_map(move |b| match b {
-                        Binding::Axis {
-                            axis: ba,
-                            threshold,
-                        } if *ba == axis => {
-                            Some((a.clone(), Binding::axis_active(*threshold, value)))
-                        }
-                        _ => None,
-                    })
+            .filter(|a| {
+                self.map.bindings_for(a).iter().any(|b| match b {
+                    Binding::Axis { axis: ba, .. } => *ba == axis,
+                    _ => false,
+                })
             })
+            .cloned()
             .collect();
-        for (action, active) in flips {
-            if active {
+        for action in actions {
+            if self.action_down(&action) {
                 self.press(&action);
             } else {
                 self.release(&action);
@@ -162,9 +191,11 @@ impl<A: ActionLike> ActionState<A> {
         self.just_pressed.contains(action) && self.live(action)
     }
 
-    /// Released this tick.
+    /// Released this tick (and live in the active context, not consumed —
+    /// same gating as `pressed`/`just_pressed` so context-gated and
+    /// UI-consumed releases never leak to late readers).
     pub fn just_released(&self, action: &A) -> bool {
-        self.just_released.contains(action)
+        self.just_released.contains(action) && self.live(action)
     }
 
     /// Swallow an action so later readers skip it (UI consumed the click).
@@ -310,5 +341,31 @@ mod tests {
         assert!(st.just_pressed(&"jump"));
         st.mock(&"jump", false);
         assert!(st.just_released(&"jump"));
+    }
+
+    #[test]
+    fn multi_binding_release_is_or() {
+        let mut st = ActionState::new(jump_map());
+        st.key(&space(), true);
+        st.pad(GamepadButton::South, true);
+        assert!(st.pressed(&"jump"));
+        st.end_tick();
+        st.key(&space(), false);
+        assert!(st.pressed(&"jump"), "South still held");
+        assert!(!st.just_released(&"jump"), "no release while OR-held");
+        st.pad(GamepadButton::South, false);
+        assert!(!st.pressed(&"jump"));
+        assert!(st.just_released(&"jump"));
+    }
+
+    #[test]
+    fn consume_hides_release_too() {
+        let mut st = ActionState::new(jump_map());
+        st.key(&space(), true);
+        st.end_tick();
+        st.key(&space(), false);
+        assert!(st.just_released(&"jump"));
+        st.consume(&"jump");
+        assert!(!st.just_released(&"jump"));
     }
 }

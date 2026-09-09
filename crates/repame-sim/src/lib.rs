@@ -21,6 +21,12 @@ pub struct Sim {
     accumulator: Duration,
     /// Fixed step size. Defaults to 60 Hz.
     pub step: Duration,
+    /// Max fixed steps per [`Sim::step`] call (spiral-of-death guard).
+    /// Excess wall time is dropped (not accumulated) so one long hitch
+    /// can't schedule dozens of catch-up ticks. No render interpolation:
+    /// snapshots read the last ticked state; leftover time stays in the
+    /// accumulator for the next frame.
+    pub max_steps: u32,
 }
 
 /// Sim time resource, advanced once per fixed step.
@@ -41,6 +47,7 @@ impl Sim {
             schedule: Schedule::default(),
             accumulator: Duration::ZERO,
             step,
+            max_steps: 8,
         }
     }
 
@@ -70,16 +77,25 @@ impl Sim {
     }
 
     /// Advance the sim by `dt` wall time, running zero or more fixed steps.
-    /// Returns the number of steps run.
+    /// Returns the number of steps run. Caps at [`Sim::max_steps`]; leftover
+    /// beyond the cap is dropped to avoid the spiral of death.
     pub fn step(&mut self, dt: Duration) -> u32 {
         self.accumulator += dt;
         let mut ran = 0;
-        while self.accumulator >= self.step {
+        while self.accumulator >= self.step && ran < self.max_steps.max(1) {
             self.accumulator -= self.step;
             self.tick();
             ran += 1;
         }
+        if self.accumulator >= self.step {
+            self.accumulator = Duration::ZERO;
+        }
         ran
+    }
+
+    /// Unconsumed fractional time (< one step) carried to the next frame.
+    pub fn leftover(&self) -> Duration {
+        self.accumulator
     }
 
     /// Run the schedule exactly once, advancing sim time by one step.
@@ -106,5 +122,14 @@ mod tests {
         assert_eq!(ran, 3);
         let time = sim.world.resource::<SimTime>();
         assert!((time.elapsed_secs - 3.0 / 60.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn spiral_of_death_is_capped() {
+        let mut sim = Sim::with_default_step();
+        sim.max_steps = 4;
+        let ran = sim.step(Duration::from_secs(10));
+        assert_eq!(ran, 4);
+        assert_eq!(sim.leftover(), Duration::ZERO);
     }
 }

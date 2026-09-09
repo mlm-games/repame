@@ -98,7 +98,9 @@ impl GamepadPoller {
 
     /// Drain hardware events since the last call. Tracks connection state
     /// so [`GamepadPoller::connected_ids`] works even for pads connected
-    /// before startup (they appear on first input).
+    /// before startup: gilrs only emits `Connected` on its own schedule,
+    /// so any button/axis event from an unknown id implicitly marks that
+    /// pad connected (first input at the latest).
     pub fn poll(&mut self) -> Vec<GamepadEvent> {
         let Some(backend) = &mut self.backend else {
             return Vec::new();
@@ -111,6 +113,9 @@ impl GamepadPoller {
                 }
                 GamepadEvent::Disconnected { id } => {
                     self.connected.remove(&id.0);
+                }
+                GamepadEvent::Button { id, .. } | GamepadEvent::Axis { id, .. } => {
+                    self.connected.insert(id.0);
                 }
                 _ => {}
             }

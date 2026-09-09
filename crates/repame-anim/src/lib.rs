@@ -57,6 +57,13 @@ pub enum CatalogError {
     AtlasFull { placed: usize },
     /// A single cell is larger than one page.
     CellTooLarge { name: String },
+    /// Two definition keys stem to the same name (e.g.
+    /// `images/a/foo.png` and `images/b/foo.png` both -> `foo`).
+    DuplicateStem {
+        stem: String,
+        first: String,
+        second: String,
+    },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -69,6 +76,14 @@ impl std::fmt::Display for CatalogError {
             Self::CellTooLarge { name } => {
                 write!(f, "anim cell larger than one page: {name}")
             }
+            Self::DuplicateStem {
+                stem,
+                first,
+                second,
+            } => write!(
+                f,
+                "anim stem collision `{stem}` from `{first}` and `{second}`"
+            ),
         }
     }
 }
@@ -111,8 +126,18 @@ impl AnimCatalog {
         let raw: HashMap<String, AnimDef> =
             serde_json::from_str(json).map_err(CatalogError::Json)?;
         let mut defs = HashMap::with_capacity(raw.len());
+        let mut stems: HashMap<String, String> = HashMap::with_capacity(raw.len());
         for (name, def) in raw {
-            defs.insert(stem(&name).to_string(), def);
+            let s = stem(&name).to_string();
+            if let Some(first) = stems.get(&s) {
+                return Err(CatalogError::DuplicateStem {
+                    stem: s,
+                    first: first.clone(),
+                    second: name,
+                });
+            }
+            stems.insert(s.clone(), name);
+            defs.insert(s, def);
         }
         let mut atlas = Atlas::new(desc);
         let mut placed = 0usize;
@@ -285,6 +310,17 @@ mod tests {
                 }
             ),
             Err(CatalogError::CellTooLarge { .. })
+        ));
+        let dup = r#"{"images/a/foo.png": {"frames": 1, "w": 8, "h": 8, "fps": 1.0, "xorigin": 0.0, "yorigin": 0.0}, "images/b/foo.png": {"frames": 1, "w": 8, "h": 8, "fps": 1.0, "xorigin": 0.0, "yorigin": 0.0}}"#;
+        assert!(matches!(
+            AnimCatalog::from_json(
+                dup,
+                AtlasDesc {
+                    size: 64,
+                    max_pages: 1
+                }
+            ),
+            Err(CatalogError::DuplicateStem { .. })
         ));
     }
 

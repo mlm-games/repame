@@ -29,7 +29,7 @@ use wgpu::util::DeviceExt;
 use super::SpriteInstance;
 
 /// Texture sampling for atlas layers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TextureFilter {
     /// Pixel-art crisp (nt default).
     #[default]
@@ -141,6 +141,11 @@ struct BatchInstance {
     page: f32,
 }
 
+// Locked to `shaders/sprite.wgsl::Instance` (row0@0, row1@16,
+// uv_min@32, uv_max@40, tint@48, page@64; stride 68). If this fires,
+// update the WGSL offsets and the vertex buffer layout below together.
+const _: () = assert!(size_of::<BatchInstance>() == 68);
+
 /// Per-frame snapshot batch. `Send + Sync` so it can cross into the
 /// compositor thread via [`repose_render_wgpu::Callback`].
 pub struct SpriteBatch {
@@ -239,6 +244,11 @@ struct BatchResources {
     instances: wgpu::Buffer,
     instance_cap: usize,
     /// Instance count of the last prepared batch; `paint` draws this.
+    /// Single live batch per app: `CallbackResources` is keyed by type,
+    /// so two viewports (or a viewport + minimap) sharing one app would
+    /// overwrite each other's count. Supported today: one GPU sprite
+    /// consumer per app; multi-viewport needs per-id resources (like
+    /// `FullscreenPass`'s id map).
     last_count: u32,
     camera: wgpu::Buffer,
     cam_bind: wgpu::BindGroup,
@@ -299,6 +309,11 @@ impl SpriteBatch {
             .is_none_or(|r| r.key != key);
         if !rebuild {
             return;
+        }
+        if resources.get::<BatchResources>().is_some() {
+            log::warn!(
+                "sprite_batch: rebuilding pipeline/texture (format/sample/desc changed); atlas contents dropped, re-upload required"
+            );
         }
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sprite_batch"),

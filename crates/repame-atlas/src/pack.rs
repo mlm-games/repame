@@ -51,19 +51,19 @@ impl ShelfPage {
         if w == 0 || h == 0 || w > self.size || h > self.size {
             return None;
         }
-        // Best-fit open shelf: shortest shelf that fits, to keep squat
-        // shelves for squat sprites.
         let mut best: Option<usize> = None;
         for (i, shelf) in self.shelves.iter().enumerate() {
-            if shelf.h < h || shelf.cursor + w > self.size {
+            if shelf.h < h {
                 continue;
             }
+            let fits_cursor = shelf.cursor + w <= self.size;
             let fits_gap = shelf.gaps.iter().any(|g| g.w >= w);
-            if shelf.cursor + w <= self.size || fits_gap {
-                match best {
-                    Some(b) if self.shelves[b].h <= shelf.h => {}
-                    _ => best = Some(i),
-                }
+            if !(fits_cursor || fits_gap) {
+                continue;
+            }
+            match best {
+                Some(b) if self.shelves[b].h <= shelf.h => {}
+                _ => best = Some(i),
             }
         }
         if let Some(i) = best {
@@ -138,12 +138,15 @@ impl ShelfPage {
         shelf.gaps = merged;
     }
 
-    /// Allocated pixel area (approximate: freed gaps still count until
-    /// their shelf is reused, which is exactly the fragmentation cost).
+    /// Allocated pixel area: cursor extent minus freed gaps (so reuse
+    /// lowers the count. Remaining difference to live entries is shelf
+    /// height waste, which shelves never reclaim).
     pub fn used_area(&self) -> u64 {
         let mut area = 0u64;
         for shelf in &self.shelves {
-            area += shelf.cursor as u64 * shelf.h as u64;
+            let cursor_area = shelf.cursor as u64 * shelf.h as u64;
+            let gap_area: u64 = shelf.gaps.iter().map(|g| g.w as u64 * shelf.h as u64).sum();
+            area += cursor_area.saturating_sub(gap_area);
         }
         area
     }
@@ -204,5 +207,17 @@ mod tests {
         // A 32-wide rect now fits where two 16-wide gaps merged.
         let c = page.alloc(32, 16).expect("merged gap reused");
         assert_eq!((c.x, c.y), (0, 0));
+    }
+
+    #[test]
+    fn cursor_full_shelf_still_reuses_gaps() {
+        let mut page = ShelfPage::new(32);
+        let a = page.alloc(16, 16).unwrap();
+        let _b = page.alloc(16, 16).unwrap();
+        assert_eq!(page.shelves.len(), 1);
+        page.free(a);
+        let c = page.alloc(16, 16).expect("gap reused when cursor full");
+        assert_eq!((c.x, c.y), (a.x, a.y));
+        assert_eq!(page.shelves.len(), 1, "must not open a new shelf");
     }
 }

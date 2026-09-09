@@ -52,13 +52,17 @@ impl Default for Camera2d {
 
 impl Camera2d {
     /// Y-down view-projection (Godot/canvas convention: world +y points
-    /// screen-down): matches `screen_camera`, the canvas path, and the
-    /// `dp_to_world`/`world_to_dp` helpers by construction.
+    /// screen-down). Guards degenerate inputs (zero viewport/zoom) so a
+    /// bad snapshot can never div-by-zero; callers driving viewports
+    /// should prefer [`fit_view_proj`] (contain-fit + look), which is the
+    /// single framing contract canvas, GPU, and picks share.
     pub fn view_proj(&self, viewport_px: [f32; 2]) -> Mat4 {
-        let w = viewport_px[0] * self.units_per_pixel / self.zoom;
-        let h = viewport_px[1] * self.units_per_pixel / self.zoom;
-        // Right-handed, 0..1 depth: matches wgpu NDC. Bottom/top swapped
-        // vs. the y-up form so world +y maps to NDC down.
+        let vp_w = viewport_px[0].max(1.0);
+        let vp_h = viewport_px[1].max(1.0);
+        let zoom = sane_positive(self.zoom);
+        let upp = sane_positive(self.units_per_pixel);
+        let w = vp_w * upp / zoom;
+        let h = vp_h * upp / zoom;
         let proj = glam::camera::rh::proj::directx::orthographic(
             -w / 2.0,
             w / 2.0,
@@ -72,7 +76,11 @@ impl Camera2d {
     }
 
     /// World-space position under a viewport-pixel cursor position.
+    /// Guards zero viewports (returns the look point instead of NaN).
     pub fn screen_to_world(&self, viewport_px: [f32; 2], px: [f32; 2]) -> Vec2 {
+        if viewport_px[0] <= 0.0 || viewport_px[1] <= 0.0 {
+            return self.center;
+        }
         let ndc = Vec2::new(
             (px[0] / viewport_px[0]) * 2.0 - 1.0,
             1.0 - (px[1] / viewport_px[1]) * 2.0,
@@ -138,13 +146,16 @@ pub struct WorldText {
 }
 
 /// Everything the viewport draws this frame. Plain data, snapshot per frame.
+///
+/// Framing contract (single source of truth): canvas, GPU, and picks all
+/// derive from `world_size` + `cam` through [`effective_fit`] /
+/// [`fit_view_proj`] / [`world_to_dp`]. `cam.center` is the look point
+/// (rest/shake included); `cam.zoom` / `cam.units_per_pixel` scale the
+/// fit uniformly on every backend.
 #[derive(Clone, Default, Debug)]
 pub struct FrameInput {
     pub cam: Camera2d,
     /// World-space extent the contain-fit maps into the viewport.
-    /// `Viewport2d` uses `cam.center` (rest/shake included) for the look
-    /// point; `viewport_px` / `units_per_pixel` / `zoom` are reserved for
-    /// the future wgpu backend and ignored by the canvas renderer.
     pub world_size: [f32; 2],
     pub viewport_px: [f32; 2],
     pub sprites: Vec<SpriteInstance>,
@@ -170,18 +181,76 @@ pub enum PickEvent {
     Hover { world: Vec2 },
 }
 
+/// Clamp helper: finite positive values pass through, everything else
+/// (zero, negative, NaN, infinite) falls back to 1.0 so framing math can
+/// never div-by-zero.
+fn sane_positive(v: f32) -> f32 {
+    if v.is_finite() && v > 1e-6 { v } else { 1.0 }
+}
+
 /// Contain-fit of a `world` extent into a dp-space canvas: uniform scale
 /// plus centering offsets, all dp. Pure, so games and tests can pin it.
+/// No silent clamp: `world_to_dp` and `dp_to_world` are exact inverses
+/// for any positive scale, so picks never drift from drawn content.
 pub fn contain_fit(canvas_dp: [f32; 2], world: [f32; 2]) -> (f32, f32, f32) {
     if canvas_dp[0] <= 0.0 || canvas_dp[1] <= 0.0 || world[0] <= 0.0 || world[1] <= 0.0 {
         return (1.0, 0.0, 0.0);
     }
     let s = (canvas_dp[0] / world[0]).min(canvas_dp[1] / world[1]);
-    let s = s.clamp(0.1, 8.0);
+    if !s.is_finite() || s <= 1e-6 {
+        return (1.0, 0.0, 0.0);
+    }
     (
         s,
         (canvas_dp[0] - world[0] * s) * 0.5,
         (canvas_dp[1] - world[1] * s) * 0.5,
+    )
+}
+
+/// Effective fit for one frame: base contain-fit scaled by
+/// `zoom / units_per_pixel`, re-centered. Default camera (`zoom = 1`,
+/// `units_per_pixel = 1`) is exactly [`contain_fit`]; zoom 2 doubles
+/// on-screen size on canvas and GPU alike.
+pub fn effective_fit(canvas_dp: [f32; 2], world: [f32; 2], cam: &Camera2d) -> (f32, f32, f32) {
+    let (base, _, _) = contain_fit(canvas_dp, world);
+    let zoom = sane_positive(cam.zoom);
+    let upp = sane_positive(cam.units_per_pixel);
+    let s = base * zoom / upp;
+    if !s.is_finite() || s <= 1e-6 {
+        return (1.0, 0.0, 0.0);
+    }
+    (
+        s,
+        (canvas_dp[0] - world[0] * s) * 0.5,
+        (canvas_dp[1] - world[1] * s) * 0.5,
+    )
+}
+
+/// GPU camera for the shared framing contract: the exact matrix form of
+/// [`world_to_dp`] over `canvas_dp` (dp = physical px / density).
+/// Canvas draws via `world_to_dp`, GPU draws via this matrix, picks invert
+/// via `dp_to_world` — one transform, three consumers.
+pub fn fit_view_proj(
+    canvas_dp: [f32; 2],
+    world_size: [f32; 2],
+    cam_center: [f32; 2],
+    fit: (f32, f32, f32),
+) -> Mat4 {
+    let w = canvas_dp[0].max(1.0);
+    let h = canvas_dp[1].max(1.0);
+    let (s, ox, oy) = fit;
+    let s = if s.is_finite() && s > 1e-6 { s } else { 1.0 };
+    let lx = cam_center[0] - world_size[0] * 0.5;
+    let ly = cam_center[1] - world_size[1] * 0.5;
+    let sx = 2.0 * s / w;
+    let sy = -2.0 * s / h;
+    let tx = 2.0 * (ox - lx * s) / w - 1.0;
+    let ty = 1.0 - 2.0 * (oy - ly * s) / h;
+    Mat4::from_cols(
+        glam::Vec4::new(sx, 0.0, 0.0, 0.0),
+        glam::Vec4::new(0.0, sy, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, 0.001, 0.0),
+        glam::Vec4::new(tx, ty, 0.0, 1.0),
     )
 }
 
@@ -202,6 +271,7 @@ pub fn world_to_dp(
 }
 
 /// Inverse of [`world_to_dp`]: dp canvas point -> world point.
+/// Guards degenerate scales (returns the look point instead of Inf).
 pub fn dp_to_world(
     dp: [f32; 2],
     world_size: [f32; 2],
@@ -209,10 +279,34 @@ pub fn dp_to_world(
     fit: (f32, f32, f32),
 ) -> [f32; 2] {
     let (s, ox, oy) = fit;
+    if !s.is_finite() || s.abs() < 1e-6 {
+        return cam_center;
+    }
     [
         (dp[0] - ox) / s + (cam_center[0] - world_size[0] * 0.5),
         (dp[1] - oy) / s + (cam_center[1] - world_size[1] * 0.5),
     ]
+}
+
+/// Viewport-local physical-px press -> world point through the painted
+/// [`FrameGeom`]. Takes the region-local position (`PointerEvent.position`,
+/// already relative to the viewport origin), so HUD chrome, docking, or a
+/// non-fullscreen viewport never shift picks.
+pub fn pick_world(local_px: [f32; 2], geom: FrameGeom, world_size: [f32; 2]) -> [f32; 2] {
+    let d = if geom.density.is_finite() && geom.density > 1e-6 {
+        geom.density
+    } else {
+        1.0
+    };
+    dp_to_world(
+        [local_px[0] / d, local_px[1] / d],
+        world_size,
+        [
+            geom.look[0] + world_size[0] * 0.5,
+            geom.look[1] + world_size[1] * 0.5,
+        ],
+        geom.fit,
+    )
 }
 
 /// One painted frame's geometry, shared between [`Viewport2d`] /
@@ -222,7 +316,8 @@ pub fn dp_to_world(
 /// under camera shake.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameGeom {
-    /// Dp contain-fit of the world extent: `(scale, off_x, off_y)`.
+    /// Effective dp fit of the world extent: `(scale, off_x, off_y)` from
+    /// [`effective_fit`] (contain-fit scaled by zoom/units_per_pixel).
     pub fit: (f32, f32, f32),
     /// Look-point shift in world units: `cam.center - world / 2`
     /// (trauma shake included; zero when the camera is default).
@@ -271,12 +366,17 @@ fn rgba8(c: [f32; 4]) -> Color {
 /// `Viewport3d`).
 ///
 /// Layout contract: fills its parent. Draws `background`, then sprites,
-/// then world texts, then the fullscreen tint - all through the dp
-/// contain-fit of [`FrameInput::world_size`]. Pointer presses are reported
-/// via `on_event` in world coords. Each paint publishes a [`FrameGeom`]
-/// snapshot to `geom_out` for dp-space siblings ([`ActorFrame`]); the
-/// viewport, picks, and actor surfaces therefore share one transform by
-/// construction.
+/// then world texts, then the fullscreen tint - all through the shared
+/// [`effective_fit`] framing of [`FrameInput::world_size`]. Pointer presses
+/// are reported via `on_event` in world coords (viewport-local, so a
+/// non-zero viewport origin never shifts picks). Each paint publishes a
+/// [`FrameGeom`] snapshot to `geom_out` for dp-space siblings
+/// ([`ActorFrame`]); the viewport, picks, and actor surfaces therefore
+/// share one transform by construction.
+///
+/// Canvas note: the canvas path draws debug solids (axis-aligned bounding
+/// boxes of the snapshot quads). Rotated sprites are exact on the GPU
+/// viewport; on canvas they draw as their AABB with a debug assert.
 #[allow(non_snake_case)] // Repose view convention (cf. resims `Viewport3d`).
 pub fn Viewport2d(
     input: FrameInput,
@@ -285,40 +385,29 @@ pub fn Viewport2d(
 ) -> View {
     let input = Rc::new(input);
     let world_size = input.world_size;
-    let cam_center = [input.cam.center.x, input.cam.center.y];
     let pick_geom = geom_out.clone();
     let draw_input = input.clone();
     let draw_geom = geom_out.clone();
 
     let modifier = Modifier::new().fill_max_size().on_pointer_down(
         move |ev: repose_core::input::PointerEvent| {
-            // Region-local px -> window px (robust to a non-zero viewport
-            // origin) -> dp -> world through the painted frame geometry.
-            let w = ev.position_in_window();
+            let p = ev.position;
             let g = pick_geom.get();
-            let world = dp_to_world(
-                [w.x / g.density, w.y / g.density],
-                world_size,
-                [
-                    g.look[0] + world_size[0] * 0.5,
-                    g.look[1] + world_size[1] * 0.5,
-                ],
-                g.fit,
-            );
+            let world = pick_world([p.x, p.y], g, world_size);
             on_event(PickEvent::Click {
                 world: Vec2::new(world[0], world[1]),
-                screen: [w.x, w.y],
+                screen: [p.x, p.y],
             });
         },
     );
     Canvas(modifier, move |scope: &mut DrawScope| {
-        // DrawScope size is physical px (layout/paint run in px); the fit
-        // is dp (1 world unit == 1 dp). Convert down, publish geometry,
-        // and scale back up once for drawing.
         let d = effective_density_scale();
-        let fit = contain_fit(
+        let cam = draw_input.cam;
+        let cam_center = [cam.center.x, cam.center.y];
+        let fit = effective_fit(
             [scope.size.width / d, scope.size.height / d],
             draw_input.world_size,
+            &cam,
         );
         draw_geom.set(FrameGeom {
             fit,
@@ -329,7 +418,6 @@ pub fn Viewport2d(
             density: d,
             viewport_px: [scope.size.width, scope.size.height],
         });
-        let s = fit.0 * d;
         let project = |wx: f32, wy: f32| -> [f32; 2] {
             let [dx, dy] = world_to_dp(
                 [wx, wy],
@@ -352,18 +440,39 @@ pub fn Viewport2d(
             );
         }
         for spr in draw_input.sprites.iter() {
-            // Anchor-aware top-left (default anchor keeps legacy centering);
-            // solid fills are flip-invariant, so flip lives in the batch.
-            let [tx, ty] = project(
-                spr.center.x - spr.anchor.x * spr.size.x,
-                spr.center.y - spr.anchor.y * spr.size.y,
+            if spr.rotation.abs() > 1e-4 {
+                debug_assert!(
+                    false,
+                    "canvas viewport draws rotated sprites as AABB; use GPU viewport for exact rotation"
+                );
+            }
+            let (row0, row1) = batch::instance_rows(
+                [spr.center.x, spr.center.y],
+                [spr.size.x, spr.size.y],
+                spr.rotation,
+                [spr.anchor.x, spr.anchor.y],
+                spr.flip_x,
+                spr.flip_y,
             );
+            let mut min_x = f32::INFINITY;
+            let mut min_y = f32::INFINITY;
+            let mut max_x = f32::NEG_INFINITY;
+            let mut max_y = f32::NEG_INFINITY;
+            for corner in [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]] {
+                let wx = row0[0] * corner[0] + row0[1] * corner[1] + row0[3];
+                let wy = row1[0] * corner[0] + row1[1] * corner[1] + row1[3];
+                let [px, py] = project(wx, wy);
+                min_x = min_x.min(px);
+                min_y = min_y.min(py);
+                max_x = max_x.max(px);
+                max_y = max_y.max(py);
+            }
             scope.draw_rect(
                 Rect {
-                    x: tx,
-                    y: ty,
-                    w: spr.size.x * s,
-                    h: spr.size.y * s,
+                    x: min_x,
+                    y: min_y,
+                    w: (max_x - min_x).max(0.0),
+                    h: (max_y - min_y).max(0.0),
                 },
                 rgba8(spr.color),
                 0.0,
@@ -375,7 +484,7 @@ pub fn Viewport2d(
                 t.text.clone(),
                 repose_core::Vec2 { x: tx, y: ty },
                 rgba8(t.color),
-                t.size * s,
+                t.size * fit.0 * d,
             );
         }
         if let Some(tint) = draw_input.overlay_color {
@@ -396,13 +505,12 @@ pub fn Viewport2d(
 /// GPU twin of [`Viewport2d`]: same snapshot in, same picks out, but
 /// sprites draw as textured atlas quads through [`SpriteBatch`].
 ///
-/// The snapshot camera is honored exactly like the canvas path: sprites
-/// are world-space and the batch is built with `cam.view_proj` over the
-/// density-corrected viewport (physical px / density, same dp the canvas
-/// path draws in). `background` paints first as a uniform-only fullscreen
-/// fill so GPU and canvas agree on every `FrameInput` field except world
-/// texts and tint, which stay canvas-view features for now: GPU
-/// consumers compose those as sibling views.
+/// Framing is identical to the canvas path: the batch camera is
+/// [`fit_view_proj`] over the density-corrected viewport (physical px /
+/// density, same dp the canvas path draws in). `background` paints first
+/// as a uniform-only fullscreen fill so GPU and canvas agree on every
+/// `FrameInput` field except world texts and tint, which stay canvas-view
+/// features for now: GPU consumers compose those as sibling views.
 ///
 /// Layout contract: fills its parent. The payload is rebuilt from the
 /// snapshot every frame (like the canvas draw closure): `prepare`
@@ -443,22 +551,14 @@ pub fn Viewport2dGpu(
     };
     let modifier = Modifier::new().fill_max_size().on_pointer_down(
         move |ev: repose_core::input::PointerEvent| {
-            let w = ev.position_in_window();
+            let p = ev.position;
             let Ok(g) = pick_geom.lock() else {
                 return;
             };
-            let world = dp_to_world(
-                [w.x / g.density, w.y / g.density],
-                world_size,
-                [
-                    g.look[0] + world_size[0] * 0.5,
-                    g.look[1] + world_size[1] * 0.5,
-                ],
-                g.fit,
-            );
+            let world = pick_world([p.x, p.y], *g, world_size);
             on_event(PickEvent::Click {
                 world: Vec2::new(world[0], world[1]),
-                screen: [w.x, w.y],
+                screen: [p.x, p.y],
             });
         },
     );
@@ -482,21 +582,27 @@ impl WgpuCallback for GpuViewport {
         screen: &ScreenDescriptor,
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        // World-space camera over the dp viewport (physical px divided by
-        // the last painted density): same framing the canvas path draws.
-        // Cold start (no paint yet) falls back to `viewport_px` as dp.
         let (vp_phys, density) = self
             .geom
             .lock()
-            .map(|g| (g.viewport_px, g.density.max(0.0001)))
+            .map(|g| {
+                let d = if g.density.is_finite() && g.density > 1e-6 {
+                    g.density
+                } else {
+                    1.0
+                };
+                (g.viewport_px, d)
+            })
             .unwrap_or(([1.0, 1.0], 1.0));
         let dp = if vp_phys[0] > 1.0 && vp_phys[1] > 1.0 {
             [vp_phys[0] / density, vp_phys[1] / density]
         } else {
             self.input.viewport_px
         };
+        let fit = effective_fit(dp, self.input.world_size, &self.input.cam);
+        let cam_center = [self.input.cam.center.x, self.input.cam.center.y];
         let mut batch = SpriteBatch::new(self.desc);
-        batch.set_camera(self.input.cam.view_proj(dp));
+        batch.set_camera(fit_view_proj(dp, self.input.world_size, cam_center, fit));
         for s in &self.input.sprites {
             batch.push_sprite(s);
         }
@@ -516,8 +622,6 @@ impl WgpuCallback for GpuViewport {
                 &[],
             );
         }
-        // Chroma path stages the composite (scene -> offscreen now,
-        // graded triangle in `paint`); direct path needs nothing more.
         if post::use_composite(self.input.chroma) {
             let w = vp_phys[0].max(1.0) as u32;
             let h = vp_phys[1].max(1.0) as u32;
@@ -530,6 +634,7 @@ impl WgpuCallback for GpuViewport {
                 w,
                 h,
                 self.input.chroma,
+                self.input.background,
             );
         }
         Vec::new()
@@ -541,10 +646,17 @@ impl WgpuCallback for GpuViewport {
         rpass: &mut wgpu::RenderPass<'static>,
         resources: &CallbackResources,
     ) {
-        // Fresh viewport geometry for picks + next frame's camera.
-        let d = info.pixels_per_point.max(0.0001);
+        let d = if info.pixels_per_point.is_finite() && info.pixels_per_point > 1e-6 {
+            info.pixels_per_point
+        } else {
+            1.0
+        };
         let vp = [info.viewport.w, info.viewport.h];
-        let fit = contain_fit([vp[0] / d, vp[1] / d], self.input.world_size);
+        let fit = effective_fit(
+            [vp[0] / d, vp[1] / d],
+            self.input.world_size,
+            &self.input.cam,
+        );
         let cam = [self.input.cam.center.x, self.input.cam.center.y];
         if let Ok(mut g) = self.geom.lock() {
             *g = FrameGeom {
@@ -663,9 +775,6 @@ mod tests {
             h: 2,
             rgba: page,
         }];
-        // Camera on world (64, 64) at 0.5 units/px: 128x128 world units
-        // visible over the 256x256 viewport; a 32-unit quad at the look
-        // point covers screen center (128, 128).
         let cam = Camera2d {
             center: Vec2::new(64.0, 64.0),
             units_per_pixel: 0.5,
@@ -773,6 +882,106 @@ mod tests {
         assert!(
             (sx + w * 0.5 - sboard[0]).abs() < 1e-4 && (sy + h * 0.5 - sboard[1]).abs() < 1e-4,
             "surface glued under shake"
+        );
+    }
+
+    #[test]
+    fn contain_fit_has_no_silent_clamp() {
+        for (canvas, world) in [
+            ([8000.0, 6000.0], [80.0, 60.0]),
+            ([80.0, 60.0], [8000.0, 6000.0]),
+            ([1000.0, 750.0], [800.0, 600.0]),
+        ] {
+            let fit = contain_fit(canvas, world);
+            let cam = [world[0] * 0.5, world[1] * 0.5];
+            let dp = world_to_dp([cam[0], cam[1]], world, cam, fit);
+            let back = dp_to_world(dp, world, cam, fit);
+            assert!(
+                (back[0] - cam[0]).abs() < 1e-3 && (back[1] - cam[1]).abs() < 1e-3,
+                "round trip for {canvas:?}/{world:?}, fit {fit:?} gave {back:?}"
+            );
+        }
+        assert_eq!(contain_fit([0.0, 600.0], [800.0, 600.0]), (1.0, 0.0, 0.0));
+        assert_eq!(
+            dp_to_world(
+                [10.0, 10.0],
+                [800.0, 600.0],
+                [400.0, 300.0],
+                (0.0, 0.0, 0.0)
+            ),
+            [400.0, 300.0]
+        );
+    }
+
+    #[test]
+    fn camera_guards_never_div_by_zero() {
+        let bad = Camera2d {
+            center: Vec2::ZERO,
+            units_per_pixel: 0.0,
+            zoom: 0.0,
+        };
+        let m = bad.view_proj([0.0, 0.0]);
+        assert!(m.is_finite(), "view_proj must stay finite, got {m:?}");
+        assert_eq!(bad.screen_to_world([0.0, 0.0], [5.0, 5.0]), Vec2::ZERO);
+    }
+
+    #[test]
+    fn fit_matrix_canvas_gpu_picks_agree() {
+        let cam = Camera2d {
+            center: Vec2::new(410.0, 290.0),
+            units_per_pixel: 1.0,
+            zoom: 2.0,
+        };
+        let world_size = [800.0, 600.0];
+        let density = 1.25;
+        let vp_phys = [1250.0, 750.0];
+        let canvas_dp = [vp_phys[0] / density, vp_phys[1] / density];
+        let cam_center = [cam.center.x, cam.center.y];
+        let fit = effective_fit(canvas_dp, world_size, &cam);
+        assert!((fit.0 - 2.0).abs() < 1e-4, "effective fit, got {fit:?}");
+        let vp = fit_view_proj(canvas_dp, world_size, cam_center, fit);
+        assert!(vp.is_finite());
+        for world in [[400.0, 300.0], [410.0, 290.0], [0.0, 0.0], [800.0, 600.0]] {
+            let [dx, dy] = world_to_dp(world, world_size, cam_center, fit);
+            let px = [dx * density, dy * density];
+            let ndc = vp.project_point3(glam::Vec3::new(world[0], world[1], 0.0));
+            let gpu_px = [
+                (ndc.x + 1.0) * 0.5 * vp_phys[0],
+                (1.0 - ndc.y) * 0.5 * vp_phys[1],
+            ];
+            assert!(
+                (px[0] - gpu_px[0]).abs() < 1e-2 && (px[1] - gpu_px[1]).abs() < 1e-2,
+                "canvas/GPU disagree for {world:?}: canvas {px:?} vs gpu {gpu_px:?}"
+            );
+            let back = dp_to_world(
+                [px[0] / density, px[1] / density],
+                world_size,
+                cam_center,
+                fit,
+            );
+            assert!(
+                (back[0] - world[0]).abs() < 1e-3 && (back[1] - world[1]).abs() < 1e-3,
+                "pick round trip for {world:?} gave {back:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn picks_ignore_viewport_origin() {
+        let geom = FrameGeom {
+            fit: (1.0, 100.0, 0.0),
+            look: [0.0, 0.0],
+            density: 1.25,
+            viewport_px: [1250.0, 750.0],
+        };
+        let world_size = [800.0, 600.0];
+        let a = pick_world([125.0, 75.0], geom, world_size);
+        let b = pick_world([125.0, 75.0], geom, world_size);
+        assert_eq!(a, b);
+        let [wx, wy] = pick_world([125.0, 75.0], geom, world_size);
+        assert!(
+            (wx - 0.0).abs() < 1e-4 && (wy - 60.0).abs() < 1e-4,
+            "local pick, got ({wx},{wy})"
         );
     }
 }

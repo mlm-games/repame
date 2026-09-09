@@ -307,8 +307,10 @@ fn ensure_targets(
 
 /// Render the prepared batch into the offscreen scene texture and stage
 /// the chroma uniforms. Call from `prepare` (owns the encoder); the
-/// matching [`paint_composite`] runs in `paint`.
-#[allow(clippy::too_many_arguments)] // extends `WgpuCallback::prepare` by (w, h, amount)
+/// matching [`paint_composite`] runs in `paint`. `background` sets the
+/// offscreen clear color so the composite preserves the snapshot clear
+/// (`None` clears to transparent black, as before).
+#[allow(clippy::too_many_arguments)] // extends `WgpuCallback::prepare` by (w, h, amount, bg)
 pub(crate) fn prepare_composite(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -318,6 +320,7 @@ pub(crate) fn prepare_composite(
     w: u32,
     h: u32,
     amount: f32,
+    background: Option<[f32; 4]>,
 ) {
     ensure_targets(device, screen, resources, w, h);
     let Some(all) = resources.get::<PostResources>() else {
@@ -332,6 +335,7 @@ pub(crate) fn prepare_composite(
     } else {
         (&t.scene_view, None)
     };
+    let [cr, cg, cb, ca] = background.unwrap_or([0.0, 0.0, 0.0, 0.0]);
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("post_scene"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -339,10 +343,10 @@ pub(crate) fn prepare_composite(
             resolve_target,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 0.0,
+                    r: cr as f64,
+                    g: cg as f64,
+                    b: cb as f64,
+                    a: ca as f64,
                 }),
                 store: wgpu::StoreOp::Store,
             },
@@ -425,7 +429,7 @@ mod tests {
             batch.extend_uploads(self.uploads.clone());
             batch.prepare(device, queue, encoder, screen, resources);
             if use_composite(self.amount) {
-                prepare_composite(device, queue, encoder, screen, resources, 64, 64, self.amount);
+                prepare_composite(device, queue, encoder, screen, resources, 64, 64, self.amount, None);
             }
             Vec::new()
         }

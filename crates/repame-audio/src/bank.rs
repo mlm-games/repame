@@ -63,6 +63,18 @@ struct Cue {
 }
 
 impl Cue {
+    fn step_rng(&mut self) {
+        if self.rng == 0 {
+            self.rng = 0x9E3779B97F4A7C15;
+        }
+        self.rng ^= self.rng >> 12;
+        self.rng ^= self.rng << 25;
+        self.rng ^= self.rng >> 27;
+        if self.rng == 0 {
+            self.rng = 0x2545F4914F6CDD1D;
+        }
+    }
+
     fn pick(&mut self) -> Arc<SharedFrames> {
         let i = match self.def.variation {
             Variation::RoundRobin => {
@@ -71,10 +83,7 @@ impl Cue {
                 i
             }
             Variation::Random => {
-                // xorshift64star; deterministic per seed.
-                self.rng ^= self.rng >> 12;
-                self.rng ^= self.rng << 25;
-                self.rng ^= self.rng >> 27;
+                self.step_rng();
                 ((self.rng.wrapping_mul(0x2545F4914F6CDD1D) >> 32) as usize) % self.sounds.len()
             }
         };
@@ -86,9 +95,7 @@ impl Cue {
         if w <= 0.0 {
             return 1.0;
         }
-        self.rng ^= self.rng >> 12;
-        self.rng ^= self.rng << 25;
-        self.rng ^= self.rng >> 27;
+        self.step_rng();
         let u = (self.rng >> 11) as f32 / (u64::MAX >> 11) as f32; // 0..1
         1.0 + (u * 2.0 - 1.0) * w
     }
@@ -131,8 +138,10 @@ impl SoundBank {
     }
 
     /// Deterministic variation seed (tests; default is fixed anyway).
+    /// A zero seed would lock the xorshift RNG forever, so it maps to a
+    /// fixed non-zero fallback.
     pub fn with_seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
+        self.seed = if seed == 0 { 0x9E3779B97F4A7C15 } else { seed };
         self
     }
 
@@ -159,7 +168,10 @@ impl SoundBank {
                 def,
                 sounds,
                 rr_index: 0,
-                rng: self.seed ^ name.len() as u64,
+                rng: {
+                    let r = self.seed ^ name.len() as u64;
+                    if r == 0 { 0x9E3779B97F4A7C15 } else { r }
+                },
                 last_play_ms: None,
                 live: Vec::new(),
             },

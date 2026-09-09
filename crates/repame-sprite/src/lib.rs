@@ -496,8 +496,9 @@ fn rgba8(c: [f32; 4]) -> Color {
 /// Layout contract: fills its parent. Draws `background`, then sprites,
 /// then world texts, then the fullscreen tint - all through the shared
 /// [`effective_fit`] framing of [`FrameInput::world_size`]. Pointer presses
-/// are reported via `on_event` in world coords (viewport-local, so a
-/// non-zero viewport origin never shifts picks). Each paint publishes a
+/// (`Click`) and cursor moves (`Hover`) are reported via `on_event` in
+/// world coords (viewport-local, so a non-zero viewport origin never
+/// shifts picks). Each paint publishes a
 /// [`FrameGeom`] snapshot to `geom_out` for dp-space siblings
 /// ([`ActorFrame`]); the viewport, picks, and actor surfaces therefore
 /// share one transform by construction.
@@ -514,20 +515,32 @@ pub fn Viewport2d(
     let input = Rc::new(input);
     let world_size = input.world_size;
     let pick_geom = geom_out.clone();
+    let move_geom = geom_out.clone();
     let draw_input = input.clone();
     let draw_geom = geom_out.clone();
+    let on_event = Rc::new(on_event);
+    let on_down = on_event.clone();
+    let on_move = on_event;
 
-    let modifier = Modifier::new().fill_max_size().on_pointer_down(
-        move |ev: repose_core::input::PointerEvent| {
+    let modifier = Modifier::new()
+        .fill_max_size()
+        .on_pointer_down(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
             let g = pick_geom.get();
             let world = pick_world([p.x, p.y], g, world_size);
-            on_event(PickEvent::Click {
+            on_down(PickEvent::Click {
                 world: Vec2::new(world[0], world[1]),
                 screen: [p.x, p.y],
             });
-        },
-    );
+        })
+        .on_pointer_move(move |ev: repose_core::input::PointerEvent| {
+            let p = ev.position;
+            let g = move_geom.get();
+            let world = pick_world([p.x, p.y], g, world_size);
+            on_move(PickEvent::Hover {
+                world: Vec2::new(world[0], world[1]),
+            });
+        });
     Canvas(modifier, move |scope: &mut DrawScope| {
         let d = effective_density_scale();
         let cam = draw_input.cam;
@@ -663,6 +676,10 @@ pub fn Viewport2dGpu(
     let input = Arc::new(input);
     let world_size = input.world_size;
     let pick_geom = geom_out.clone();
+    let move_geom = geom_out.clone();
+    let on_event = Arc::new(on_event);
+    let on_down = on_event.clone();
+    let on_move = on_event;
     let payload = GpuViewport {
         input: input.clone(),
         geom: geom_out,
@@ -677,19 +694,29 @@ pub fn Viewport2dGpu(
             },
         ),
     };
-    let modifier = Modifier::new().fill_max_size().on_pointer_down(
-        move |ev: repose_core::input::PointerEvent| {
+    let modifier = Modifier::new()
+        .fill_max_size()
+        .on_pointer_down(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
             let Ok(g) = pick_geom.lock() else {
                 return;
             };
             let world = pick_world([p.x, p.y], *g, world_size);
-            on_event(PickEvent::Click {
+            on_down(PickEvent::Click {
                 world: Vec2::new(world[0], world[1]),
                 screen: [p.x, p.y],
             });
-        },
-    );
+        })
+        .on_pointer_move(move |ev: repose_core::input::PointerEvent| {
+            let p = ev.position;
+            let Ok(g) = move_geom.lock() else {
+                return;
+            };
+            let world = pick_world([p.x, p.y], *g, world_size);
+            on_move(PickEvent::Hover {
+                world: Vec2::new(world[0], world[1]),
+            });
+        });
     Embedded(modifier, Callback::new(payload))
 }
 

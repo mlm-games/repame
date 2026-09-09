@@ -1,8 +1,11 @@
-//! App wiring: Repose platform runner + sim stepping + viewport mount.
+//! App wiring: Repose platform runners + sim/gamepad helpers.
 //!
-//! A game provides a root view and a [`ShellHooks`] implementation; the
-//! shell owns the frame loop glue (desktop runner, fixed-step sim advance,
-//! gamepad polling). Per-game UI stays in the game crate as Repose views.
+//! A game provides a root view; [`ShellHooks`] is the game-side per-frame
+//! contract (snapshot production + variable-rate hook) that the game's own
+//! root closure drives. The `run_*` runners below are thin mounts only:
+//! they do not call `ShellHooks` or step the sim — stepping stays game-side
+//! via [`Sim::step`] (see the rozvp pilot runner for the reference wiring).
+//! Per-game UI stays in the game crate as Repose views.
 
 use std::collections::HashSet;
 use web_time::Duration;

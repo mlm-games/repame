@@ -23,6 +23,11 @@ pub mod batch;
 use batch::draw_batch;
 pub use batch::{AtlasUpload, BatchDesc, SpriteBatch, TextureFilter, instance_rows, screen_camera};
 
+pub mod fullscreen;
+pub use fullscreen::{FullscreenDesc, FullscreenPass, FullscreenTexture};
+
+pub mod post;
+
 /// 2D orthographic camera. Owned by the UI (Repose signal), copied into the
 /// snapshot per frame.
 #[derive(Clone, Copy, Debug)]
@@ -46,15 +51,19 @@ impl Default for Camera2d {
 }
 
 impl Camera2d {
+    /// Y-down view-projection (Godot/canvas convention: world +y points
+    /// screen-down): matches `screen_camera`, the canvas path, and the
+    /// `dp_to_world`/`world_to_dp` helpers by construction.
     pub fn view_proj(&self, viewport_px: [f32; 2]) -> Mat4 {
         let w = viewport_px[0] * self.units_per_pixel / self.zoom;
         let h = viewport_px[1] * self.units_per_pixel / self.zoom;
-        // Right-handed, 0..1 depth: matches wgpu NDC.
+        // Right-handed, 0..1 depth: matches wgpu NDC. Bottom/top swapped
+        // vs. the y-up form so world +y maps to NDC down.
         let proj = glam::camera::rh::proj::directx::orthographic(
             -w / 2.0,
             w / 2.0,
-            -h / 2.0,
             h / 2.0,
+            -h / 2.0,
             -1000.0,
             1000.0,
         );
@@ -146,6 +155,12 @@ pub struct FrameInput {
     /// Optional fullscreen tint/color-grading hook (e.g. FOW dimming,
     /// damage flash). Applied after the sprite pass.
     pub overlay_color: Option<[f32; 4]>,
+    /// Chromatic aberration amount (bevy `chromatic_intensity` units;
+    /// NT pulses land at 0.04..0.7). GPU viewports render the scene
+    /// offscreen and composite it back with an RGB split; `0.0` keeps
+    /// the zero-cost direct path. Canvas viewports ignore it (sampling
+    /// FX need pixels, and the canvas path is vector commands).
+    pub chroma: f32,
 }
 
 /// UI-facing pointer events from the viewport.
@@ -381,6 +396,14 @@ pub fn Viewport2d(
 /// GPU twin of [`Viewport2d`]: same snapshot in, same picks out, but
 /// sprites draw as textured atlas quads through [`SpriteBatch`].
 ///
+/// The snapshot camera is honored exactly like the canvas path: sprites
+/// are world-space and the batch is built with `cam.view_proj` over the
+/// density-corrected viewport (physical px / density, same dp the canvas
+/// path draws in). `background` paints first as a uniform-only fullscreen
+/// fill so GPU and canvas agree on every `FrameInput` field except world
+/// texts and tint, which stay canvas-view features for now: GPU
+/// consumers compose those as sibling views.
+///
 /// Layout contract: fills its parent. The payload is rebuilt from the
 /// snapshot every frame (like the canvas draw closure): `prepare`
 /// rebuilds the batch, and camera from the last painted viewport (cold
@@ -390,8 +413,9 @@ pub fn Viewport2d(
 /// atlas queue once per frame, so each upload applies exactly once.
 /// Geometry crosses the render thread behind a mutex (`WgpuCallback`
 /// payloads must be `Send + Sync`), picks read it back on the UI side.
-/// Background, world texts, and tint stay canvas-view features for now:
-/// GPU consumers compose them as sibling views.
+/// `FrameInput::chroma` above `0.0` renders the scene offscreen and
+/// composites it back with an RGB split (see `post`); `0.0` draws the
+/// batch straight into the main pass.
 #[allow(non_snake_case)]
 pub fn Viewport2dGpu(
     input: FrameInput,
@@ -408,6 +432,14 @@ pub fn Viewport2dGpu(
         geom: geom_out,
         uploads,
         desc,
+        bg: FullscreenPass::new(
+            "viewport2d.background",
+            fullscreen::SOLID_WGSL,
+            FullscreenDesc {
+                texture_slots: 0,
+                filter: TextureFilter::Nearest,
+            },
+        ),
     };
     let modifier = Modifier::new().fill_max_size().on_pointer_down(
         move |ev: repose_core::input::PointerEvent| {
@@ -438,6 +470,7 @@ struct GpuViewport {
     geom: Arc<Mutex<FrameGeom>>,
     uploads: Vec<AtlasUpload>,
     desc: BatchDesc,
+    bg: FullscreenPass,
 }
 
 impl WgpuCallback for GpuViewport {
@@ -449,23 +482,57 @@ impl WgpuCallback for GpuViewport {
         screen: &ScreenDescriptor,
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        let vp = self
+        // World-space camera over the dp viewport (physical px divided by
+        // the last painted density): same framing the canvas path draws.
+        // Cold start (no paint yet) falls back to `viewport_px` as dp.
+        let (vp_phys, density) = self
             .geom
             .lock()
-            .map(|g| g.viewport_px)
-            .unwrap_or([1.0, 1.0]);
-        let vp = if vp[0] > 1.0 && vp[1] > 1.0 {
-            vp
+            .map(|g| (g.viewport_px, g.density.max(0.0001)))
+            .unwrap_or(([1.0, 1.0], 1.0));
+        let dp = if vp_phys[0] > 1.0 && vp_phys[1] > 1.0 {
+            [vp_phys[0] / density, vp_phys[1] / density]
         } else {
             self.input.viewport_px
         };
         let mut batch = SpriteBatch::new(self.desc);
-        batch.set_camera(screen_camera(vp));
+        batch.set_camera(self.input.cam.view_proj(dp));
         for s in &self.input.sprites {
             batch.push_sprite(s);
         }
         batch.extend_uploads(self.uploads.clone());
-        batch.prepare(device, queue, encoder, screen, resources)
+        batch.prepare(device, queue, encoder, screen, resources);
+        // Background first (uniform-only fill, same color the canvas
+        // path fills under the batch). Skipped when the snapshot has
+        // none so transparent scenes keep compositing.
+        if let Some(bg) = self.input.background {
+            let words = [bg[0], bg[1], bg[2], bg[3]];
+            self.bg.prepare_with(
+                device,
+                queue,
+                screen,
+                resources,
+                bytemuck::cast_slice(&words),
+                &[],
+            );
+        }
+        // Chroma path stages the composite (scene -> offscreen now,
+        // graded triangle in `paint`); direct path needs nothing more.
+        if post::use_composite(self.input.chroma) {
+            let w = vp_phys[0].max(1.0) as u32;
+            let h = vp_phys[1].max(1.0) as u32;
+            post::prepare_composite(
+                device,
+                queue,
+                encoder,
+                screen,
+                resources,
+                w,
+                h,
+                self.input.chroma,
+            );
+        }
+        Vec::new()
     }
 
     fn paint(
@@ -490,7 +557,16 @@ impl WgpuCallback for GpuViewport {
                 viewport_px: vp,
             };
         }
-        draw_batch(rpass, resources);
+        if post::use_composite(self.input.chroma) {
+            post::paint_composite(rpass, resources);
+        } else {
+            // Snapshot background first (opaque uniform fill), then the
+            // sprite batch on top: same order as the canvas path.
+            if self.input.background.is_some() {
+                self.bg.paint(info, rpass, resources);
+            }
+            draw_batch(rpass, resources);
+        }
     }
 }
 
@@ -559,6 +635,107 @@ mod tests {
             (back[0] - 400.0).abs() < 1e-4 && (back[1] - 300.0).abs() < 1e-4,
             "shifted round trip, got {back:?}"
         );
+    }
+
+    #[test]
+    fn gpu_viewport_honors_cam_and_background() {
+        // End-to-end GPU proof for the viewport contract: the snapshot
+        // camera frames world sprites (cam center lands on the screen
+        // center) and `background` fills every uncovered pixel. Skips
+        // gracefully where no GPU exists.
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, offscreen::OffscreenRenderer};
+
+        let mut renderer = match OffscreenRenderer::new_blocking(256, 256, 1) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SKIP gpu viewport test (no GPU): {e}");
+                return;
+            }
+        };
+        // Page 0: solid magenta 2x2.
+        let page = [255, 0, 255, 255].repeat(4);
+        let uploads = vec![AtlasUpload {
+            page: 0,
+            x: 0,
+            y: 0,
+            w: 2,
+            h: 2,
+            rgba: page,
+        }];
+        // Camera on world (64, 64) at 0.5 units/px: 128x128 world units
+        // visible over the 256x256 viewport; a 32-unit quad at the look
+        // point covers screen center (128, 128).
+        let cam = Camera2d {
+            center: Vec2::new(64.0, 64.0),
+            units_per_pixel: 0.5,
+            zoom: 1.0,
+        };
+        let input = FrameInput {
+            cam,
+            world_size: [128.0, 128.0],
+            viewport_px: [256.0, 256.0],
+            sprites: vec![SpriteInstance {
+                center: Vec2::new(64.0, 64.0),
+                size: Vec2::new(32.0, 32.0),
+                uv_min: Vec2::new(0.0, 0.0),
+                uv_max: Vec2::new(1.0, 1.0),
+                color: [1.0, 1.0, 1.0, 1.0],
+                ..Default::default()
+            }],
+            texts: Vec::new(),
+            background: Some([0.0, 0.0, 1.0, 1.0]),
+            overlay_color: None,
+            chroma: 0.0,
+        };
+        let geom = Arc::new(Mutex::new(FrameGeom {
+            fit: (1.0, 0.0, 0.0),
+            look: [0.0, 0.0],
+            density: 1.0,
+            viewport_px: [256.0, 256.0],
+        }));
+        let payload = GpuViewport {
+            input: Arc::new(input),
+            geom,
+            uploads,
+            desc: BatchDesc {
+                layer_size: 2,
+                layers: 1,
+                filter: TextureFilter::Nearest,
+            },
+            bg: FullscreenPass::new(
+                "test.viewport2d.background",
+                fullscreen::SOLID_WGSL,
+                FullscreenDesc {
+                    texture_slots: 0,
+                    filter: TextureFilter::Nearest,
+                },
+            ),
+        };
+        let scene = Scene {
+            clear_color: Color::from_rgba(0, 0, 0, 255),
+            nodes: vec![SceneNode::Callback {
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 256.0,
+                    h: 256.0,
+                },
+                payload: Callback::new(payload),
+            }],
+        };
+        let px = renderer
+            .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+            .expect("offscreen render");
+        let at = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * 256 + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+        // Corners are outside the centered quad: snapshot background.
+        assert_eq!(at(8, 8), [0, 0, 255, 255], "background fill");
+        assert_eq!(at(247, 247), [0, 0, 255, 255], "background fill");
+        // Screen center carries the cam-centered sprite (magenta page).
+        assert_eq!(at(128, 128), [255, 0, 255, 255], "cam-centered quad");
     }
 
     #[test]

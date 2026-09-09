@@ -110,8 +110,8 @@ pub fn instance_rows(
 }
 
 /// Y-down orthographic camera: world (0,0) is the top-left of the
-/// viewport, matching canvas orientation by construction (unlike the
-/// y-up `Camera2d::view_proj`, which serves bevy-parity consumers).
+/// viewport, matching canvas orientation by construction (same matrix
+/// `Camera2d::view_proj` builds).
 pub fn screen_camera(viewport_px: [f32; 2]) -> Mat4 {
     // Right-handed, 0..1 depth: matches wgpu NDC.
     glam::camera::rh::proj::directx::orthographic(

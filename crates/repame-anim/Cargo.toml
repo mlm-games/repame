@@ -1,0 +1,13 @@
+[package]
+name = "repame-anim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bevy_ecs.workspace = true
+repame-atlas.workspace = true
+serde.workspace = true
+serde_json.workspace = true

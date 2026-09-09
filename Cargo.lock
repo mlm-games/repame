@@ -3362,10 +3362,22 @@ name = "repame-actors"
 version = "0.1.7"
 dependencies = [
  "anyhow",
+ "glam 0.33.6",
  "log",
  "renamite-player",
  "renamite-player-ui",
+ "repose-canvas",
  "repose-core",
+]
+
+[[package]]
+name = "repame-anim"
+version = "0.1.7"
+dependencies = [
+ "bevy_ecs",
+ "repame-atlas",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

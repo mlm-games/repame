@@ -11,5 +11,7 @@ description = "live vector actors (.ren rigs played through renamite-player with
 renamite-player.workspace = true
 renamite-player-ui.workspace = true
 repose-core.workspace = true
+repose-canvas.workspace = true
+glam.workspace = true
 anyhow.workspace = true
 log.workspace = true

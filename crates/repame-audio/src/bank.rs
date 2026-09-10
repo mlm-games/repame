@@ -91,7 +91,7 @@ impl Cue {
     }
 
     fn rate(&mut self) -> f32 {
-        let w = self.def.pitch_wobble.max(0.0);
+        let w = self.def.pitch_wobble.clamp(0.0, 1.0);
         if w <= 0.0 {
             return 1.0;
         }
@@ -229,6 +229,9 @@ impl SoundBank {
         };
         let cue = self.cues.get_mut(name)?;
         if cue.sounds.is_empty() {
+            return None;
+        }
+        if cue.def.max_voices == 0 {
             return None;
         }
         if let Some(last) = cue.last_play_ms
@@ -408,6 +411,41 @@ mod tests {
         let (_, right) = spatial_2d(5.0, 0.0, 1.0);
         let (_, left) = spatial_2d(-5.0, 0.0, 1.0);
         assert!(right > 0.9 && left < -0.9);
+    }
+
+    #[test]
+    fn zero_voices_mutes() {
+        let (mut bank, _game, _thread) = banked();
+        let a = wav(440.0);
+        bank.load(
+            "mute",
+            CueDef {
+                max_voices: 0,
+                ..Default::default()
+            },
+            &[&a],
+        )
+        .unwrap();
+        assert_eq!(bank.play_at_ms("mute", 1.0, 1.0, 0.0, 0), None);
+    }
+
+    #[test]
+    fn wobble_never_reverses_rate() {
+        let (mut bank, _game, _thread) = banked();
+        let a = wav(440.0);
+        bank.load(
+            "wild",
+            CueDef {
+                pitch_wobble: 99.0,
+                ..Default::default()
+            },
+            &[&a],
+        )
+        .unwrap();
+        for t in 0..16 {
+            let rate = bank.play_at_ms("wild", 1.0, 1.0, 0.0, t).unwrap().1;
+            assert!((0.0..=2.0).contains(&rate), "rate={rate}");
+        }
     }
 
     #[test]

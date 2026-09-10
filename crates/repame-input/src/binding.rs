@@ -50,6 +50,9 @@ impl Binding {
     /// exactly 0.0 is inactive), so a centered stick never holds an
     /// action forever.
     pub fn axis_active(threshold: f32, value: f32) -> bool {
+        if !value.is_finite() {
+            return false;
+        }
         if threshold == 0.0 {
             value != 0.0
         } else if threshold > 0.0 {
@@ -73,5 +76,8 @@ mod tests {
         assert!(!Binding::axis_active(0.0, 0.0));
         assert!(Binding::axis_active(0.0, 0.1));
         assert!(Binding::axis_active(0.0, -0.1));
+        assert!(!Binding::axis_active(0.0, f32::NAN));
+        assert!(!Binding::axis_active(0.5, f32::NAN));
+        assert!(!Binding::axis_active(-0.5, f32::NAN));
     }
 }

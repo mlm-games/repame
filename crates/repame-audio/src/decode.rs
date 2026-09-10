@@ -111,6 +111,13 @@ pub fn resample_linear(sound: &SharedFrames, target_hz: u32) -> SharedFrames {
     let ratio = sound.sample_rate as f64 / target_hz as f64;
     let n_ch = sound.channels.max(1) as usize;
     let n_in = sound.len_frames();
+    if n_in == 0 {
+        return SharedFrames {
+            sample_rate: target_hz,
+            channels: sound.channels,
+            frames: Vec::new(),
+        };
+    }
     let n_out = ((n_in as f64 / ratio) as usize).max(1);
     let mut frames = Vec::with_capacity(n_out * n_ch);
     for i in 0..n_out {
@@ -154,6 +161,18 @@ mod tests {
         assert!(decode_bytes(&[]).is_err());
         assert!(decode_bytes(&[7, 7, 7, 7]).is_err());
         assert!(decode_bytes(b"ID3....nope").is_err());
+    }
+
+    #[test]
+    fn resample_empty_stays_empty() {
+        let empty = SharedFrames {
+            sample_rate: 44100,
+            channels: 1,
+            frames: Vec::new(),
+        };
+        let out = resample_linear(&empty, 48000);
+        assert_eq!(out.sample_rate, 48000);
+        assert!(out.frames.is_empty());
     }
 
     #[test]

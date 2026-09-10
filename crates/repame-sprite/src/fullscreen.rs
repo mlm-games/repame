@@ -16,7 +16,7 @@ pub const SOLID_WGSL: &str = r#"
     }
     @fragment
     fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-        return vec4<f32>(u.color.rgb, 1.0);
+        return u.color;
     }
 "#;
 
@@ -368,13 +368,13 @@ impl FullscreenPass {
                 },
             );
         }
-        if relayout {
+        if relayout && inst.slots.iter().all(|s| s.is_some()) {
             let views: Vec<wgpu::TextureView> = inst
                 .slots
                 .iter()
                 .map(|slot| {
                     slot.as_ref()
-                        .expect("relayout needs every slot uploaded")
+                        .expect("all slots checked Some above")
                         .0
                         .create_view(&wgpu::TextureViewDescriptor::default())
                 })

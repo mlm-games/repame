@@ -285,6 +285,10 @@ pub struct FrameInput {
     pub cam: Camera2d,
     /// World-space extent the contain-fit maps into the viewport.
     pub world_size: [f32; 2],
+    /// Cold-start viewport size in **dp** (physical px / density), used for
+    /// the GPU camera until the first painted [`FrameGeom`] arrives.
+    /// Must be dp, not physical px, or the first frame's fit is off by
+    /// the density factor on HiDPI screens.
     pub viewport_px: [f32; 2],
     pub sprites: Vec<SpriteInstance>,
     /// World-anchored text, drawn after the sprite pass.

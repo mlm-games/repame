@@ -131,9 +131,10 @@ pub fn actors_view(host: PlayerHostRef, ctx: RenderContext) -> View {
 /// call.
 pub fn actors_view_with(host: PlayerHostRef, ctx: RenderContext, opts: ActorViewOpts) -> View {
     let draw = host.clone();
-    // Margin fit must survive redraws (user zoom), so refit only on
-    // resize. Mirrors upstream's private `ensure_fit`.
+    // Fit inputs must survive redraws (user zoom), so refit only when the
+    // surface or the artboard changes. Mirrors upstream's private `ensure_fit`.
     let last_size = Rc::new(Cell::new([-1.0f64, -1.0f64]));
+    let last_art = Rc::new(Cell::new([-1.0f64, -1.0f64]));
 
     let mut modifier = Modifier::new().fill_max_size();
     if opts.chrome {
@@ -216,13 +217,18 @@ pub fn actors_view_with(host: PlayerHostRef, ctx: RenderContext, opts: ActorView
                 if !art_valid {
                     return;
                 }
-                // Exact-fit the artboard into the surface (no editor
-                // margin), then center. Clamped to upstream's sane
-                // range so degenerate artboards can't blow up the view.
-                let scale = ((sw / art.x).min(sh / art.y)).clamp(0.05, 64.0);
-                h.view.scale = scale;
-                h.view.offset.x = (sw - art.x * scale) * 0.5;
-                h.view.offset.y = (sh - art.y * scale) * 0.5;
+                let prev = last_size.get();
+                let prev_art = last_art.get();
+                if (sw - prev[0]).abs().max((sh - prev[1]).abs()) > 0.5
+                    || (art.x - prev_art[0]).abs().max((art.y - prev_art[1]).abs()) > 0.5
+                {
+                    let scale = ((sw / art.x).min(sh / art.y)).clamp(0.05, 64.0);
+                    h.view.scale = scale;
+                    h.view.offset.x = (sw - art.x * scale) * 0.5;
+                    h.view.offset.y = (sh - art.y * scale) * 0.5;
+                    last_size.set([sw, sh]);
+                    last_art.set([art.x, art.y]);
+                }
             }
             ActorFit::Margin => {
                 let prev = last_size.get();
@@ -234,8 +240,7 @@ pub fn actors_view_with(host: PlayerHostRef, ctx: RenderContext, opts: ActorView
         }
         if h.dirty_images {
             let host = &mut *h;
-            host
-                .renderer
+            host.renderer
                 .sync_document_images(&host.player.project.document, &ctx);
             host.dirty_images = false;
         }
@@ -307,14 +312,46 @@ fn paint_chrome(scope: &mut DrawScope, artboard: DVec2, scale: f64, offset: DVec
     let bw = width as f32;
     let bh = height as f32;
     let border = th.surface_container_high;
-    scope.draw_rect(Rect { x: bx - 1.0, y: by - 1.0, w: bw + 2.0, h: 1.0 }, border, 0.0);
     scope.draw_rect(
-        Rect { x: bx - 1.0, y: by + bh, w: bw + 2.0, h: 1.0 },
+        Rect {
+            x: bx - 1.0,
+            y: by - 1.0,
+            w: bw + 2.0,
+            h: 1.0,
+        },
         border,
         0.0,
     );
-    scope.draw_rect(Rect { x: bx - 1.0, y: by, w: 1.0, h: bh }, border, 0.0);
-    scope.draw_rect(Rect { x: bx + bw, y: by, w: 1.0, h: bh }, border, 0.0);
+    scope.draw_rect(
+        Rect {
+            x: bx - 1.0,
+            y: by + bh,
+            w: bw + 2.0,
+            h: 1.0,
+        },
+        border,
+        0.0,
+    );
+    scope.draw_rect(
+        Rect {
+            x: bx - 1.0,
+            y: by,
+            w: 1.0,
+            h: bh,
+        },
+        border,
+        0.0,
+    );
+    scope.draw_rect(
+        Rect {
+            x: bx + bw,
+            y: by,
+            w: 1.0,
+            h: bh,
+        },
+        border,
+        0.0,
+    );
 }
 
 #[cfg(test)]
@@ -347,8 +384,7 @@ mod tests {
         // View construction is pure data (paint closures run later on
         // the render thread), so all four corners build headless.
         let ctx = RenderContext::new();
-        let _presentational =
-            actors_view(host_from_str(MINIMAL_REN).unwrap(), ctx.clone());
+        let _presentational = actors_view(host_from_str(MINIMAL_REN).unwrap(), ctx.clone());
         let _full = actors_view_with(
             host_from_str(MINIMAL_REN).unwrap(),
             ctx.clone(),

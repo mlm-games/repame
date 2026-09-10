@@ -76,15 +76,21 @@ impl Audio {
     }
 
     /// Per-frame pump with real dt: drain voice completions, prune bank
-    /// accounting, advance the music duck envelope.
+    /// accounting, advance the music duck envelope. Pair with
+    /// [`take_finished`](Self::take_finished) each frame: completions
+    /// accumulate until taken (each id is reported exactly once).
     pub fn update(&mut self, dt_secs: f32) {
+        let mut fresh = Vec::new();
         if let Some(link) = &self.link {
             while let Ok(ev) = link.events.try_recv() {
-                self.finished.push(ev.voice());
+                fresh.push(ev.voice());
             }
         }
-        self.bank.reap(&self.finished);
-        self.music.reap(&self.finished);
+        if !fresh.is_empty() {
+            self.bank.reap(&fresh);
+            self.music.reap(&fresh);
+            self.finished.extend(fresh);
+        }
         self.music.update(dt_secs);
     }
 

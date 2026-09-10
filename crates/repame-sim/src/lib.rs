@@ -105,6 +105,9 @@ impl Sim {
     /// // `steps` ticks ran; build the viewport snapshot from `sim.world`.
     /// ```
     pub fn step(&mut self, dt: Duration) -> u32 {
+        if self.step.is_zero() {
+            return 0;
+        }
         self.accumulator += dt;
         let mut ran = 0;
         while self.accumulator >= self.step && ran < self.max_steps.max(1) {
@@ -171,6 +174,15 @@ mod tests {
         assert_eq!(ran, 3);
         let time = sim.world.resource::<SimTime>();
         assert!((time.elapsed_secs - 3.0 / 60.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_step_never_ticks() {
+        let mut sim = Sim::new(Duration::ZERO);
+        let ran = sim.step(Duration::from_secs(10));
+        assert_eq!(ran, 0);
+        let time = sim.world.resource::<SimTime>();
+        assert_eq!(time.elapsed_secs, 0.0);
     }
 
     #[test]

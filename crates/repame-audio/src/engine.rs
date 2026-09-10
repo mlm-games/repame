@@ -151,7 +151,13 @@ pub(crate) fn render_block(core: &mut EngineCore, out: &mut [f32], out_channels:
             }
         }
         let step = voice.rate.max(0.01) as f64 * voice.sound.sample_rate as f64 / dev_rate as f64;
-        let g = voice.gain * state.bus_gain(voice.bus);
+        let g = voice.gain
+            * state.bus_gain(voice.bus)
+            * if voice.bus == AudioChannel::Master {
+                1.0
+            } else {
+                state.bus_gain(AudioChannel::Master)
+            };
         let (lg, rg) = pan_gains(voice.pan);
         let n_ch = voice.sound.channels.max(1) as usize;
         let stereo_out = out_channels >= 2;
@@ -495,6 +501,29 @@ mod tests {
         assert_eq!(
             game.events.try_recv().expect("completion"),
             EngineEvent::Finished(id)
+        );
+    }
+
+    #[test]
+    fn master_bus_gates_all_voices() {
+        let (mut core, game) = core();
+        let id = game.state.alloc_voice();
+        game.tx
+            .send_spin(RealtimeCommand::Play(flat_cmd(id, 440.0, 0.0)))
+            .expect("send");
+        let out = render(&mut core, 512);
+        let peak: f32 = out.iter().map(|v| v.abs()).fold(0.0, f32::max);
+        assert!(peak > 0.1, "audible before mute, peak={peak}");
+        game.tx
+            .send_spin(RealtimeCommand::SetBus {
+                bus: AudioChannel::Master,
+                gain: 0.0,
+            })
+            .expect("send");
+        let out = render(&mut core, 512);
+        assert!(
+            out.iter().all(|v| *v == 0.0),
+            "master at 0 must silence sfx voices"
         );
     }
 

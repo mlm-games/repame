@@ -431,7 +431,12 @@ impl AnimPlayer {
             return;
         }
         let f = frame.min(self.frames - 1) as f32;
-        self.pos = (f + progress.clamp(0.0, 1.0)).clamp(0.0, (self.frames - 1) as f32);
+        let p = if self.backward() {
+            1.0 - progress.clamp(0.0, 1.0)
+        } else {
+            progress.clamp(0.0, 1.0)
+        };
+        self.pos = (f + p).clamp(0.0, (self.frames - 1) as f32);
         self.finished = false;
     }
 
@@ -466,22 +471,27 @@ impl AnimPlayer {
         if step == 0.0 {
             return (false, false);
         }
+        let estep = if self.backward() {
+            -step.abs()
+        } else {
+            step.abs()
+        };
         let last = (self.frames - 1) as f32;
         let pos_before = self.pos;
         match self.loop_mode {
             LoopMode::Loop => {
-                self.pos = (self.pos + step).rem_euclid(self.frames as f32);
-                let wrapped = if step > 0.0 {
-                    pos_before + step >= self.frames as f32
+                self.pos = (self.pos + estep).rem_euclid(self.frames as f32);
+                let wrapped = if estep > 0.0 {
+                    pos_before + estep >= self.frames as f32
                 } else {
-                    pos_before + step < 0.0
+                    pos_before + estep < 0.0
                 };
                 (self.frame() != before, wrapped)
             }
             LoopMode::Once => {
-                self.pos += step;
+                self.pos += estep;
                 if self.pos >= self.frames as f32 || self.pos < 0.0 {
-                    self.pos = if step > 0.0 { last } else { 0.0 };
+                    self.pos = if estep > 0.0 { last } else { 0.0 };
                     self.playing = false;
                     self.finished = true;
                     (self.frame() != before, true)
@@ -723,6 +733,47 @@ mod tests {
         p.stop();
         assert_eq!(p.frame(), 0);
         assert!(!p.is_playing());
+    }
+
+    #[test]
+    fn loop_play_backwards_reverses() {
+        let def = AnimDef {
+            frames: 4,
+            w: 8,
+            h: 8,
+            fps: 10.0,
+            xorigin: 0.0,
+            yorigin: 0.0,
+        };
+        let mut p = AnimPlayer::new(&def, LoopMode::Loop);
+        p.play_backwards();
+        assert_eq!(p.frame(), 3);
+        p.advance(0.05);
+        assert_eq!(p.frame(), 2, "reverse steps back, got {}", p.frame());
+        let mut q = AnimPlayer::new(&def, LoopMode::Once);
+        q.play();
+        q.set_frame_and_progress(2, 0.0);
+        q.play_backwards();
+        let (changed, ended) = q.advance(0.05);
+        assert!(changed && !ended);
+        assert_eq!(q.frame(), 1);
+    }
+
+    #[test]
+    fn set_frame_and_progress_round_trips_in_reverse() {
+        let def = AnimDef {
+            frames: 4,
+            w: 8,
+            h: 8,
+            fps: 10.0,
+            xorigin: 0.0,
+            yorigin: 0.0,
+        };
+        let mut p = AnimPlayer::new(&def, LoopMode::Loop);
+        p.set_speed_scale(-1.0);
+        p.play();
+        p.set_frame_and_progress(1, 0.8);
+        assert!((p.frame_progress() - 0.8).abs() < 1e-6);
     }
     /// Full nt catalog pack: proves the real content budget. Reads
     /// `$NT_ASSETS/images/anims.json` (else the nt checkout next to

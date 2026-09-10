@@ -168,13 +168,16 @@ impl Atlas {
     }
 
     /// Drop everything; queues one [`PageClear`] per touched page so the
-    /// backend can recycle whole textures.
+    /// backend can recycle whole textures. Also discards pending writes:
+    /// they reference placements that no longer exist, and a backend
+    /// applying writes after the clear would resurrect deleted texels.
     pub fn clear(&mut self) {
         for page in 0..self.pages.len() as u32 {
             self.queue.push_clear(PageClear { page });
         }
         self.pages.clear();
         self.entries.clear();
+        let _ = self.queue.drain_writes();
     }
 
     /// Live entry count.
@@ -275,6 +278,18 @@ mod tests {
         assert_eq!(uv.max, [0.5, 0.5]);
         assert_eq!(atlas.uv_rect(atlas_id("a")), Some(uv));
         assert_eq!(atlas.uv_rect(atlas_id("missing")), None);
+    }
+
+    #[test]
+    fn clear_discards_pending_writes() {
+        let mut atlas = Atlas::new(AtlasDesc {
+            size: 64,
+            max_pages: 1,
+        });
+        atlas.alloc_str("a", 16, 16).unwrap();
+        atlas.clear();
+        assert!(atlas.drain_writes().is_empty());
+        assert_eq!(atlas.drain_clears().len(), 1);
     }
 
     #[test]

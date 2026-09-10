@@ -311,6 +311,29 @@ pub struct FrameInput {
 pub enum PickEvent {
     Click { world: Vec2, screen: [f32; 2] },
     Hover { world: Vec2 },
+    /// Touch/pen contact began: pointer id + window-physical px
+    /// (y-down, `origin + position`). Mouse never emits these; taps
+    /// still emit `Click` too (button/UI parity).
+    TouchDown { id: u64, screen: [f32; 2] },
+    /// Touch/pen contact moved (same coordinate space as `TouchDown`).
+    TouchMove { id: u64, screen: [f32; 2] },
+    /// Touch/pen contact ended (up / leave).
+    TouchUp { id: u64 },
+}
+
+/// Touch/pen pointers drive game touch zones; mouse stays on the
+/// click/hover path.
+fn is_touch(ev: &repose_core::input::PointerEvent) -> bool {
+    matches!(
+        ev.kind,
+        repose_core::input::PointerKind::Touch | repose_core::input::PointerKind::Pen
+    )
+}
+
+/// Window-physical px (y-down) for touch-zone sampling.
+fn screen_of(ev: &repose_core::input::PointerEvent) -> [f32; 2] {
+    let p = ev.position_in_window();
+    [p.x, p.y]
 }
 
 /// Clamp helper: finite positive values pass through, everything else
@@ -524,7 +547,11 @@ pub fn Viewport2d(
     let draw_geom = geom_out.clone();
     let on_event = Rc::new(on_event);
     let on_down = on_event.clone();
-    let on_move = on_event;
+    let on_touch_down = on_event.clone();
+    let on_move = on_event.clone();
+    let on_touch_move = on_event.clone();
+    let on_up = on_event.clone();
+    let on_leave = on_event;
 
     let modifier = Modifier::new()
         .fill_max_size()
@@ -536,6 +563,12 @@ pub fn Viewport2d(
                 world: Vec2::new(world[0], world[1]),
                 screen: [p.x, p.y],
             });
+            if is_touch(&ev) {
+                on_touch_down(PickEvent::TouchDown {
+                    id: ev.id.0,
+                    screen: screen_of(&ev),
+                });
+            }
         })
         .on_pointer_move(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
@@ -544,6 +577,22 @@ pub fn Viewport2d(
             on_move(PickEvent::Hover {
                 world: Vec2::new(world[0], world[1]),
             });
+            if is_touch(&ev) {
+                on_touch_move(PickEvent::TouchMove {
+                    id: ev.id.0,
+                    screen: screen_of(&ev),
+                });
+            }
+        })
+        .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
+            if is_touch(&ev) {
+                on_up(PickEvent::TouchUp { id: ev.id.0 });
+            }
+        })
+        .on_pointer_leave(move |ev: repose_core::input::PointerEvent| {
+            if is_touch(&ev) {
+                on_leave(PickEvent::TouchUp { id: ev.id.0 });
+            }
         });
     Canvas(modifier, move |scope: &mut DrawScope| {
         let d = effective_density_scale();
@@ -683,7 +732,11 @@ pub fn Viewport2dGpu(
     let move_geom = geom_out.clone();
     let on_event = Arc::new(on_event);
     let on_down = on_event.clone();
-    let on_move = on_event;
+    let on_touch_down = on_event.clone();
+    let on_move = on_event.clone();
+    let on_touch_move = on_event.clone();
+    let on_up = on_event.clone();
+    let on_leave = on_event;
     let payload = GpuViewport {
         input: input.clone(),
         geom: geom_out,
@@ -710,6 +763,12 @@ pub fn Viewport2dGpu(
                 world: Vec2::new(world[0], world[1]),
                 screen: [p.x, p.y],
             });
+            if is_touch(&ev) {
+                on_touch_down(PickEvent::TouchDown {
+                    id: ev.id.0,
+                    screen: screen_of(&ev),
+                });
+            }
         })
         .on_pointer_move(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
@@ -720,6 +779,22 @@ pub fn Viewport2dGpu(
             on_move(PickEvent::Hover {
                 world: Vec2::new(world[0], world[1]),
             });
+            if is_touch(&ev) {
+                on_touch_move(PickEvent::TouchMove {
+                    id: ev.id.0,
+                    screen: screen_of(&ev),
+                });
+            }
+        })
+        .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
+            if is_touch(&ev) {
+                on_up(PickEvent::TouchUp { id: ev.id.0 });
+            }
+        })
+        .on_pointer_leave(move |ev: repose_core::input::PointerEvent| {
+            if is_touch(&ev) {
+                on_leave(PickEvent::TouchUp { id: ev.id.0 });
+            }
         });
     Embedded(modifier, Callback::new(payload))
 }
@@ -1201,5 +1276,31 @@ mod tests {
         assert!((p[0] - 100.0).abs() < 1e-2, "settles, got {p:?}");
         assert_eq!(smooth_toward([1.0, 2.0], target, 0.0, 0.016), target);
         assert_eq!(smooth_toward([1.0, 2.0], target, 5.0, 0.0), [1.0, 2.0]);
+    }
+
+    #[test]
+    fn touch_gate_and_screen_space() {
+        use repose_core::input::{
+            Modifiers, PointerButton, PointerEvent, PointerEventKind, PointerId, PointerKind,
+        };
+        use repose_core::Vec2 as RVec2;
+        let ev_of = |kind: PointerKind| {
+            let mut ev = PointerEvent::new(
+                PointerId(3),
+                kind,
+                PointerEventKind::Down(PointerButton::Primary),
+                RVec2 { x: 10.0, y: 20.0 },
+                1.0,
+                Modifiers::default(),
+            );
+            ev.origin = RVec2 { x: 5.0, y: 7.0 };
+            ev
+        };
+        // Touch + pen forward to touch zones; mouse stays on clicks.
+        assert!(is_touch(&ev_of(PointerKind::Touch)));
+        assert!(is_touch(&ev_of(PointerKind::Pen)));
+        assert!(!is_touch(&ev_of(PointerKind::Mouse)));
+        // Touch zones sample window-physical px (origin + position).
+        assert_eq!(screen_of(&ev_of(PointerKind::Touch)), [15.0, 27.0]);
     }
 }

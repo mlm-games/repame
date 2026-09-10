@@ -1,0 +1,21 @@
+[package]
+name = "repame-fx"
+version = "0.1.7"
+edition = "2024"
+license = "MPL-2.0"
+repository = "https://github.com/mlm-games/repame"
+rust-version = "1.98"
+description = "sim-side particles, trauma shake, flash, floaters, transitions for all games"
+
+[dependencies]
+# Engine APIs (same-repo path deps; versions match repame workspace).
+repame-sim = { path = "../repame-sim", version = "0.1" }
+repame-sprite = { path = "../repame-sprite", version = "0.1" }
+repose-core = "0.29"
+rand = "0.10"
+noise = "0.9"
+serde = { version = "1", features = ["derive"] }
+glam = "0.33"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }

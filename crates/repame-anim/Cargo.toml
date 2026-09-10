@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "animation catalogs, atlas packing, and frame players"
 
 [dependencies]
 bevy_ecs.workspace = true

@@ -1278,20 +1278,63 @@ pub fn Viewport2dGpuWithHud(
     let overlay = input.overlay_color;
     let cam = input.cam;
     let world_size = input.world_size;
+    let hud_input = std::rc::Rc::new((cam, world_size, texts, overlay));
     let hud_geom = geom.clone();
-    let hud = Viewport2d(
-        FrameInput {
-            cam,
-            world_size,
-            viewport_dp: input.viewport_dp,
-            sprites: Vec::new(),
-            texts,
-            background: None,
-            overlay_color: overlay,
-            chroma: 0.0,
+    let hud = Canvas(
+        Modifier::new().fill_max_size().hit_passthrough(),
+        move |scope: &mut DrawScope| {
+            let (cam, world_size, texts, overlay) =
+                (hud_input.0, hud_input.1, &hud_input.2, hud_input.3);
+            let d = effective_density_scale();
+            let cam_center = cam.effective_center();
+            let fit = effective_fit(
+                [scope.size.width / d, scope.size.height / d],
+                world_size,
+                &cam,
+            );
+            hud_geom.set(FrameGeom {
+                fit,
+                look: [
+                    cam_center[0] - world_size[0] * 0.5,
+                    cam_center[1] - world_size[1] * 0.5,
+                ],
+                density: d,
+                viewport_px: [scope.size.width, scope.size.height],
+                roll: cam.roll,
+                pivot: cam_center,
+            });
+            let project = |wx: f32, wy: f32| -> [f32; 2] {
+                let [dx, dy] = world_to_dp_with_roll(
+                    [wx, wy],
+                    world_size,
+                    cam_center,
+                    (fit.0, fit.1, fit.2),
+                    cam.roll,
+                );
+                [dx * d, dy * d]
+            };
+            for t in texts.iter() {
+                let [tx, ty] = project(t.pos.x, t.pos.y);
+                scope.draw_text(
+                    t.text.clone(),
+                    repose_core::Vec2 { x: tx, y: ty },
+                    rgba8(t.color),
+                    Px(t.size * fit.0 * d),
+                );
+            }
+            if let Some(tint) = overlay {
+                scope.draw_rect(
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: scope.size.width,
+                        h: scope.size.height,
+                    },
+                    rgba8(tint),
+                    Px(0.0),
+                );
+            }
         },
-        hud_geom,
-        |_| {},
     );
     repose_ui::ZStack(Modifier::new().fill_max_size())
         .child(Viewport2dGpu(input, geom, uploads, desc, on_event))

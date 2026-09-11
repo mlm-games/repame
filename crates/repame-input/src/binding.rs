@@ -55,7 +55,8 @@ impl std::hash::Hash for Binding {
             Binding::Pad(b) => b.hash(state),
             Binding::Axis { axis, threshold } => {
                 axis.hash(state);
-                threshold.to_bits().hash(state);
+                let t = if *threshold == 0.0 { 0.0 } else { *threshold };
+                t.to_bits().hash(state);
             }
         }
     }

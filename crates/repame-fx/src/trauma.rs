@@ -97,7 +97,12 @@ impl Trauma {
         zoom: f32,
     ) -> (f32, f32, f32) {
         let (dx_px, dy_px, roll) = self.offset(time_secs);
-        let scale = (units_per_pixel / zoom.max(1e-6)).max(0.0);
+        let upp = if units_per_pixel.is_finite() {
+            units_per_pixel
+        } else {
+            1.0
+        };
+        let scale = (upp / zoom.max(1e-6)).max(0.0);
         (dx_px * scale, dy_px * scale, roll)
     }
 }

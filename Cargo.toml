@@ -6,7 +6,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.11"
+version = "0.2.0"
 edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/mlm-games/repame"
@@ -44,15 +44,15 @@ winit = "0.30"
 renamite-player = { version = "0.2" }
 renamite-player-ui = { version = "0.2" }
 
-repame-sim = { path = "crates/repame-sim", version = "0.1.9" }
-repame-atlas = { path = "crates/repame-atlas", version = "0.1.9" }
-repame-anim = { path = "crates/repame-anim", version = "0.1.9" }
-repame-audio = { path = "crates/repame-audio", version = "0.1.9" }
-repame-sprite = { path = "crates/repame-sprite", version = "0.1.9" }
-repame-shell = { path = "crates/repame-shell", version = "0.1.9" }
-repame-actors = { path = "crates/repame-actors", version = "0.1.9" }
-repame-fx = { path = "crates/repame-fx", version = "0.1.9" }
-repame-input = { path = "crates/repame-input", version = "0.1.9" }
+repame-sim = { path = "crates/repame-sim", version = "0.2.0" }
+repame-atlas = { path = "crates/repame-atlas", version = "0.2.0" }
+repame-anim = { path = "crates/repame-anim", version = "0.2.0" }
+repame-audio = { path = "crates/repame-audio", version = "0.2.0" }
+repame-sprite = { path = "crates/repame-sprite", version = "0.2.0" }
+repame-shell = { path = "crates/repame-shell", version = "0.2.0" }
+repame-actors = { path = "crates/repame-actors", version = "0.2.0" }
+repame-fx = { path = "crates/repame-fx", version = "0.2.0" }
+repame-input = { path = "crates/repame-input", version = "0.2.0" }
 
 # renamite-player = { path = "../renamite/crates/renamite-player"}
 # renamite-player-ui = { path = "../renamite/crates/renamite-player-ui"}

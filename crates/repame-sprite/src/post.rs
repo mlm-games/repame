@@ -6,11 +6,7 @@
 //!
 //! Today the composite is chromatic aberration (`offset = amount * 0.02`
 //! horizontal RGB split, ported from `game-utils-bevy`'s
-//! `screen_effects.wgsl` (which itself ran on the generalized
-//! post-process API, not a built-in effect); the mechanism
-//! (offscreen target + fullscreen triangle + uniform words) is shared
-//! by future grades. Amount `0.0` skips the composite entirely: the batch draws
-//! straight into the main pass, exactly the old path.
+//! `screen_effects.wgsl`.
 
 use repose_render_wgpu::{CallbackResources, ScreenDescriptor};
 
@@ -103,7 +99,11 @@ fn ensure_targets(
     // scene texture is sampled directly.
     let scene = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("post_scene"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: samples,
         dimension: wgpu::TextureDimension::D2,
@@ -119,7 +119,11 @@ fn ensure_targets(
     let resolve = if samples > 1 {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("post_resolve"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -131,7 +135,11 @@ fn ensure_targets(
         // Placeholder; never bound (scene_view is sampled instead).
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("post_resolve_unused"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -142,7 +150,11 @@ fn ensure_targets(
     };
     let depth = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("post_depth"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: samples,
         dimension: wgpu::TextureDimension::D2,
@@ -220,7 +232,11 @@ fn ensure_targets(
             resource: uniform.as_entire_binding(),
         }],
     });
-    let sampled_view = if samples > 1 { &resolve_view } else { &scene_view };
+    let sampled_view = if samples > 1 {
+        &resolve_view
+    } else {
+        &scene_view
+    };
     let tex_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("post_tex_bg"),
         layout: &tex_layout,
@@ -329,7 +345,11 @@ pub(crate) fn prepare_composite(
     let Some(t) = all.targets.as_ref() else {
         return;
     };
-    queue.write_buffer(&t.uniform, 0, bytemuck::cast_slice(&[amount, 0.0, 0.0, 0.0]));
+    queue.write_buffer(
+        &t.uniform,
+        0,
+        bytemuck::cast_slice(&[amount, 0.0, 0.0, 0.0]),
+    );
     let (color_view, resolve_target) = if screen.sample_count.max(1) > 1 {
         (&t.scene_view, Some(&t.resolve_view))
     } else {
@@ -429,7 +449,17 @@ mod tests {
             batch.extend_uploads(self.uploads.clone());
             batch.prepare(device, queue, encoder, screen, resources);
             if use_composite(self.amount) {
-                prepare_composite(device, queue, encoder, screen, resources, 64, 64, self.amount, None);
+                prepare_composite(
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    self.amount,
+                    None,
+                );
             }
             Vec::new()
         }
@@ -463,7 +493,10 @@ mod tests {
                 color,
                 page: 0,
             };
-            [quad(16.0, [1.0, 0.0, 0.0, 1.0]), quad(48.0, [0.0, 0.0, 1.0, 1.0])]
+            [
+                quad(16.0, [1.0, 0.0, 0.0, 1.0]),
+                quad(48.0, [0.0, 0.0, 1.0, 1.0]),
+            ]
         }
     }
 

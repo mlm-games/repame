@@ -1,18 +1,3 @@
-//! Chromatic aberration pulse: fullscreen RGB-split amount with linear
-//! decay. Mirrors `game-utils-bevy`'s `ChromaticAberration` (`pulse`
-//! keeps the max, 2.0/s decay, shader `offset = intensity * 0.02`) —
-//! that ran on Bevy's generalized post-process API (Bevy itself never
-//! shipped a chroma effect), same split as here: state in fx, sampling
-//! composite in `repame-sprite`'s `post`.
-//!
-//! Plain data: the game maps [`Chroma::amount`] onto
-//! `repame_sprite::FrameInput::chroma` each frame (canvas viewports
-//! ignore it — sampling FX need the GPU viewport). NT pulses land at
-//! 0.04 (pickups) .. 0.7 (throne kills).
-
-/// Fullscreen RGB-split state. Own it as a resource (see
-/// [`init`](crate::init_resources)) or a plain field — stepping is a
-/// method call either way.
 #[derive(Clone, Debug)]
 pub struct Chroma {
     /// Current split amount (bevy `chromatic_intensity` units).

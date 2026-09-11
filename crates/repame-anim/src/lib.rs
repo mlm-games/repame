@@ -266,11 +266,17 @@ pub enum LoopMode {
 pub struct AnimPlayer {
     frames: u32,
     fps: f32,
+    /// Loop/Once: linear cell clock. PingPong: triangle phase in
+    /// `[0, 2 * (frames - 1))`, mapped to a cell in [`AnimPlayer::cell`].
     pos: f32,
     playing: bool,
+    /// Signed rate. The sign is the single direction source: negative
+    /// plays in reverse, positive forward. There is no separate direction
+    /// flag; [`play_backwards`](AnimPlayer::play_backwards) negates this
+    /// (magnitude preserved) and [`play`](AnimPlayer::play) never changes
+    /// it.
     speed_scale: f32,
     loop_mode: LoopMode,
-    forward: bool,
     finished: bool,
 }
 
@@ -287,7 +293,6 @@ impl AnimPlayer {
             playing: false,
             speed_scale: 1.0,
             loop_mode,
-            forward: true,
             finished: false,
         }
     }
@@ -295,29 +300,32 @@ impl AnimPlayer {
     /// Start (or resume) playing from the current position.
     ///
     /// Resuming a paused animation continues from the kept cell and
-    /// progress. Replaying a finished one-shot ([`is_finished`](AnimPlayer::is_finished))
-    /// restarts it from cell `0` first.
+    /// progress, in the current [`speed_scale`](AnimPlayer::speed_scale)
+    /// direction: `play` never changes the sign, so it resumes backwards
+    /// playback as backwards. Replaying a finished one-shot
+    /// ([`is_finished`](AnimPlayer::is_finished)) restarts it from cell
+    /// `0` first.
     pub fn play(&mut self) {
         if self.finished {
             self.pos = 0.0;
-            self.forward = true;
             self.finished = false;
         }
         self.playing = true;
     }
 
-    /// Play in reverse: flips the direction and resumes from the current
-    /// cell.
+    /// Play in reverse: forces a negative rate (magnitude preserved) and
+    /// resumes from the current cell.
     ///
     /// Jumps to the last cell first when stopped or after a finished
-    /// one-shot, so a fresh player starts at the end of the strip. This is
-    /// shorthand for a negative [`speed_scale`](AnimPlayer::set_speed_scale)
-    /// starting at the far end.
+    /// one-shot, so a fresh player starts at the end of the strip. To play
+    /// forward again, set a positive rate with
+    /// [`set_speed_scale`](AnimPlayer::set_speed_scale): direction follows
+    /// the rate sign alone.
     pub fn play_backwards(&mut self) {
         if (!self.playing || self.finished) && self.frames > 0 {
             self.pos = (self.frames.saturating_sub(1)) as f32;
         }
-        self.forward = false;
+        self.speed_scale = -self.speed_scale.abs();
         self.finished = false;
         self.playing = true;
     }
@@ -333,13 +341,13 @@ impl AnimPlayer {
 
     /// Stop and reset to cell `0`.
     ///
-    /// Clears the finished flag, restores forward direction, and zeroes the
-    /// progress. The `speed_scale` is kept. See also
+    /// Clears the finished flag and zeroes the progress. The
+    /// `speed_scale` (including its sign) is kept, so `play` after `stop`
+    /// resumes in the previous direction. See also
     /// [`pause`](AnimPlayer::pause), which holds the position instead.
     pub fn stop(&mut self) {
         self.playing = false;
         self.pos = 0.0;
-        self.forward = true;
         self.finished = false;
     }
 
@@ -351,10 +359,9 @@ impl AnimPlayer {
     /// treated as `0.0` so a bad calculation pauses instead of corrupting
     /// the clock.
     ///
-    /// Reverse is inclusive: either a negative `speed_scale` or the
-    /// [`play_backwards`](AnimPlayer::play_backwards) direction reverses
-    /// playback, and combining both still reverses (they never cancel).
-    /// Loop and PingPong share this rule.
+    /// The sign is the only direction control: [`play_backwards`](AnimPlayer::play_backwards)
+    /// negates it (magnitude preserved) and [`play`](AnimPlayer::play)
+    /// never changes it, so there is no second flag to disagree with.
     pub fn set_speed_scale(&mut self, s: f32) {
         self.speed_scale = if s.is_finite() { s } else { 0.0 };
     }
@@ -394,7 +401,27 @@ impl AnimPlayer {
         if self.frames == 0 {
             return 0;
         }
-        (self.pos.floor() as u32).min(self.frames - 1)
+        (self.cell().floor() as u32).min(self.frames - 1)
+    }
+
+    /// Mapped cell position as a float: `pos` directly for Loop/Once, the
+    /// triangle fold of the phase for PingPong.
+    fn cell(&self) -> f32 {
+        if self.frames <= 1 {
+            return self.pos;
+        }
+        match self.loop_mode {
+            LoopMode::PingPong => {
+                let last = (self.frames - 1) as f32;
+                let tri = self.pos.rem_euclid(2.0 * last);
+                if tri <= last { tri } else { 2.0 * last - tri }
+            }
+            _ => self.pos,
+        }
+    }
+
+    fn reversed(&self) -> bool {
+        self.speed_scale < 0.0
     }
 
     /// Progress toward the next cell, from `0.0` to `1.0`.
@@ -405,25 +432,23 @@ impl AnimPlayer {
     /// mid-cell moment. To jump cells while keeping a specific progress,
     /// use [`set_frame_and_progress`](AnimPlayer::set_frame_and_progress).
     pub fn frame_progress(&self) -> f32 {
-        let f = (self.pos - self.pos.floor()).clamp(0.0, 1.0);
-        if self.backward() { 1.0 - f } else { f }
-    }
-
-    fn backward(&self) -> bool {
-        self.speed_scale < 0.0 || !self.forward
+        let cell = self.cell();
+        let f = (cell - cell.floor()).clamp(0.0, 1.0);
+        if self.reversed() { 1.0 - f } else { f }
     }
 
     /// Set the cell and progress together, preserving playback state.
     ///
     /// Unlike [`stop`](AnimPlayer::stop), nothing else resets: whether the
-    /// player is playing, its direction, and its finished flag are kept
-    /// (except that the finished flag clears, since the position is fresh).
-    /// Out-of-range inputs clamp (`frame` to the last cell, `progress` to
-    /// `0..1`), and an empty strip ignores the call.
+    /// player is playing, its rate (including sign), and its finished flag
+    /// are kept (except that the finished flag clears, since the position
+    /// is fresh). Out-of-range inputs clamp (`frame` to the last cell,
+    /// `progress` to `0..1`), and an empty strip ignores the call.
     ///
     /// The last cell has no next cell to blend toward, so targeting it
     /// stores exactly the cell start (`progress` ignored); every other
-    /// cell stores `frame + progress`.
+    /// cell stores `frame + progress` on the leg matching the current rate
+    /// sign.
     ///
     /// Useful for handing the exact cycle position to a fresh player, e.g.
     /// when swapping to a same-length variant skin mid-motion:
@@ -432,6 +457,7 @@ impl AnimPlayer {
     /// let f = player.frame();
     /// let p = player.frame_progress();
     /// let mut other = AnimPlayer::new(catalog.def("hero_alt").unwrap(), LoopMode::Loop);
+    /// other.set_speed_scale(player.speed_scale());
     /// other.set_frame_and_progress(f, p);
     /// other.play();
     /// ```
@@ -441,12 +467,17 @@ impl AnimPlayer {
         }
         let last = self.frames - 1;
         let f = frame.min(last);
+        let p = progress.clamp(0.0, 1.0);
         self.pos = if f == last {
             last as f32
-        } else if self.backward() {
-            f as f32 + (1.0 - progress.clamp(0.0, 1.0))
+        } else if self.reversed() {
+            match self.loop_mode {
+                // Return leg: cell x = f + (1 - p) folds to period - x.
+                LoopMode::PingPong => 2.0 * last as f32 - (f as f32 + (1.0 - p)),
+                _ => f as f32 + (1.0 - p),
+            }
         } else {
-            f as f32 + progress.clamp(0.0, 1.0)
+            f as f32 + p
         };
         self.finished = false;
     }
@@ -478,31 +509,28 @@ impl AnimPlayer {
             return (false, false);
         }
         let before = self.frame();
+        // Signed rate: direction needs no flag mapping. PingPong phases
+        // advance on the same clock (the leg folds out in `cell`).
         let step = dt * self.fps * self.speed_scale;
         if step == 0.0 {
             return (false, false);
         }
-        let estep = if self.backward() {
-            -step.abs()
-        } else {
-            step.abs()
-        };
         let last = (self.frames - 1) as f32;
         let pos_before = self.pos;
         match self.loop_mode {
             LoopMode::Loop => {
-                self.pos = (self.pos + estep).rem_euclid(self.frames as f32);
-                let wrapped = if estep > 0.0 {
-                    pos_before + estep >= self.frames as f32
+                self.pos = (self.pos + step).rem_euclid(self.frames as f32);
+                let wrapped = if step > 0.0 {
+                    pos_before + step >= self.frames as f32
                 } else {
-                    pos_before + estep < 0.0
+                    pos_before + step < 0.0
                 };
                 (self.frame() != before, wrapped)
             }
             LoopMode::Once => {
-                self.pos += estep;
+                self.pos += step;
                 if self.pos >= self.frames as f32 || self.pos < 0.0 {
-                    self.pos = if estep > 0.0 { last } else { 0.0 };
+                    self.pos = if step > 0.0 { last } else { 0.0 };
                     self.playing = false;
                     self.finished = true;
                     (self.frame() != before, true)
@@ -512,23 +540,9 @@ impl AnimPlayer {
             }
             LoopMode::PingPong => {
                 let period = 2.0 * last;
-                let tri0 = if self.forward {
-                    self.pos
-                } else {
-                    period - self.pos
-                }
-                .rem_euclid(period);
-                let tri_step = if step < 0.0 && self.forward {
-                    step
-                } else {
-                    step.abs()
-                };
-                let raw = tri0 + tri_step;
+                let raw = self.pos + step;
                 let ended = raw >= period || raw < 0.0;
-                let tri = raw.rem_euclid(period);
-                self.forward = tri <= last;
-                self.pos = if self.forward { tri } else { period - tri };
-                self.pos = self.pos.clamp(0.0, last);
+                self.pos = raw.rem_euclid(period);
                 (self.frame() != before, ended)
             }
         }
@@ -792,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn double_reverse_still_reverses_in_every_mode() {
+    fn reverse_is_rate_sign_only() {
         let def = AnimDef {
             frames: 4,
             w: 8,
@@ -801,13 +815,15 @@ mod tests {
             xorigin: 0.0,
             yorigin: 0.0,
         };
+        // play_backwards forces a negative rate, so combining it with an
+        // explicit negative rate still reverses.
         let mut p = AnimPlayer::new(&def, LoopMode::Loop);
         p.play();
         p.set_frame_and_progress(1, 0.0);
         p.play_backwards();
         p.set_speed_scale(-1.0);
         p.advance(0.05);
-        assert_eq!(p.frame(), 0, "double-reverse steps back, got {}", p.frame());
+        assert_eq!(p.frame(), 0, "negative rate steps back, got {}", p.frame());
         let mut q = AnimPlayer::new(&def, LoopMode::PingPong);
         q.play();
         q.set_frame_and_progress(1, 0.0);
@@ -817,9 +833,23 @@ mod tests {
         assert_eq!(
             q.frame(),
             0,
-            "pingpong double-reverse steps back, got {}",
+            "pingpong negative rate steps back, got {}",
             q.frame()
         );
+        // An explicit positive rate after play_backwards plays forward:
+        // there is no second flag to disagree with.
+        p.set_speed_scale(2.0);
+        p.advance(0.05);
+        assert_eq!(p.frame(), 1, "positive rate steps forward, got {}", p.frame());
+        q.set_speed_scale(1.0);
+        q.advance(0.1);
+        assert_eq!(
+            q.frame(),
+            1,
+            "pingpong positive rate steps forward, got {}",
+            q.frame()
+        );
+        // Single reversals still step back in both modes.
         let mut r = AnimPlayer::new(&def, LoopMode::Loop);
         r.play();
         r.set_frame_and_progress(1, 0.0);

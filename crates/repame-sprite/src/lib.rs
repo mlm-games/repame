@@ -21,7 +21,10 @@ use repose_ui::ViewExt;
 
 pub mod batch;
 use batch::draw_batch;
-pub use batch::{AtlasUpload, BatchDesc, SpriteBatch, TextureFilter, frame_uv, instance_rows, screen_camera, sprite_aabb};
+pub use batch::{
+    AtlasUpload, BatchDesc, SpriteBatch, TextureFilter, frame_uv, instance_rows, screen_camera,
+    sprite_aabb,
+};
 
 pub mod fullscreen;
 pub use fullscreen::{FullscreenDesc, FullscreenPass, FullscreenTexture};
@@ -175,10 +178,17 @@ impl Camera2d {
         [self.center.x + self.offset.x, self.center.y + self.offset.y]
     }
 
-    /// Y-down view-projection: world +y points screen-down. Guards degenerate inputs (zero viewport/zoom) so a
-    /// bad snapshot can never div-by-zero; callers driving viewports
-    /// should prefer [`fit_view_proj`] (contain-fit + look), which is the
-    /// single framing contract canvas, GPU, and picks share.
+    /// Legacy y-down view-projection: world +y points screen-down.
+    ///
+    /// Diverges from the shared framing contract: this frames from
+    /// `viewport * units_per_pixel / zoom` and ignores
+    /// [`FrameInput::world_size`], so it disagrees with canvas, GPU, and
+    /// picks whenever a contain-fit letterboxes. Kept for guards/tests;
+    /// viewport code must use [`fit_view_proj`] instead.
+    #[deprecated(
+        since = "0.1.8",
+        note = "ignores world_size; use fit_view_proj for the shared canvas/GPU/pick framing contract"
+    )]
     pub fn view_proj(&self, viewport_px: [f32; 2]) -> Mat4 {
         let vp_w = viewport_px[0].max(1.0);
         let vp_h = viewport_px[1].max(1.0);
@@ -202,8 +212,16 @@ impl Camera2d {
         proj * view
     }
 
-    /// World-space position under a viewport-pixel cursor position.
-    /// Guards zero viewports (returns the look point instead of NaN).
+    /// Legacy world-space position under a viewport-pixel cursor.
+    ///
+    /// Inverts [`view_proj`](Camera2d::view_proj), so it shares that
+    /// function's divergence from the contain-fit contract. Pointer picks
+    /// must go through [`pick_world`] over the painted [`FrameGeom`].
+    #[deprecated(
+        since = "0.1.8",
+        note = "ignores world_size; use pick_world over the painted FrameGeom instead"
+    )]
+    #[allow(deprecated)]
     pub fn screen_to_world(&self, viewport_px: [f32; 2], px: [f32; 2]) -> Vec2 {
         if viewport_px[0] <= 0.0 || viewport_px[1] <= 0.0 {
             let [cx, cy] = self.effective_center();
@@ -291,12 +309,18 @@ pub struct FrameInput {
     /// the density factor on HiDPI screens.
     pub viewport_px: [f32; 2],
     pub sprites: Vec<SpriteInstance>,
-    /// World-anchored text, drawn after the sprite pass.
+    /// World-anchored text, drawn after the sprite pass on the canvas
+    /// viewport. The GPU viewport ignores this field: compose texts as
+    /// sibling views (same pattern as `overlay_color` consumers that need
+    /// typography) so GPU and canvas agree by construction.
     pub texts: Vec<WorldText>,
     /// Full-viewport fill under everything (letterbox included).
     pub background: Option<[f32; 4]>,
     /// Optional fullscreen tint/color-grading hook (e.g. FOW dimming,
-    /// damage flash). Applied after the sprite pass.
+    /// damage flash). Applied after the sprite pass on canvas *and* GPU
+    /// (after the chroma composite when `chroma > 0.0`), with the same
+    /// byte semantics as the canvas path (`(c * 255) as u8` per channel,
+    /// alpha-blended over the scene).
     pub overlay_color: Option<[f32; 4]>,
     /// Chromatic aberration amount (bevy `chromatic_intensity` units;
     /// NT pulses land at 0.04..0.7). GPU viewports render the scene
@@ -309,16 +333,29 @@ pub struct FrameInput {
 /// UI-facing pointer events from the viewport.
 #[derive(Clone, Debug)]
 pub enum PickEvent {
-    Click { world: Vec2, screen: [f32; 2] },
-    Hover { world: Vec2 },
+    Click {
+        world: Vec2,
+        screen: [f32; 2],
+    },
+    Hover {
+        world: Vec2,
+    },
     /// Touch/pen contact began: pointer id + window-physical px
     /// (y-down, `origin + position`). Mouse never emits these; taps
     /// still emit `Click` too (button/UI parity).
-    TouchDown { id: u64, screen: [f32; 2] },
+    TouchDown {
+        id: u64,
+        screen: [f32; 2],
+    },
     /// Touch/pen contact moved (same coordinate space as `TouchDown`).
-    TouchMove { id: u64, screen: [f32; 2] },
+    TouchMove {
+        id: u64,
+        screen: [f32; 2],
+    },
     /// Touch/pen contact ended (up / leave).
-    TouchUp { id: u64 },
+    TouchUp {
+        id: u64,
+    },
 }
 
 /// Touch/pen pointers drive game touch zones; mouse stays on the
@@ -469,6 +506,11 @@ pub fn pick_world(local_px: [f32; 2], geom: FrameGeom, world_size: [f32; 2]) -> 
 /// [`ActorFrame`] (readers). Everything needed to map either direction,
 /// so board sprites, picks, and actor surfaces stay glued - including
 /// under camera shake.
+///
+/// Timing: viewports publish during draw, so composition-time readers
+/// ([`ActorFrame`] offsets) see the previous frame's geometry. Math is
+/// exact; placement trails the board by one frame under camera motion.
+/// Event-time readers (picks) always see the latest paint.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameGeom {
     /// Effective dp fit of the world extent: `(scale, off_x, off_y)` from
@@ -702,9 +744,16 @@ pub fn Viewport2d(
 /// Framing is identical to the canvas path: the batch camera is
 /// [`fit_view_proj`] over the density-corrected viewport (physical px /
 /// density, same dp the canvas path draws in). `background` paints first
-/// as a uniform-only fullscreen fill so GPU and canvas agree on every
-/// `FrameInput` field except world texts and tint, which stay canvas-view
-/// features for now: GPU consumers compose those as sibling views.
+/// as a uniform-only fullscreen fill and `overlay_color` paints last the
+/// same way, so GPU and canvas agree on every `FrameInput` field except
+/// world texts, which stay a canvas-view feature for now: GPU consumers
+/// compose those as sibling views.
+///
+/// Frame-timing note: the batch camera (and the chroma target size) is
+/// built in `prepare` from the last painted viewport geometry, while
+/// `paint` records the fresh geometry. Steady-state frames agree
+/// exactly; a resize/density change leaves the batch one frame behind
+/// the new rect (same one-frame lag as [`ActorFrame`], below).
 ///
 /// Layout contract: fills its parent. The payload is rebuilt from the
 /// snapshot every frame (like the canvas draw closure): `prepare`
@@ -744,6 +793,14 @@ pub fn Viewport2dGpu(
         desc,
         bg: FullscreenPass::new(
             "viewport2d.background",
+            fullscreen::SOLID_WGSL,
+            FullscreenDesc {
+                texture_slots: 0,
+                filter: TextureFilter::Nearest,
+            },
+        ),
+        overlay: FullscreenPass::new(
+            "viewport2d.overlay",
             fullscreen::SOLID_WGSL,
             FullscreenDesc {
                 texture_slots: 0,
@@ -805,6 +862,7 @@ struct GpuViewport {
     uploads: Vec<AtlasUpload>,
     desc: BatchDesc,
     bg: FullscreenPass,
+    overlay: FullscreenPass,
 }
 
 impl WgpuCallback for GpuViewport {
@@ -848,6 +906,17 @@ impl WgpuCallback for GpuViewport {
         if let Some(bg) = self.input.background {
             let words = [bg[0], bg[1], bg[2], bg[3]];
             self.bg.prepare_with(
+                device,
+                queue,
+                screen,
+                resources,
+                bytemuck::cast_slice(&words),
+                &[],
+            );
+        }
+        if let Some(ov) = self.input.overlay_color {
+            let words = [ov[0], ov[1], ov[2], ov[3]];
+            self.overlay.prepare_with(
                 device,
                 queue,
                 screen,
@@ -913,6 +982,9 @@ impl WgpuCallback for GpuViewport {
             }
             draw_batch(rpass, resources);
         }
+        if self.input.overlay_color.is_some() {
+            self.overlay.paint(info, rpass, resources);
+        }
     }
 }
 
@@ -922,6 +994,10 @@ impl WgpuCallback for GpuViewport {
 /// math, glued to sprites and picks even under camera shake. `mirror_x`
 /// flips around the surface center (left-walking hordes reusing
 /// right-facing art).
+///
+/// Timing: offsets derive from the last painted [`FrameGeom`], so the
+/// surface trails the board by one frame while the camera moves
+/// (see [`FrameGeom`]). Steady-state placement is exact.
 #[allow(non_snake_case)]
 pub fn ActorFrame(
     center: [f32; 2],
@@ -1039,7 +1115,7 @@ mod tests {
             viewport_px: [256.0, 256.0],
         }));
         let payload = GpuViewport {
-            input: Arc::new(input),
+            input: Arc::new(input.clone()),
             geom,
             uploads,
             desc: BatchDesc {
@@ -1049,6 +1125,14 @@ mod tests {
             },
             bg: FullscreenPass::new(
                 "test.viewport2d.background",
+                fullscreen::SOLID_WGSL,
+                FullscreenDesc {
+                    texture_slots: 0,
+                    filter: TextureFilter::Nearest,
+                },
+            ),
+            overlay: FullscreenPass::new(
+                "test.viewport2d.overlay",
                 fullscreen::SOLID_WGSL,
                 FullscreenDesc {
                     texture_slots: 0,
@@ -1078,8 +1162,70 @@ mod tests {
         // Corners are outside the centered quad: snapshot background.
         assert_eq!(at(8, 8), [0, 0, 255, 255], "background fill");
         assert_eq!(at(247, 247), [0, 0, 255, 255], "background fill");
-        // Screen center carries the cam-centered sprite (magenta page).
         assert_eq!(at(128, 128), [255, 0, 255, 255], "cam-centered quad");
+        let overlay_input = FrameInput {
+            overlay_color: Some([1.0, 0.0, 0.0, 1.0]),
+            ..input
+        };
+        let overlay_payload = GpuViewport {
+            input: Arc::new(overlay_input),
+            geom: Arc::new(Mutex::new(FrameGeom {
+                fit: (1.0, 0.0, 0.0),
+                look: [0.0, 0.0],
+                density: 1.0,
+                viewport_px: [256.0, 256.0],
+            })),
+            uploads: vec![AtlasUpload {
+                page: 0,
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 2,
+                rgba: [255, 0, 255, 255].repeat(4),
+            }],
+            desc: BatchDesc {
+                layer_size: 2,
+                layers: 1,
+                filter: TextureFilter::Nearest,
+            },
+            bg: FullscreenPass::new(
+                "test.viewport2d.background",
+                fullscreen::SOLID_WGSL,
+                FullscreenDesc {
+                    texture_slots: 0,
+                    filter: TextureFilter::Nearest,
+                },
+            ),
+            overlay: FullscreenPass::new(
+                "test.viewport2d.overlay",
+                fullscreen::SOLID_WGSL,
+                FullscreenDesc {
+                    texture_slots: 0,
+                    filter: TextureFilter::Nearest,
+                },
+            ),
+        };
+        let scene = Scene {
+            clear_color: Color::from_rgba(0, 0, 0, 255),
+            nodes: vec![SceneNode::Callback {
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 256.0,
+                    h: 256.0,
+                },
+                payload: Callback::new(overlay_payload),
+            }],
+        };
+        let px = renderer
+            .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+            .expect("offscreen render");
+        let at = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * 256 + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+        assert_eq!(at(8, 8), [255, 0, 0, 255], "overlay covers background");
+        assert_eq!(at(128, 128), [255, 0, 0, 255], "overlay covers sprite");
     }
 
     #[test]
@@ -1149,6 +1295,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn camera_guards_never_div_by_zero() {
         let bad = Camera2d {
             center: Vec2::ZERO,
@@ -1259,7 +1406,13 @@ mod tests {
         assert_eq!(apply_limits([400.0, 900.0], limits), [400.0, 500.0]);
         assert_eq!(apply_limits([400.0, 300.0], limits), [400.0, 300.0]);
         assert_eq!(
-            apply_limits([50.0, 50.0], CameraLimits { enabled: false, ..limits }),
+            apply_limits(
+                [50.0, 50.0],
+                CameraLimits {
+                    enabled: false,
+                    ..limits
+                }
+            ),
             [50.0, 50.0]
         );
     }
@@ -1280,10 +1433,10 @@ mod tests {
 
     #[test]
     fn touch_gate_and_screen_space() {
+        use repose_core::Vec2 as RVec2;
         use repose_core::input::{
             Modifiers, PointerButton, PointerEvent, PointerEventKind, PointerId, PointerKind,
         };
-        use repose_core::Vec2 as RVec2;
         let ev_of = |kind: PointerKind| {
             let mut ev = PointerEvent::new(
                 PointerId(3),

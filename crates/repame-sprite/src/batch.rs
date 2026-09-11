@@ -182,8 +182,9 @@ pub fn sprite_aabb(
 }
 
 /// Y-down orthographic camera: world (0,0) is the top-left of the
-/// viewport, matching canvas orientation by construction (same matrix
-/// `Camera2d::view_proj` builds).
+/// viewport, matching canvas orientation by construction. Standalone
+/// batches and tests use this directly; viewport snapshots frame through
+/// `fit_view_proj` (contain-fit + look) instead.
 pub fn screen_camera(viewport_px: [f32; 2]) -> Mat4 {
     // Right-handed, 0..1 depth: matches wgpu NDC.
     glam::camera::rh::proj::directx::orthographic(
@@ -220,6 +221,12 @@ const _: () = assert!(size_of::<BatchInstance>() == 68);
 
 /// Per-frame snapshot batch. `Send + Sync` so it can cross into the
 /// compositor thread via [`repose_render_wgpu::Callback`].
+///
+/// One live GPU sprite consumer per app: `CallbackResources` is keyed by
+/// type (see `BatchResources`), so a second viewport would overwrite the
+/// first's instance count. Multi-viewport needs per-id resources (like
+/// `FullscreenPass`'s id map). Rebuilding on format/sample/desc change
+/// drops atlas contents (logged); the game must re-upload afterwards.
 pub struct SpriteBatch {
     desc: BatchDesc,
     camera: [[f32; 4]; 4],

@@ -202,4 +202,22 @@ mod tests {
         sim.step(Duration::from_millis(8));
         assert!(sim.alpha() < 1e-6, "step boundary, got {}", sim.alpha());
     }
+
+    #[test]
+    fn chained_systems_run_in_order() {
+        use std::sync::{Arc, Mutex};
+        let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let (a_log, b_log, c_log) = (log.clone(), log.clone(), log.clone());
+        let mut sim = Sim::with_default_step();
+        sim.add_chained_systems(
+            (
+                move || a_log.lock().unwrap().push("a"),
+                move || b_log.lock().unwrap().push("b"),
+                move || c_log.lock().unwrap().push("c"),
+            )
+                .chain(),
+        );
+        sim.tick();
+        assert_eq!(*log.lock().unwrap(), vec!["a", "b", "c"]);
+    }
 }

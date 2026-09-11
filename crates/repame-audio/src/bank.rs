@@ -215,6 +215,14 @@ impl SoundBank {
 
     /// Deterministic entry: explicit spatial shaping and clock.
     /// Returns `(voice, rate)` so tests can observe the wobble.
+    ///
+    /// Voice accounting is optimistic fire-and-forget: stealing sends
+    /// `Stop` for the oldest voice and drops it from `live` without
+    /// waiting for the audio thread, and a failed `Play` send returns
+    /// `None` without pushing (so `live` shrinks — the stolen voice was
+    /// still told to stop). A lost `Stop` with a successful `Play`
+    /// undercounts by one until `reap` catches up; there is no ack
+    /// channel by design.
     pub fn play_at_ms(
         &mut self,
         name: &str,

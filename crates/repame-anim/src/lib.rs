@@ -350,6 +350,11 @@ impl AnimPlayer {
     /// player stays "playing". Non-finite values (`NaN`, infinity) are
     /// treated as `0.0` so a bad calculation pauses instead of corrupting
     /// the clock.
+    ///
+    /// Reverse is inclusive: either a negative `speed_scale` or the
+    /// [`play_backwards`](AnimPlayer::play_backwards) direction reverses
+    /// playback, and combining both still reverses (they never cancel).
+    /// Loop and PingPong share this rule.
     pub fn set_speed_scale(&mut self, s: f32) {
         self.speed_scale = if s.is_finite() { s } else { 0.0 };
     }
@@ -416,6 +421,10 @@ impl AnimPlayer {
     /// Out-of-range inputs clamp (`frame` to the last cell, `progress` to
     /// `0..1`), and an empty strip ignores the call.
     ///
+    /// The last cell has no next cell to blend toward, so targeting it
+    /// stores exactly the cell start (`progress` ignored); every other
+    /// cell stores `frame + progress`.
+    ///
     /// Useful for handing the exact cycle position to a fresh player, e.g.
     /// when swapping to a same-length variant skin mid-motion:
     ///
@@ -430,13 +439,15 @@ impl AnimPlayer {
         if self.frames == 0 {
             return;
         }
-        let f = frame.min(self.frames - 1) as f32;
-        let p = if self.backward() {
-            1.0 - progress.clamp(0.0, 1.0)
+        let last = self.frames - 1;
+        let f = frame.min(last);
+        self.pos = if f == last {
+            last as f32
+        } else if self.backward() {
+            f as f32 + (1.0 - progress.clamp(0.0, 1.0))
         } else {
-            progress.clamp(0.0, 1.0)
+            f as f32 + progress.clamp(0.0, 1.0)
         };
-        self.pos = (f + p).clamp(0.0, (self.frames - 1) as f32);
         self.finished = false;
     }
 
@@ -500,7 +511,6 @@ impl AnimPlayer {
                 }
             }
             LoopMode::PingPong => {
-                // Triangle wave with period 2*(N-1): 0..N-1..0.
                 let period = 2.0 * last;
                 let tri0 = if self.forward {
                     self.pos
@@ -508,7 +518,12 @@ impl AnimPlayer {
                     period - self.pos
                 }
                 .rem_euclid(period);
-                let raw = tri0 + step;
+                let tri_step = if step < 0.0 && self.forward {
+                    step
+                } else {
+                    step.abs()
+                };
+                let raw = tri0 + tri_step;
                 let ended = raw >= period || raw < 0.0;
                 let tri = raw.rem_euclid(period);
                 self.forward = tri <= last;
@@ -774,6 +789,66 @@ mod tests {
         p.play();
         p.set_frame_and_progress(1, 0.8);
         assert!((p.frame_progress() - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn double_reverse_still_reverses_in_every_mode() {
+        let def = AnimDef {
+            frames: 4,
+            w: 8,
+            h: 8,
+            fps: 10.0,
+            xorigin: 0.0,
+            yorigin: 0.0,
+        };
+        let mut p = AnimPlayer::new(&def, LoopMode::Loop);
+        p.play();
+        p.set_frame_and_progress(1, 0.0);
+        p.play_backwards();
+        p.set_speed_scale(-1.0);
+        p.advance(0.05);
+        assert_eq!(p.frame(), 0, "double-reverse steps back, got {}", p.frame());
+        let mut q = AnimPlayer::new(&def, LoopMode::PingPong);
+        q.play();
+        q.set_frame_and_progress(1, 0.0);
+        q.play_backwards();
+        q.set_speed_scale(-1.0);
+        q.advance(0.1);
+        assert_eq!(
+            q.frame(),
+            0,
+            "pingpong double-reverse steps back, got {}",
+            q.frame()
+        );
+        let mut r = AnimPlayer::new(&def, LoopMode::Loop);
+        r.play();
+        r.set_frame_and_progress(1, 0.0);
+        r.play_backwards();
+        r.advance(0.05);
+        assert_eq!(r.frame(), 0);
+        let mut s = AnimPlayer::new(&def, LoopMode::PingPong);
+        s.play();
+        s.set_frame_and_progress(1, 0.0);
+        s.play_backwards();
+        s.advance(0.1);
+        assert_eq!(s.frame(), 0);
+    }
+
+    #[test]
+    fn last_cell_progress_is_cell_start() {
+        let def = AnimDef {
+            frames: 4,
+            w: 8,
+            h: 8,
+            fps: 10.0,
+            xorigin: 0.0,
+            yorigin: 0.0,
+        };
+        let mut p = AnimPlayer::new(&def, LoopMode::Loop);
+        p.play();
+        p.set_frame_and_progress(3, 0.7);
+        assert_eq!(p.frame(), 3);
+        assert!((p.frame_progress() - 0.0).abs() < 1e-6);
     }
     /// Full nt catalog pack: proves the real content budget. Reads
     /// `$NT_ASSETS/images/anims.json` (else the nt checkout next to

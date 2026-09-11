@@ -65,6 +65,9 @@ pub enum ActorFit {
     /// Exact-fit the artboard every draw (rozvp zombie semantics): no
     /// editor margin, scale recomputed from the live surface size, so a
     /// 64x80 surface over a 256x320 artboard yields exactly 0.25.
+    /// Letterboxes inside the surface when aspects differ: the empty
+    /// margins still belong to the surface for layout/hit purposes but
+    /// paint no art (presentational OK; interactive editors want Margin).
     #[default]
     Exact,
     /// Upstream margin fit (`PlayerHost::fit`, 56 px margin), re-applied

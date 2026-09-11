@@ -126,7 +126,9 @@ impl GamepadPoller {
     }
 
     pub fn connected_ids(&self) -> Vec<GamepadId> {
-        self.connected.iter().copied().map(GamepadId).collect()
+        let mut ids: Vec<GamepadId> = self.connected.iter().copied().map(GamepadId).collect();
+        ids.sort_by_key(|id| id.0);
+        ids
     }
 
     pub fn connected_count(&self) -> usize {

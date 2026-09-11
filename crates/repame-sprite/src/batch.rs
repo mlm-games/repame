@@ -16,17 +16,18 @@
 //!
 //! NOTE: World space is y-down (canvas/snapshot convention). Instance rows map
 //! quad corners to world coords; the camera uniform maps world to clip.
-//! Draw order is input order (no depth test), exactly like the canvas
-//! path. One batch per app for now: [`CallbackResources`] is keyed by
-//! type, so two live batches would share pipelines (multi-viewport
-//! support adds explicit ids later).
+//! Draw order is `z`-sorted stable (Bevy `z` semantics), alpha first then
+//! additive. Each batch id owns its pipelines in `CallbackResources`
+//! (like `FullscreenPass`'s id map), so viewports + minimaps coexist.
+
+use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 use repose_render_wgpu::{CallbackResources, ScreenDescriptor, WgpuCallback};
 use wgpu::util::DeviceExt;
 
-use super::SpriteInstance;
+use super::{SpriteBlend, SpriteInstance};
 
 /// Texture sampling for atlas layers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -212,22 +213,26 @@ struct BatchInstance {
     uv_max: [f32; 2],
     tint: [f32; 4],
     page: f32,
+    z: f32,
+    flags: u32,
+    _pad: u32,
 }
 
 // Locked to `shaders/sprite.wgsl::Instance` (row0@0, row1@16,
-// uv_min@32, uv_max@40, tint@48, page@64; stride 68). If this fires,
-// update the WGSL offsets and the vertex buffer layout below together.
-const _: () = assert!(size_of::<BatchInstance>() == 68);
+// uv_min@32, uv_max@40, tint@48, page@64, z@68, flags@72; stride 80).
+// If this fires, update the WGSL offsets and the vertex buffer layout
+// below together.
+const _: () = assert!(size_of::<BatchInstance>() == 80);
 
 /// Per-frame snapshot batch. `Send + Sync` so it can cross into the
 /// compositor thread via [`repose_render_wgpu::Callback`].
 ///
-/// One live GPU sprite consumer per app: `CallbackResources` is keyed by
-/// type (see `BatchResources`), so a second viewport would overwrite the
-/// first's instance count. Multi-viewport needs per-id resources (like
-/// `FullscreenPass`'s id map). Rebuilding on format/sample/desc change
-/// drops atlas contents (logged); the game must re-upload afterwards.
+/// Each batch id owns its pipelines/instances in `CallbackResources`
+/// (like `FullscreenPass`'s id map). Rebuilding on format/sample/desc
+/// change drops atlas contents (logged); the game must re-upload
+/// afterwards.
 pub struct SpriteBatch {
+    id: &'static str,
     desc: BatchDesc,
     camera: [[f32; 4]; 4],
     instances: Vec<BatchInstance>,
@@ -236,12 +241,21 @@ pub struct SpriteBatch {
 
 impl SpriteBatch {
     pub fn new(desc: BatchDesc) -> Self {
+        Self::with_id("sprite_batch.default", desc)
+    }
+
+    pub fn with_id(id: &'static str, desc: BatchDesc) -> Self {
         Self {
+            id,
             desc,
             camera: Mat4::IDENTITY.to_cols_array_2d(),
             instances: Vec::new(),
             uploads: Vec::new(),
         }
+    }
+
+    pub fn id(&self) -> &'static str {
+        self.id
     }
 
     pub fn clear(&mut self) {
@@ -288,7 +302,35 @@ impl SpriteBatch {
         tint: [f32; 4],
         page: u32,
     ) {
+        self.push_blended(
+            center, size, rotation, anchor, flip_x, flip_y, uv_min, uv_max, tint, page, 0.0,
+            SpriteBlend::Alpha,
+        );
+    }
+
+    /// Push with explicit `z` + blend.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_blended(
+        &mut self,
+        center: [f32; 2],
+        size: [f32; 2],
+        rotation: f32,
+        anchor: [f32; 2],
+        flip_x: bool,
+        flip_y: bool,
+        uv_min: [f32; 2],
+        uv_max: [f32; 2],
+        tint: [f32; 4],
+        page: u32,
+        z: f32,
+        blend: SpriteBlend,
+    ) {
         let (row0, row1) = instance_rows(center, size, rotation, anchor, flip_x, flip_y);
+        let flags = match blend {
+            SpriteBlend::Alpha => 0,
+            SpriteBlend::Additive => 1,
+            SpriteBlend::Multiply => 2,
+        };
         self.instances.push(BatchInstance {
             row0,
             row1,
@@ -296,12 +338,15 @@ impl SpriteBatch {
             uv_max,
             tint,
             page: page as f32,
+            z,
+            flags,
+            _pad: 0,
         });
     }
 
     /// Bridge a snapshot sprite into the batch.
     pub fn push_sprite(&mut self, s: &SpriteInstance) {
-        self.push(
+        self.push_blended(
             [s.center.x, s.center.y],
             [s.size.x, s.size.y],
             s.rotation,
@@ -312,27 +357,31 @@ impl SpriteBatch {
             [s.uv_max.x, s.uv_max.y],
             s.color,
             s.page,
+            s.z,
+            s.blend,
         );
     }
 }
 
-struct BatchResources {
+struct BatchEntry {
     key: (wgpu::TextureFormat, u32, u32, u32, TextureFilter),
-    pipeline: wgpu::RenderPipeline,
+    pipeline_alpha: wgpu::RenderPipeline,
+    pipeline_additive: wgpu::RenderPipeline,
     corners: wgpu::Buffer,
     instances: wgpu::Buffer,
     instance_cap: usize,
-    /// Instance count of the last prepared batch; `paint` draws this.
-    /// Single live batch per app: `CallbackResources` is keyed by type,
-    /// so two viewports (or a viewport + minimap) sharing one app would
-    /// overwrite each other's count. Supported today: one GPU sprite
-    /// consumer per app; multi-viewport needs per-id resources (like
-    /// `FullscreenPass`'s id map).
-    last_count: u32,
+    /// Alpha instance count + total; additive range is
+    /// `alpha..total`. `paint` draws both ranges.
+    last_alpha: u32,
+    last_total: u32,
     camera: wgpu::Buffer,
     cam_bind: wgpu::BindGroup,
     tex_bind: wgpu::BindGroup,
     texture: wgpu::Texture,
+}
+
+struct BatchResources {
+    batches: HashMap<&'static str, BatchEntry>,
 }
 
 const CORNERS: &[f32] = &[
@@ -383,15 +432,23 @@ impl SpriteBatch {
             self.desc.layers,
             self.desc.filter,
         );
-        let rebuild = resources
-            .get::<BatchResources>()
-            .is_none_or(|r| r.key != key);
-        if !rebuild {
+        let needs = match resources.get::<BatchResources>() {
+            None => true,
+            Some(all) => match all.batches.get(self.id) {
+                None => true,
+                Some(e) => e.key != key,
+            },
+        };
+        if !needs {
             return;
         }
-        if resources.get::<BatchResources>().is_some() {
+        if resources
+            .get::<BatchResources>()
+            .is_some_and(|all| all.batches.contains_key(self.id))
+        {
             log::warn!(
-                "sprite_batch: rebuilding pipeline/texture (format/sample/desc changed); atlas contents dropped, re-upload required"
+                "sprite_batch[{}]: rebuilding pipeline/texture (format/sample/desc changed); atlas contents dropped, re-upload required",
+                self.id
             );
         }
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -495,142 +552,219 @@ impl SpriteBatch {
             bind_group_layouts: &[Some(&cam_layout), Some(&tex_layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("sprite_batch_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[
-                    Some(wgpu::VertexBufferLayout {
-                        array_stride: 8,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        }],
-                    }),
-                    Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<BatchInstance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 0,
-                                shader_location: 2,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 16,
-                                shader_location: 3,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 32,
-                                shader_location: 4,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 40,
-                                shader_location: 5,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 48,
-                                shader_location: 6,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32,
-                                offset: 64,
-                                shader_location: 7,
-                            },
-                        ],
-                    }),
-                ],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: screen.target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
+        let vertex_buffers = [
+            Some(wgpu::VertexBufferLayout {
+                array_stride: 8,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0,
+                }],
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            // Same etiquette as the showcase embedded view: the compositor
-            // owns a Depth24PlusStencil8 buffer; we never write depth and
-            // pass the stencil test the frame leaves behind.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState {
-                    front: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::LessEqual,
-                        ..Default::default()
+            Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<BatchInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 0,
+                        shader_location: 2,
                     },
-                    back: wgpu::StencilFaceState {
-                        compare: wgpu::CompareFunction::LessEqual,
-                        ..Default::default()
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 16,
+                        shader_location: 3,
                     },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 32,
+                        shader_location: 4,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 40,
+                        shader_location: 5,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 48,
+                        shader_location: 6,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32,
+                        offset: 64,
+                        shader_location: 7,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32,
+                        offset: 68,
+                        shader_location: 8,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Uint32,
+                        offset: 72,
+                        shader_location: 9,
+                    },
+                ],
+            }),
+        ];
+        let mk_pipeline = |label: &'static str, blend: wgpu::BlendState| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &vertex_buffers,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: screen.target_format,
+                        blend: Some(blend),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
                     ..Default::default()
                 },
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: screen.sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth24PlusStencil8,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState {
+                        front: wgpu::StencilFaceState {
+                            compare: wgpu::CompareFunction::LessEqual,
+                            ..Default::default()
+                        },
+                        back: wgpu::StencilFaceState {
+                            compare: wgpu::CompareFunction::LessEqual,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: screen.sample_count,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline_alpha = mk_pipeline("sprite_batch_pipeline", wgpu::BlendState::ALPHA_BLENDING);
+        let pipeline_additive = mk_pipeline(
+            "sprite_batch_pipeline_add",
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
             },
-            multiview_mask: None,
-            cache: None,
-        });
-        resources.insert(BatchResources {
+        );
+        let entry = BatchEntry {
             key,
-            pipeline,
+            pipeline_alpha,
+            pipeline_additive,
             corners,
             instances,
             instance_cap: self.instances.len().max(1),
-            last_count: 0,
+            last_alpha: 0,
+            last_total: 0,
             camera,
             cam_bind,
             tex_bind,
             texture,
-        });
+        };
+        match resources.get_mut::<BatchResources>() {
+            Some(all) => {
+                all.batches.insert(self.id, entry);
+            }
+            None => {
+                let mut all = BatchResources {
+                    batches: HashMap::new(),
+                };
+                all.batches.insert(self.id, entry);
+                resources.insert(all);
+            }
+        }
     }
 
-    /// Record this batch's instance count after uploading. Split out so
+    /// Record this batch's instance counts after uploading. Split out so
     /// sibling payloads (e.g. viewport views rebuilding the batch per
     /// frame) can share one prepared pipeline.
-    fn finish_prepare(&self, resources: &mut CallbackResources) {
-        if let Some(res) = resources.get_mut::<BatchResources>() {
-            res.last_count = self.instances.len() as u32;
+    fn finish_prepare(&self, alpha: u32, total: u32, resources: &mut CallbackResources) {
+        if let Some(all) = resources.get_mut::<BatchResources>() {
+            if let Some(res) = all.batches.get_mut(self.id) {
+                res.last_alpha = alpha;
+                res.last_total = total;
+            }
         }
+    }
+
+    fn sorted_instances(&self) -> (Vec<BatchInstance>, u32) {
+        let mut v = self.instances.clone();
+        v.sort_by(|a, b| {
+            let ga = u32::from(a.flags == 1);
+            let gb = u32::from(b.flags == 1);
+            ga.cmp(&gb).then_with(|| {
+                a.z.total_cmp(&b.z).then_with(|| {
+                    // Stable tiebreak: keep deterministic order for equal z.
+                    a.page.total_cmp(&b.page)
+                })
+            })
+        });
+        let alpha = v.iter().take_while(|i| i.flags != 1).count() as u32;
+        (v, alpha)
     }
 }
 
-/// Draw the prepared batch. Shared by [`SpriteBatch`] and viewport
-/// payloads so all GPU consumers issue identical draw calls.
-pub(crate) fn draw_batch(rpass: &mut wgpu::RenderPass<'_>, resources: &CallbackResources) {
-    let Some(res) = resources.get::<BatchResources>() else {
+/// Draw the prepared batch for one id. Shared by [`SpriteBatch`] and
+/// viewport payloads so all GPU consumers issue identical draw calls.
+pub fn draw_batch_with_id(
+    id: &'static str,
+    rpass: &mut wgpu::RenderPass<'_>,
+    resources: &CallbackResources,
+) {
+    let Some(all) = resources.get::<BatchResources>() else {
         return;
     };
-    if res.last_count == 0 {
+    let Some(res) = all.batches.get(id) else {
+        return;
+    };
+    if res.last_total == 0 {
         return;
     }
-    rpass.set_pipeline(&res.pipeline);
     rpass.set_bind_group(0, &res.cam_bind, &[]);
     rpass.set_bind_group(1, &res.tex_bind, &[]);
     rpass.set_vertex_buffer(0, res.corners.slice(..));
     rpass.set_vertex_buffer(1, res.instances.slice(..));
-    rpass.draw(0..6, 0..res.last_count);
+    if res.last_alpha > 0 {
+        rpass.set_pipeline(&res.pipeline_alpha);
+        rpass.draw(0..6, 0..res.last_alpha);
+    }
+    if res.last_total > res.last_alpha {
+        rpass.set_pipeline(&res.pipeline_additive);
+        rpass.draw(0..6, res.last_alpha..res.last_total);
+    }
+}
+
+/// Draw the default batch (backward compat for single-batch apps).
+pub fn draw_batch(rpass: &mut wgpu::RenderPass<'_>, resources: &CallbackResources) {
+    draw_batch_with_id("sprite_batch.default", rpass, resources);
 }
 
 impl WgpuCallback for SpriteBatch {
@@ -643,18 +777,24 @@ impl WgpuCallback for SpriteBatch {
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         self.ensure_resources(device, screen, resources);
-        let Some(res) = resources.get_mut::<BatchResources>() else {
+        let (sorted, alpha) = self.sorted_instances();
+        let total = sorted.len() as u32;
+        let Some(all) = resources.get_mut::<BatchResources>() else {
             return Vec::new();
         };
-        // Grow the instance buffer when the batch outgrows it.
-        if self.instances.len() > res.instance_cap {
+        let Some(res) = all.batches.get_mut(self.id) else {
+            return Vec::new();
+        };
+        // Grow the instance buffer with doubling (Bevy/wgpu best practice).
+        if sorted.len() > res.instance_cap {
+            let new_cap = sorted.len().next_power_of_two().max(64);
             res.instances = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("sprite_batch_instances"),
-                size: (self.instances.len().max(1) * size_of::<BatchInstance>()) as u64,
+                size: (new_cap * size_of::<BatchInstance>()) as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            res.instance_cap = self.instances.len().max(1);
+            res.instance_cap = new_cap;
         }
         queue.write_buffer(
             &res.camera,
@@ -663,8 +803,8 @@ impl WgpuCallback for SpriteBatch {
                 view_proj: self.camera,
             }]),
         );
-        if !self.instances.is_empty() {
-            queue.write_buffer(&res.instances, 0, bytemuck::cast_slice(&self.instances));
+        if !sorted.is_empty() {
+            queue.write_buffer(&res.instances, 0, bytemuck::cast_slice(&sorted));
         }
         // Apply pending atlas uploads straight into array layers.
         for up in &self.uploads {
@@ -709,7 +849,7 @@ impl WgpuCallback for SpriteBatch {
                 },
             );
         }
-        self.finish_prepare(resources);
+        self.finish_prepare(alpha, total, resources);
         Vec::new()
     }
 
@@ -719,7 +859,7 @@ impl WgpuCallback for SpriteBatch {
         rpass: &mut wgpu::RenderPass<'static>,
         resources: &CallbackResources,
     ) {
-        draw_batch(rpass, resources);
+        draw_batch_with_id(self.id, rpass, resources);
     }
 }
 

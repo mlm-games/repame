@@ -3405,6 +3405,7 @@ dependencies = [
  "glam 0.33.7",
  "noise",
  "rand 0.10.2",
+ "repame-atlas",
  "repame-sim",
  "repame-sprite",
  "repose-core",

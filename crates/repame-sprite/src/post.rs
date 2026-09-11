@@ -10,7 +10,7 @@
 
 use repose_render_wgpu::{CallbackResources, ScreenDescriptor};
 
-use super::batch::draw_batch;
+use super::batch::draw_batch_with_id;
 
 /// Fullscreen triangle + scene sampler. Uniforms: `amount` followed by
 /// three scalar pads (16 bytes total; a `vec3` pad would align the
@@ -326,13 +326,14 @@ fn ensure_targets(
 /// matching [`paint_composite`] runs in `paint`. `background` sets the
 /// offscreen clear color so the composite preserves the snapshot clear
 /// (`None` clears to transparent black, as before).
-#[allow(clippy::too_many_arguments)] // extends `WgpuCallback::prepare` by (w, h, amount, bg)
+#[allow(clippy::too_many_arguments)] // extends `WgpuCallback::prepare` by (id, w, h, amount, bg)
 pub(crate) fn prepare_composite(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
     screen: &ScreenDescriptor,
     resources: &mut CallbackResources,
+    batch_id: &'static str,
     w: u32,
     h: u32,
     amount: f32,
@@ -388,7 +389,7 @@ pub(crate) fn prepare_composite(
         multiview_mask: None,
     });
     pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
-    draw_batch(&mut pass, resources);
+    draw_batch_with_id(batch_id, &mut pass, resources);
 }
 
 /// Draw the graded fullscreen triangle into the main pass. The renderer
@@ -455,6 +456,7 @@ mod tests {
                     encoder,
                     screen,
                     resources,
+                    batch.id(),
                     64,
                     64,
                     self.amount,
@@ -473,7 +475,7 @@ mod tests {
             if use_composite(self.amount) {
                 paint_composite(rpass, resources);
             } else {
-                draw_batch(rpass, resources);
+                draw_batch_with_id("sprite_batch.default", rpass, resources);
             }
         }
     }
@@ -492,6 +494,7 @@ mod tests {
                 uv_max: Vec2::new(0.249, 0.249),
                 color,
                 page: 0,
+                ..Default::default()
             };
             [
                 quad(16.0, [1.0, 0.0, 0.0, 1.0]),

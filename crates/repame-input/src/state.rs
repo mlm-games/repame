@@ -188,9 +188,10 @@ impl<A: ActionLike> ActionState<A> {
     /// Intensity of an action, from `0.0` (inactive) to `1.0` (fully held).
     ///
     /// For button bindings (key, mouse, pad) the value is `0` or `1`. For
-    /// axis bindings it is the stick deflection `|value|` clamped to
-    /// `0..1`, so the further the stick is pushed past its threshold, the
-    /// closer the value is to `1`. When several bindings drive one action,
+    /// axis bindings it is the stick deflection remapped from
+    /// `threshold..1` to `0..1` (radial deadzone, leafwing feel), so the
+    /// further the stick is pushed past its threshold, the closer the
+    /// value is to `1`. When several bindings drive one action,
     /// the strongest active binding wins.
     ///
     /// Returns `0.0` while the action is gated out by its context or has
@@ -216,10 +217,17 @@ impl<A: ActionLike> ActionState<A> {
                 }
                 Binding::Axis { axis, threshold } => {
                     let v = self.axis_value(*axis);
-                    if Binding::axis_active(*threshold, v) {
-                        v.abs().clamp(0.0, 1.0).max(1e-6)
-                    } else {
+                    if !Binding::axis_active(*threshold, v) {
                         0.0
+                    } else {
+                        // Radial deadzone remap t..1 → 0..1 (leafwing feel).
+                        let t = threshold.abs().clamp(0.0, 0.95);
+                        let a = v.abs();
+                        if a <= t {
+                            0.0
+                        } else {
+                            ((a - t) / (1.0 - t)).clamp(0.0, 1.0).max(1e-6)
+                        }
                     }
                 }
             };
@@ -496,12 +504,12 @@ mod tests {
         // Rest: all zero.
         assert_eq!(st.strength(&"right"), 0.0);
         assert_eq!(st.vector(&"left", &"right", &"jump", &"jump", 0.2), (0.0, 0.0));
-        // Half deflection right: proportional strength.
+        // Half deflection right: deadzone-remapped strength.
         st.axis(GamepadAxis::LeftStickX, 0.5);
-        assert!((st.strength(&"right") - 0.5).abs() < 1e-6);
+        assert!((st.strength(&"right") - 0.375).abs() < 1e-6);
         assert_eq!(st.strength(&"left"), 0.0);
         let (x, y) = st.vector(&"left", &"right", &"jump", &"jump", 0.2);
-        assert!((x - 0.5).abs() < 1e-6 && y.abs() < 1e-6);
+        assert!((x - 0.375).abs() < 1e-6 && y.abs() < 1e-6);
         // Vector deadzone snaps small-but-active sticks to zero.
         assert_eq!(st.vector(&"left", &"right", &"jump", &"jump", 0.6), (0.0, 0.0));
         // Below deadzone the vector snaps to zero even if bound.

@@ -112,10 +112,7 @@ impl AnimCatalog {
     pub fn empty() -> Self {
         Self {
             defs: HashMap::new(),
-            atlas: Atlas::new(AtlasDesc {
-                size: 64,
-                max_pages: 1,
-            }),
+            atlas: Atlas::new(AtlasDesc { size: 64, max_pages: 1, padding: 0 }),
         }
     }
     /// Parse JSON and pack every frame. `serde_json` maps sort keys, so
@@ -584,10 +581,7 @@ mod tests {
     fn catalog() -> AnimCatalog {
         AnimCatalog::from_json(
             JSON,
-            AtlasDesc {
-                size: 64,
-                max_pages: 1,
-            },
+            AtlasDesc { size: 64, max_pages: 1, padding: 0 },
         )
         .expect("fits")
     }
@@ -635,20 +629,14 @@ mod tests {
         assert!(matches!(
             AnimCatalog::from_json(
                 "not json",
-                AtlasDesc {
-                    size: 64,
-                    max_pages: 1
-                }
+                AtlasDesc { size: 64, max_pages: 1, padding: 0 }
             ),
             Err(CatalogError::Json(_))
         ));
         assert!(matches!(
             AnimCatalog::from_json(
                 JSON,
-                AtlasDesc {
-                    size: 8,
-                    max_pages: 1
-                }
+                AtlasDesc { size: 8, max_pages: 1, padding: 0 }
             ),
             Err(CatalogError::AtlasFull { .. })
         ));
@@ -656,10 +644,7 @@ mod tests {
         assert!(matches!(
             AnimCatalog::from_json(
                 big,
-                AtlasDesc {
-                    size: 64,
-                    max_pages: 4
-                }
+                AtlasDesc { size: 64, max_pages: 4, padding: 0 }
             ),
             Err(CatalogError::CellTooLarge { .. })
         ));
@@ -667,10 +652,7 @@ mod tests {
         assert!(matches!(
             AnimCatalog::from_json(
                 dup,
-                AtlasDesc {
-                    size: 64,
-                    max_pages: 1
-                }
+                AtlasDesc { size: 64, max_pages: 1, padding: 0 }
             ),
             Err(CatalogError::DuplicateStem { .. })
         ));
@@ -953,6 +935,7 @@ mod tests {
             AtlasDesc {
                 size: 2048,
                 max_pages: 16,
+                padding: 1,
             },
         )
         .expect("nt catalog fits in 16 pages @2048");

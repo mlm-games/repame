@@ -33,7 +33,7 @@ pub use chroma::Chroma;
 pub use effect::{EaseKind, EffectDef, Gradient, Jittered, SpawnerDef};
 pub use flash::Flash;
 pub use numbers::{DamageNumber, spawn_number, step_numbers};
-pub use particles::{Particle, Spawner, burst, particle_sprites, step_particles, tick_spawners};
+pub use particles::{Particle, Spawner, burst, particle_sprites, particle_sprites_with_white, step_particles, tick_spawners};
 pub use transitions::{TransitionFx, TransitionVisual, VORTEX_CUSTOM_ID};
 pub use trauma::Trauma;
 

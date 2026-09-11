@@ -18,6 +18,8 @@ struct Instance {
     @location(5) uv_max: vec2<f32>,
     @location(6) tint: vec4<f32>,
     @location(7) page: f32,
+    @location(8) z: f32,
+    @location(9) flags: u32,
 };
 
 struct Camera {
@@ -46,5 +48,9 @@ fn vs_main(@location(0) corner: vec2<f32>, inst: Instance) -> VertexOut {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let tex = textureSample(atlas, atlas_sampler, in.uv, i32(in.page + 0.5));
-    return tex * in.tint;
+    var color = tex * in.tint;
+    if (color.a < 0.001) {
+        discard;
+    }
+    return color;
 }

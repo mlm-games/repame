@@ -49,6 +49,9 @@ repame-anim = { path = "crates/repame-anim", version = "0.1" }
 repame-audio = { path = "crates/repame-audio", version = "0.1" }
 repame-sprite = { path = "crates/repame-sprite", version = "0.1" }
 repame-shell = { path = "crates/repame-shell", version = "0.1" }
+repame-actors = { path = "crates/repame-actors", version = "0.1" }
+repame-fx = { path = "crates/repame-fx", version = "0.1" }
+repame-input = { path = "crates/repame-input", version = "0.1" }
 
 # renamite-player = { path = "../renamite/crates/renamite-player"}
 # renamite-player-ui = { path = "../renamite/crates/renamite-player-ui"}

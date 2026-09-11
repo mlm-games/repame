@@ -7,7 +7,7 @@
 //! ```rust
 //! use repame_atlas::{Atlas, AtlasDesc};
 //!
-//! let mut atlas = Atlas::new(AtlasDesc { size: 512, max_pages: 4 });
+//! let mut atlas = Atlas::new(AtlasDesc { size: 512, max_pages: 4, padding: 0 });
 //! let uv = atlas.alloc_str("hero_idle_0", 48, 32).expect("fits");
 //! assert_eq!(uv.page, 0);
 //! let writes = atlas.drain_writes();
@@ -56,6 +56,19 @@ pub struct AtlasDesc {
     pub size: u32,
     /// Hard cap on page count; allocations beyond it fail cleanly.
     pub max_pages: u32,
+    /// Empty border around each sprite in px (default 1). Prevents bleed
+    /// with linear filtering / subpixel cameras.
+    pub padding: u32,
+}
+
+impl Default for AtlasDesc {
+    fn default() -> Self {
+        Self {
+            size: 2048,
+            max_pages: 4,
+            padding: 1,
+        }
+    }
 }
 
 /// Why an allocation failed. Never panics: oversize and exhaustion are
@@ -81,6 +94,34 @@ pub struct Atlas {
     queue: UploadQueue,
 }
 
+/// Reserved 1x1 white texel for untextured / particle quads.
+pub const WHITE_TEXEL_NAME: &str = "__repame_white";
+
+/// Expand tight RGBA into a padded buffer with clamped edge replicate
+/// (Bevy atlas builder style). Returns `(padded, out_w, out_h)`.
+pub fn pad_rgba(src: &[u8], w: u32, h: u32, pad: u32) -> (Vec<u8>, u32, u32) {
+    if pad == 0 {
+        return (src.to_vec(), w, h);
+    }
+    let (w, h, pad) = (w as usize, h as usize, pad as usize);
+    if src.len() != w * h * 4 {
+        return (src.to_vec(), w as u32, h as u32);
+    }
+    let ow = w + pad * 2;
+    let oh = h + pad * 2;
+    let mut out = vec![0u8; ow * oh * 4];
+    for oy in 0..oh {
+        let sy = oy.saturating_sub(pad).min(h.saturating_sub(1));
+        for ox in 0..ow {
+            let sx = ox.saturating_sub(pad).min(w.saturating_sub(1));
+            let s = (sy * w + sx) * 4;
+            let d = (oy * ow + ox) * 4;
+            out[d..d + 4].copy_from_slice(&src[s..s + 4]);
+        }
+    }
+    (out, ow as u32, oh as u32)
+}
+
 impl Atlas {
     pub fn new(desc: AtlasDesc) -> Self {
         debug_assert!(desc.size > 0, "atlas pages need a size");
@@ -95,6 +136,11 @@ impl Atlas {
 
     /// Place a `w`x`h` sprite under `key`. Queues exactly one
     /// [`AtlasWrite`] so the backend knows what to upload where.
+    ///
+    /// With `padding > 0` the packer reserves a border around the sprite;
+    /// the UV covers the inner content rect only, and the queued write is
+    /// the inner rect (games blit tight pixels there, or use [`pad_rgba`]
+    /// to replicate edges into the pad).
     pub fn alloc(&mut self, key: AtlasId, w: u32, h: u32) -> Result<UvRect, AllocError> {
         if self.entries.contains_key(&key) {
             return Err(AllocError::Duplicate);
@@ -102,9 +148,15 @@ impl Atlas {
         if w == 0 || h == 0 || w > self.desc.size || h > self.desc.size {
             return Err(AllocError::TooLarge);
         }
+        let pad = self.desc.padding;
+        let aw = w.saturating_add(pad.saturating_mul(2));
+        let ah = h.saturating_add(pad.saturating_mul(2));
+        if aw > self.desc.size || ah > self.desc.size {
+            return Err(AllocError::TooLarge);
+        }
         for (page, shelf) in self.pages.iter_mut().enumerate() {
-            if let Some(p) = shelf.alloc(w, h) {
-                return Ok(self.insert(key, page as u32, p));
+            if let Some(p) = shelf.alloc(aw, ah) {
+                return Ok(self.insert(key, page as u32, p, pad));
             }
         }
         if self.pages.len() as u32 >= self.desc.max_pages {
@@ -113,10 +165,10 @@ impl Atlas {
         let mut shelf = ShelfPage::new(self.desc.size);
         let page = self.pages.len() as u32;
         let p = shelf
-            .alloc(w, h)
+            .alloc(aw, ah)
             .expect("fits on a fresh page: bounds checked above");
         self.pages.push(shelf);
-        Ok(self.insert(key, page, p))
+        Ok(self.insert(key, page, p, pad))
     }
 
     /// Convenience wrapper hashing a name with [`atlas_id`].
@@ -124,25 +176,49 @@ impl Atlas {
         self.alloc(atlas_id(name), w, h)
     }
 
-    fn insert(&mut self, key: AtlasId, page: u32, p: Placement) -> UvRect {
-        let uv = self.uv_of(page, p);
+    /// Ensure a 1x1 white pixel exists; returns its UvRect.
+    pub fn ensure_white(&mut self) -> Result<UvRect, AllocError> {
+        let id = atlas_id(WHITE_TEXEL_NAME);
+        if let Some(uv) = self.uv_rect(id) {
+            return Ok(uv);
+        }
+        self.alloc(id, 1, 1)
+    }
+
+    fn insert(&mut self, key: AtlasId, page: u32, p: Placement, pad: u32) -> UvRect {
+        // Outer placement `p` includes the pad border; the content lives
+        // at the inner rect.
+        let inner = Placement {
+            x: p.x + pad,
+            y: p.y + pad,
+            w: p.w.saturating_sub(pad.saturating_mul(2)),
+            h: p.h.saturating_sub(pad.saturating_mul(2)),
+        };
+        let uv = self.uv_of(page, inner);
         self.entries.insert(key, (page, p));
         self.queue.push_write(AtlasWrite {
             key,
             page,
-            x: p.x,
-            y: p.y,
-            w: p.w,
-            h: p.h,
+            x: inner.x,
+            y: inner.y,
+            w: inner.w,
+            h: inner.h,
             uv,
         });
         uv
     }
 
-    /// Look up a live entry's uv rect.
+    /// Look up a live entry's uv rect (inner content rect).
     pub fn uv_rect(&self, key: AtlasId) -> Option<UvRect> {
         let (page, p) = *self.entries.get(&key)?;
-        Some(self.uv_of(page, p))
+        let pad = self.desc.padding;
+        let inner = Placement {
+            x: p.x + pad,
+            y: p.y + pad,
+            w: p.w.saturating_sub(pad.saturating_mul(2)),
+            h: p.h.saturating_sub(pad.saturating_mul(2)),
+        };
+        Some(self.uv_of(page, inner))
     }
 
     fn uv_of(&self, page: u32, p: Placement) -> UvRect {
@@ -222,6 +298,7 @@ mod tests {
         let mut atlas = Atlas::new(AtlasDesc {
             size: 256,
             max_pages: 2,
+            padding: 0,
         });
         // nt-style strip frames: 48x32 cells.
         for i in 0..32 {
@@ -237,6 +314,7 @@ mod tests {
         let mut atlas = Atlas::new(AtlasDesc {
             size: 64,
             max_pages: 2,
+            padding: 0,
         });
         let mut pages = std::collections::HashSet::new();
         let mut i = 0u64;
@@ -260,6 +338,7 @@ mod tests {
         let mut atlas = Atlas::new(AtlasDesc {
             size: 64,
             max_pages: 1,
+            padding: 0,
         });
         atlas.alloc_str("hero", 16, 16).unwrap();
         assert_eq!(atlas.alloc_str("hero", 16, 16), Err(AllocError::Duplicate));
@@ -272,6 +351,7 @@ mod tests {
         let mut atlas = Atlas::new(AtlasDesc {
             size: 128,
             max_pages: 1,
+            padding: 0,
         });
         let uv = atlas.alloc_str("a", 64, 64).unwrap();
         assert_eq!(uv.min, [0.0, 0.0]);
@@ -285,6 +365,7 @@ mod tests {
         let mut atlas = Atlas::new(AtlasDesc {
             size: 64,
             max_pages: 1,
+            padding: 0,
         });
         atlas.alloc_str("a", 16, 16).unwrap();
         atlas.clear();
@@ -297,6 +378,7 @@ mod tests {
         let mut atlas = Atlas::new(AtlasDesc {
             size: 64,
             max_pages: 1,
+            padding: 0,
         });
         let key = atlas_id("temp");
         let uv = atlas.alloc(key, 32, 32).unwrap();
@@ -315,5 +397,52 @@ mod tests {
     fn name_hash_is_deterministic() {
         assert_eq!(atlas_id("sprAllyBullet"), atlas_id("sprAllyBullet"));
         assert_ne!(atlas_id("a"), atlas_id("b"));
+    }
+
+    #[test]
+    fn atlas_padding_separates_neighbors() {
+        let mut a = Atlas::new(AtlasDesc {
+            size: 64,
+            max_pages: 1,
+            padding: 1,
+        });
+        let u0 = a.alloc_str("a", 8, 8).unwrap();
+        let u1 = a.alloc_str("b", 8, 8).unwrap();
+        // Same page: padded outer rects must not overlap in UV.
+        assert_eq!(u0.page, 0);
+        assert_eq!(u1.page, 0);
+        let s = 64.0;
+        let pad_uv = 1.0 / s;
+        assert!(u0.max[0] + pad_uv <= u1.min[0] + 1e-6 || (u1.min[1] - u0.min[1]).abs() > 1e-6);
+        // Writes cover the inner rect only.
+        let writes = a.drain_writes();
+        assert_eq!(writes.len(), 2);
+        assert_eq!((writes[0].w, writes[0].h), (8, 8));
+    }
+
+    #[test]
+    fn white_texel_and_pad_rgba() {
+        let mut a = Atlas::new(AtlasDesc {
+            size: 16,
+            max_pages: 1,
+            padding: 1,
+        });
+        let white = a.ensure_white().expect("white");
+        assert_eq!(white.page, 0);
+        assert_eq!(a.ensure_white().unwrap(), white);
+        // pad_rgba replicates edges.
+        let src = vec![
+            255, 0, 0, 255, //
+            0, 255, 0, 255, //
+            0, 0, 255, 255, //
+            255, 255, 255, 255,
+        ];
+        let (out, ow, oh) = pad_rgba(&src, 2, 2, 1);
+        assert_eq!((ow, oh), (4, 4));
+        assert_eq!(out.len(), 4 * 4 * 4);
+        // Center 2x2 matches src.
+        assert_eq!(&out[(1 * 4 + 1) * 4..(1 * 4 + 1) * 4 + 4], &[255, 0, 0, 255]);
+        // Corner replicates nearest edge.
+        assert_eq!(&out[0..4], &[255, 0, 0, 255]);
     }
 }

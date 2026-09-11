@@ -201,7 +201,32 @@ pub fn particle_sprites<'a>(particles: impl Iterator<Item = &'a Particle>) -> Ve
                 uv_max: Vec2::new(p.uv_max[0], p.uv_max[1]),
                 color: p.gradient.sample(t),
                 page: p.page,
+                ..Default::default()
             }
+        })
+        .collect()
+}
+
+/// Same as [`particle_sprites`], but untextured particles (full-page
+/// `0..1` UV on page 0) sample the shared white texel instead of random
+/// atlas art. Pass the [`Atlas::ensure_white`](repame_atlas::Atlas::ensure_white)
+/// rect; textured particles keep their own UVs.
+pub fn particle_sprites_with_white<'a>(
+    particles: impl Iterator<Item = &'a Particle>,
+    white: repame_atlas::UvRect,
+) -> Vec<SpriteInstance> {
+    particle_sprites(particles)
+        .into_iter()
+        .map(|mut s| {
+            let full = s.uv_min == Vec2::ZERO
+                && s.uv_max == Vec2::ONE
+                && s.page == white.page;
+            if full {
+                s.uv_min = Vec2::from_array(white.min);
+                s.uv_max = Vec2::from_array(white.max);
+                s.page = white.page;
+            }
+            s
         })
         .collect()
 }

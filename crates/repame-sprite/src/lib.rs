@@ -20,10 +20,9 @@ use repose_ui::Box as UiBox;
 use repose_ui::ViewExt;
 
 pub mod batch;
-use batch::draw_batch;
 pub use batch::{
-    AtlasUpload, BatchDesc, SpriteBatch, TextureFilter, frame_uv, instance_rows, screen_camera,
-    sprite_aabb,
+    AtlasUpload, BatchDesc, SpriteBatch, TextureFilter, draw_batch, draw_batch_with_id,
+    frame_uv, instance_rows, screen_camera, sprite_aabb,
 };
 
 pub mod fullscreen;
@@ -178,18 +177,22 @@ impl Camera2d {
         [self.center.x + self.offset.x, self.center.y + self.offset.y]
     }
 
-    /// Legacy y-down view-projection: world +y points screen-down.
-    ///
-    /// Diverges from the shared framing contract: this frames from
-    /// `viewport * units_per_pixel / zoom` and ignores
-    /// [`FrameInput::world_size`], so it disagrees with canvas, GPU, and
-    /// picks whenever a contain-fit letterboxes. Kept for guards/tests;
-    /// viewport code must use [`fit_view_proj`] instead.
-    #[deprecated(
-        since = "0.1.8",
-        note = "ignores world_size; use fit_view_proj for the shared canvas/GPU/pick framing contract"
-    )]
-    pub fn view_proj(&self, viewport_px: [f32; 2]) -> Mat4 {
+    /// Framing matrix used by GPU + picks. Prefer this over raw ortho.
+    pub fn fit_matrix(&self, canvas_dp: [f32; 2], world_size: [f32; 2]) -> Mat4 {
+        let fit = effective_fit(canvas_dp, world_size, self);
+        fit_view_proj(canvas_dp, world_size, self.effective_center(), fit)
+    }
+
+    /// World under a dp-space cursor (canvas coords, density already divided out).
+    pub fn dp_to_world_pt(&self, canvas_dp: [f32; 2], world_size: [f32; 2], dp: [f32; 2]) -> Vec2 {
+        let fit = effective_fit(canvas_dp, world_size, self);
+        let w = dp_to_world(dp, world_size, self.effective_center(), fit);
+        Vec2::new(w[0], w[1])
+    }
+
+    /// Raw ortho ignoring contain-fit letterbox. Kept for HUD overlays in
+    /// screen space; viewport code must use [`fit_matrix`](Camera2d::fit_matrix).
+    pub fn view_proj_screen(&self, viewport_px: [f32; 2]) -> Mat4 {
         let vp_w = viewport_px[0].max(1.0);
         let vp_h = viewport_px[1].max(1.0);
         let zoom = sane_positive(self.zoom);
@@ -210,6 +213,21 @@ impl Camera2d {
             0.0,
         ));
         proj * view
+    }
+
+    /// Legacy y-down view-projection: world +y points screen-down.
+    ///
+    /// Diverges from the shared framing contract: this frames from
+    /// `viewport * units_per_pixel / zoom` and ignores
+    /// [`FrameInput::world_size`], so it disagrees with canvas, GPU, and
+    /// picks whenever a contain-fit letterboxes. Kept for guards/tests;
+    /// viewport code must use [`fit_view_proj`] instead.
+    #[deprecated(
+        since = "0.1.8",
+        note = "ignores world_size; use fit_view_proj for the shared canvas/GPU/pick framing contract"
+    )]
+    pub fn view_proj(&self, viewport_px: [f32; 2]) -> Mat4 {
+        self.view_proj_screen(viewport_px)
     }
 
     /// Legacy world-space position under a viewport-pixel cursor.
@@ -237,6 +255,16 @@ impl Camera2d {
     }
 }
 
+/// Blend mode per sprite. Alpha is the default; Additive draws with
+/// `One + One` (second pipeline, split draw ranges).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpriteBlend {
+    #[default]
+    Alpha,
+    Additive,
+    Multiply,
+}
+
 /// One batched sprite. `uv` is in atlas texels normalized to 0..1.
 #[derive(Clone, Copy, Debug)]
 pub struct SpriteInstance {
@@ -260,6 +288,10 @@ pub struct SpriteInstance {
     pub color: [f32; 4],
     /// Atlas page index for multi-texture batches.
     pub page: u32,
+    /// Stable draw key; higher draws on top. Default 0. The batch
+    /// stable-sorts by `z` before upload (Bevy `z` semantics).
+    pub z: f32,
+    pub blend: SpriteBlend,
 }
 
 impl Default for SpriteInstance {
@@ -275,6 +307,8 @@ impl Default for SpriteInstance {
             uv_max: Vec2::ONE,
             color: [1.0, 1.0, 1.0, 1.0],
             page: 0,
+            z: 0.0,
+            blend: SpriteBlend::Alpha,
         }
     }
 }
@@ -333,8 +367,16 @@ pub struct FrameInput {
 }
 
 /// UI-facing pointer events from the viewport.
+///
+/// `Click` fires on pointer **up** when the press started inside and the
+/// pointer moved less than the slop threshold (drag-off cancels, real UI
+/// button feel). `Press` is the down-edge for games that need it.
 #[derive(Clone, Debug)]
 pub enum PickEvent {
+    Press {
+        world: Vec2,
+        screen: [f32; 2],
+    },
     Click {
         world: Vec2,
         screen: [f32; 2],
@@ -540,6 +582,47 @@ impl Default for FrameGeom {
     }
 }
 
+/// Shared paint-time geometry. Canvas views use this on the UI thread;
+/// GPU callbacks need `Send + Sync`, so the inner cell is mutex-backed.
+#[derive(Clone, Default)]
+pub struct GeomHandle(Arc<Mutex<FrameGeom>>);
+
+impl GeomHandle {
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(FrameGeom::default())))
+    }
+
+    pub fn get(&self) -> FrameGeom {
+        self.0.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    pub fn set(&self, g: FrameGeom) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = g;
+        }
+    }
+
+    pub fn arc(&self) -> Arc<Mutex<FrameGeom>> {
+        self.0.clone()
+    }
+}
+
+impl From<FrameGeom> for GeomHandle {
+    fn from(g: FrameGeom) -> Self {
+        Self(Arc::new(Mutex::new(g)))
+    }
+}
+
+/// Press slop in physical px: pointer-up farther than this from
+/// pointer-down cancels the `Click` (drag-off-cancel).
+pub const CLICK_SLOP_PX: f32 = 12.0;
+
+fn click_within_slop(a: [f32; 2], b: [f32; 2]) -> bool {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    dx * dx + dy * dy <= CLICK_SLOP_PX * CLICK_SLOP_PX
+}
+
 /// World-anchored surface rect in dp: `([off_x, off_y], [w, h])` for a
 /// `size` box centered on `center`. Pure; `ActorFrame` is its view form.
 pub fn surface_dp(center: [f32; 2], size: [f32; 2], geom: FrameGeom) -> ([f32; 2], [f32; 2]) {
@@ -582,13 +665,15 @@ fn rgba8(c: [f32; 4]) -> Color {
 #[allow(non_snake_case)] // Repose view convention (cf. resims `Viewport3d`).
 pub fn Viewport2d(
     input: FrameInput,
-    geom_out: Rc<Cell<FrameGeom>>,
+    geom_out: GeomHandle,
     on_event: impl Fn(PickEvent) + 'static,
 ) -> View {
     let input = Rc::new(input);
     let world_size = input.world_size;
     let pick_geom = geom_out.clone();
     let move_geom = geom_out.clone();
+    let press_geom = geom_out.clone();
+    let release_geom = geom_out.clone();
     let draw_input = input.clone();
     let draw_geom = geom_out.clone();
     let on_event = Rc::new(on_event);
@@ -597,7 +682,12 @@ pub fn Viewport2d(
     let on_move = on_event.clone();
     let on_touch_move = on_event.clone();
     let on_up = on_event.clone();
+    let on_up_click = on_event.clone();
     let on_leave = on_event;
+    let press: Rc<Cell<Option<[f32; 2]>>> = Rc::new(Cell::new(None));
+    let press_down = press.clone();
+    let press_up = press.clone();
+    let press_leave = press.clone();
 
     let modifier = Modifier::new()
         .fill_max_size()
@@ -605,7 +695,8 @@ pub fn Viewport2d(
             let p = ev.position;
             let g = pick_geom.get();
             let world = pick_world([p.x, p.y], g, world_size);
-            on_down(PickEvent::Click {
+            press_down.set(Some([p.x, p.y]));
+            on_down(PickEvent::Press {
                 world: Vec2::new(world[0], world[1]),
                 screen: [p.x, p.y],
             });
@@ -631,11 +722,24 @@ pub fn Viewport2d(
             }
         })
         .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
+            let p = ev.position;
+            if let Some(start) = press_up.take() {
+                if click_within_slop(start, [p.x, p.y]) {
+                    let g = release_geom.get();
+                    let world = pick_world([p.x, p.y], g, world_size);
+                    on_up_click(PickEvent::Click {
+                        world: Vec2::new(world[0], world[1]),
+                        screen: [p.x, p.y],
+                    });
+                }
+            }
+            let _ = press_geom.get();
             if is_touch(&ev) {
                 on_up(PickEvent::TouchUp { id: ev.id.0 });
             }
         })
         .on_pointer_leave(move |ev: repose_core::input::PointerEvent| {
+            press_leave.set(None);
             if is_touch(&ev) {
                 on_leave(PickEvent::TouchUp { id: ev.id.0 });
             }
@@ -774,28 +878,57 @@ pub fn Viewport2d(
 #[allow(non_snake_case)]
 pub fn Viewport2dGpu(
     input: FrameInput,
-    geom_out: Arc<Mutex<FrameGeom>>,
+    geom_out: GeomHandle,
     uploads: Vec<AtlasUpload>,
     desc: BatchDesc,
+    on_event: impl Fn(PickEvent) + 'static,
+) -> View {
+    Viewport2dGpuWithId(
+        input,
+        geom_out,
+        uploads,
+        desc,
+        "viewport2d.main",
+        on_event,
+    )
+}
+
+/// GPU viewport with an explicit batch id so a second viewport/minimap can
+/// coexist (each id owns its pipeline/instances in `CallbackResources`).
+#[allow(non_snake_case)]
+pub fn Viewport2dGpuWithId(
+    input: FrameInput,
+    geom_out: GeomHandle,
+    uploads: Vec<AtlasUpload>,
+    desc: BatchDesc,
+    batch_id: &'static str,
     on_event: impl Fn(PickEvent) + 'static,
 ) -> View {
     let input = Arc::new(input);
     let world_size = input.world_size;
     let pick_geom = geom_out.clone();
     let move_geom = geom_out.clone();
+    let release_geom = geom_out.clone();
     let size_geom = geom_out.clone();
     let size_input = input.clone();
+    let geom_for_payload = geom_out.clone();
     let on_event = Arc::new(on_event);
     let on_down = on_event.clone();
     let on_touch_down = on_event.clone();
     let on_move = on_event.clone();
     let on_touch_move = on_event.clone();
     let on_up = on_event.clone();
+    let on_up_click = on_event.clone();
     let on_leave = on_event;
+    let press: Arc<Mutex<Option<[f32; 2]>>> = Arc::new(Mutex::new(None));
+    let press_down = press.clone();
+    let press_up = press.clone();
+    let press_leave = press.clone();
     let payload = GpuViewport {
         input: input.clone(),
-        geom: geom_out,
-        uploads,
+        geom: geom_for_payload.arc(),
+        batch_id,
+        uploads: Arc::from(uploads.into_boxed_slice()),
         desc,
         bg: FullscreenPass::new(
             "viewport2d.background",
@@ -821,23 +954,24 @@ pub fn Viewport2dGpu(
             let d = if d.is_finite() && d > 1e-6 { d } else { 1.0 };
             let fit = effective_fit([dp.x, dp.y], size_input.world_size, &size_input.cam);
             let center = size_input.cam.effective_center();
-            if let Ok(mut g) = size_geom.lock() {
-                g.viewport_px = [dp.x * d, dp.y * d];
-                g.density = d;
-                g.fit = fit;
-                g.look = [
+            size_geom.set(FrameGeom {
+                viewport_px: [dp.x * d, dp.y * d],
+                density: d,
+                fit,
+                look: [
                     center[0] - size_input.world_size[0] * 0.5,
                     center[1] - size_input.world_size[1] * 0.5,
-                ];
-            }
+                ],
+            });
         })
         .on_pointer_down(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
-            let Ok(g) = pick_geom.lock() else {
-                return;
-            };
-            let world = pick_world([p.x, p.y], *g, world_size);
-            on_down(PickEvent::Click {
+            let g = pick_geom.get();
+            let world = pick_world([p.x, p.y], g, world_size);
+            if let Ok(mut slot) = press_down.lock() {
+                *slot = Some([p.x, p.y]);
+            }
+            on_down(PickEvent::Press {
                 world: Vec2::new(world[0], world[1]),
                 screen: [p.x, p.y],
             });
@@ -850,10 +984,8 @@ pub fn Viewport2dGpu(
         })
         .on_pointer_move(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
-            let Ok(g) = move_geom.lock() else {
-                return;
-            };
-            let world = pick_world([p.x, p.y], *g, world_size);
+            let g = move_geom.get();
+            let world = pick_world([p.x, p.y], g, world_size);
             on_move(PickEvent::Hover {
                 world: Vec2::new(world[0], world[1]),
             });
@@ -865,11 +997,26 @@ pub fn Viewport2dGpu(
             }
         })
         .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
+            let p = ev.position;
+            let start = press_up.lock().ok().and_then(|mut s| s.take());
+            if let Some(start) = start {
+                if click_within_slop(start, [p.x, p.y]) {
+                    let g = release_geom.get();
+                    let world = pick_world([p.x, p.y], g, world_size);
+                    on_up_click(PickEvent::Click {
+                        world: Vec2::new(world[0], world[1]),
+                        screen: [p.x, p.y],
+                    });
+                }
+            }
             if is_touch(&ev) {
                 on_up(PickEvent::TouchUp { id: ev.id.0 });
             }
         })
         .on_pointer_leave(move |ev: repose_core::input::PointerEvent| {
+            if let Ok(mut s) = press_leave.lock() {
+                *s = None;
+            }
             if is_touch(&ev) {
                 on_leave(PickEvent::TouchUp { id: ev.id.0 });
             }
@@ -880,7 +1027,8 @@ pub fn Viewport2dGpu(
 struct GpuViewport {
     input: Arc<FrameInput>,
     geom: Arc<Mutex<FrameGeom>>,
-    uploads: Vec<AtlasUpload>,
+    batch_id: &'static str,
+    uploads: Arc<[AtlasUpload]>,
     desc: BatchDesc,
     bg: FullscreenPass,
     overlay: FullscreenPass,
@@ -914,26 +1062,30 @@ impl WgpuCallback for GpuViewport {
         };
         let fit = effective_fit(dp, self.input.world_size, &self.input.cam);
         let cam_center = self.input.cam.effective_center();
-        let mut batch = SpriteBatch::new(self.desc);
+        let mut batch = SpriteBatch::with_id(self.batch_id, self.desc);
         batch.set_camera(fit_view_proj(dp, self.input.world_size, cam_center, fit));
         for s in &self.input.sprites {
             batch.push_sprite(s);
         }
-        batch.extend_uploads(self.uploads.clone());
+        batch.extend_uploads(self.uploads.iter().cloned());
         batch.prepare(device, queue, encoder, screen, resources);
+        let composite = post::use_composite(self.input.chroma);
         // Background first (uniform-only fill, same color the canvas
         // path fills under the batch). Skipped when the snapshot has
-        // none so transparent scenes keep compositing.
+        // none so transparent scenes keep compositing; skipped when the
+        // composite path clears offscreen with the same color instead.
         if let Some(bg) = self.input.background {
-            let words = [bg[0], bg[1], bg[2], bg[3]];
-            self.bg.prepare_with(
-                device,
-                queue,
-                screen,
-                resources,
-                bytemuck::cast_slice(&words),
-                &[],
-            );
+            if !composite {
+                let words = [bg[0], bg[1], bg[2], bg[3]];
+                self.bg.prepare_with(
+                    device,
+                    queue,
+                    screen,
+                    resources,
+                    bytemuck::cast_slice(&words),
+                    &[],
+                );
+            }
         }
         if let Some(ov) = self.input.overlay_color {
             let words = [ov[0], ov[1], ov[2], ov[3]];
@@ -955,6 +1107,7 @@ impl WgpuCallback for GpuViewport {
                 encoder,
                 screen,
                 resources,
+                self.batch_id,
                 w,
                 h,
                 self.input.chroma,
@@ -1001,7 +1154,7 @@ impl WgpuCallback for GpuViewport {
             if self.input.background.is_some() {
                 self.bg.paint(info, rpass, resources);
             }
-            draw_batch(rpass, resources);
+            draw_batch_with_id(self.batch_id, rpass, resources);
         }
         if self.input.overlay_color.is_some() {
             self.overlay.paint(info, rpass, resources);
@@ -1009,7 +1162,46 @@ impl WgpuCallback for GpuViewport {
     }
 }
 
-/// A world-anchored surface: `child` (painting in its own local coords)/// is boxed to a `size` rect centered on a world `center`, positioned
+/// Stack GPU sprites under canvas texts/tint using the same FrameInput.
+///
+/// Until a glyph atlas exists, GPU games compose world texts as a canvas
+/// overlay sibling: this helper mounts `Viewport2dGpu` plus a transparent
+/// canvas pass that only draws `texts`/`overlay_color` with the same geom,
+/// so GPU games aren't silently missing damage numbers.
+#[allow(non_snake_case)]
+pub fn Viewport2dGpuWithHud(
+    input: FrameInput,
+    geom: GeomHandle,
+    uploads: Vec<AtlasUpload>,
+    desc: BatchDesc,
+    on_event: impl Fn(PickEvent) + 'static,
+) -> View {
+    use repose_ui::ViewExt as _;
+    let texts = input.texts.clone();
+    let overlay = input.overlay_color;
+    let cam = input.cam;
+    let world_size = input.world_size;
+    let hud_geom = geom.clone();
+    let hud = Viewport2d(
+        FrameInput {
+            cam,
+            world_size,
+            viewport_dp: input.viewport_dp,
+            sprites: Vec::new(),
+            texts,
+            background: None,
+            overlay_color: overlay,
+            chroma: 0.0,
+        },
+        hud_geom,
+        |_| {},
+    );
+    repose_ui::ZStack(Modifier::new().fill_max_size())
+        .child(Viewport2dGpu(input, geom, uploads, desc, on_event))
+        .child(hud)
+}
+/// A world-anchored surface: `child` (painting in its own local coords)
+/// is boxed to a `size` rect centered on a world `center`, positioned
 /// through the viewport's [`FrameGeom`]. Siblings of [`Viewport2d`] -
 /// e.g. live actor surfaces - track sim positions without game-side unit
 /// math, glued to sprites and picks even under camera shake. `mirror_x`
@@ -1023,7 +1215,7 @@ impl WgpuCallback for GpuViewport {
 pub fn ActorFrame(
     center: [f32; 2],
     size: [f32; 2],
-    geom: Rc<Cell<FrameGeom>>,
+    geom: GeomHandle,
     mirror_x: bool,
     child: View,
 ) -> View {
@@ -1138,7 +1330,8 @@ mod tests {
         let payload = GpuViewport {
             input: Arc::new(input.clone()),
             geom,
-            uploads,
+            batch_id: "test.viewport2d.main",
+            uploads: Arc::from(uploads.into_boxed_slice()),
             desc: BatchDesc {
                 layer_size: 2,
                 layers: 1,
@@ -1196,14 +1389,18 @@ mod tests {
                 density: 1.0,
                 viewport_px: [256.0, 256.0],
             })),
-            uploads: vec![AtlasUpload {
-                page: 0,
-                x: 0,
-                y: 0,
-                w: 2,
-                h: 2,
-                rgba: [255, 0, 255, 255].repeat(4),
-            }],
+            batch_id: "test.viewport2d.overlay",
+            uploads: Arc::from(
+                vec![AtlasUpload {
+                    page: 0,
+                    x: 0,
+                    y: 0,
+                    w: 2,
+                    h: 2,
+                    rgba: [255, 0, 255, 255].repeat(4),
+                }]
+                .into_boxed_slice(),
+            ),
             desc: BatchDesc {
                 layer_size: 2,
                 layers: 1,
@@ -1344,7 +1541,7 @@ mod tests {
         let cam_center = cam.effective_center();
         let fit = effective_fit(canvas_dp, world_size, &cam);
         assert!((fit.0 - 2.0).abs() < 1e-4, "effective fit, got {fit:?}");
-        let vp = fit_view_proj(canvas_dp, world_size, cam_center, fit);
+        let vp = cam.fit_matrix(canvas_dp, world_size);
         assert!(vp.is_finite());
         for world in [[400.0, 300.0], [410.0, 290.0], [0.0, 0.0], [800.0, 600.0]] {
             let [dx, dy] = world_to_dp(world, world_size, cam_center, fit);
@@ -1358,17 +1555,34 @@ mod tests {
                 (px[0] - gpu_px[0]).abs() < 1e-2 && (px[1] - gpu_px[1]).abs() < 1e-2,
                 "canvas/GPU disagree for {world:?}: canvas {px:?} vs gpu {gpu_px:?}"
             );
-            let back = dp_to_world(
-                [px[0] / density, px[1] / density],
-                world_size,
-                cam_center,
-                fit,
-            );
+            let back = cam.dp_to_world_pt(canvas_dp, world_size, [px[0] / density, px[1] / density]);
             assert!(
-                (back[0] - world[0]).abs() < 1e-3 && (back[1] - world[1]).abs() < 1e-3,
+                (back.x - world[0]).abs() < 1e-3 && (back.y - world[1]).abs() < 1e-3,
                 "pick round trip for {world:?} gave {back:?}"
             );
         }
+    }
+
+    #[test]
+    fn letterbox_pick_matches_draw() {
+        // canvas 1600x900 dp, world 800x800 → horizontal letterbox
+        let cam = Camera2d {
+            center: Vec2::new(400.0, 400.0),
+            ..Default::default()
+        };
+        let fit = effective_fit([1600.0, 900.0], [800.0, 800.0], &cam);
+        let dp = world_to_dp([400.0, 400.0], [800.0, 800.0], cam.effective_center(), fit);
+        let back = dp_to_world(dp, [800.0, 800.0], cam.effective_center(), fit);
+        assert!((back[0] - 400.0).abs() < 1e-3 && (back[1] - 400.0).abs() < 1e-3);
+        // fit_matrix agrees with the free function.
+        let m = cam.fit_matrix([1600.0, 900.0], [800.0, 800.0]);
+        let free = fit_view_proj([1600.0, 900.0], [800.0, 800.0], cam.effective_center(), fit);
+        let dm = m - free;
+        let max = dm
+            .to_cols_array()
+            .iter()
+            .fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(max < 1e-5);
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub struct Trauma {
     pub max_roll_rad: f32,
     /// Noise traversal speed (arbitrary units per second).
     pub noise_speed: f32,
-    noise: Perlin,
+    seed: u32,
 }
 
 impl Default for Trauma {
@@ -30,7 +30,7 @@ impl Default for Trauma {
             max_translation_px: 20.0,
             max_roll_rad: 10.0f32.to_radians(),
             noise_speed: 20.0,
-            noise: Perlin::new(1337),
+            seed: 1337,
         }
     }
 }
@@ -45,9 +45,13 @@ impl Trauma {
     /// the same offsets (deterministic like the default).
     pub fn with_seed(seed: u32) -> Self {
         Self {
-            noise: Perlin::new(seed),
+            seed,
             ..Self::default()
         }
+    }
+
+    fn noise(&self) -> Perlin {
+        Perlin::new(self.seed)
     }
 
     /// Add impact. Clamped to 1.
@@ -71,15 +75,29 @@ impl Trauma {
         if shake <= 0.0 {
             return (0.0, 0.0, 0.0);
         }
+        let noise = self.noise();
         let t = time_secs as f64 * self.noise_speed as f64;
-        let nx = self.noise.get([t, 100.0]) as f32;
-        let ny = self.noise.get([t, 200.0]) as f32;
-        let nr = self.noise.get([t, 300.0]) as f32;
+        let nx = noise.get([t, 100.0]) as f32;
+        let ny = noise.get([t, 200.0]) as f32;
+        let nr = noise.get([t, 300.0]) as f32;
         (
             nx * shake * self.max_translation_px,
             ny * shake * self.max_translation_px,
             nr * shake * self.max_roll_rad,
         )
+    }
+
+    /// World-space camera offset for repame `Camera2d`.
+    /// `units_per_pixel` and `zoom` match `Camera2d` fields.
+    pub fn camera_offset(
+        &self,
+        time_secs: f32,
+        units_per_pixel: f32,
+        zoom: f32,
+    ) -> (f32, f32, f32) {
+        let (dx_px, dy_px, roll) = self.offset(time_secs);
+        let scale = (units_per_pixel / zoom.max(1e-6)).max(0.0);
+        (dx_px * scale, dy_px * scale, roll)
     }
 }
 

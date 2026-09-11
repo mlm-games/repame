@@ -116,7 +116,15 @@ impl Sim {
             ran += 1;
         }
         if self.accumulator >= self.step {
-            self.accumulator = Duration::ZERO;
+            // On hitch: drop only *whole* extra steps, keep fraction for
+            // alpha continuity.
+            let step_ns = self.step.as_nanos();
+            if step_ns > 0 {
+                let acc_ns = self.accumulator.as_nanos() % step_ns;
+                self.accumulator = Duration::from_nanos(acc_ns as u64);
+            } else {
+                self.accumulator = Duration::ZERO;
+            }
         }
         ran
     }
@@ -124,9 +132,10 @@ impl Sim {
     /// Unconsumed fractional time carried to the next frame.
     ///
     /// Always less than one [`Sim::step`] (a full step would have ticked).
-    /// Returns [`Duration::ZERO`] right after a step boundary and after a
-    /// hitch that hit the [`Sim::max_steps`] cap (the excess is dropped,
-    /// not reported here).
+    /// Returns [`Duration::ZERO`] right after a step boundary; after a
+    /// hitch that hit the [`Sim::max_steps`] cap only the sub-step
+    /// fraction is kept (whole extra steps are dropped, alpha stays
+    /// continuous).
     pub fn leftover(&self) -> Duration {
         self.accumulator
     }
@@ -140,8 +149,8 @@ impl Sim {
     /// previous snapshot can blend toward the current one with this factor
     /// for smooth rendering.
     ///
-    /// **Note:** after a capped hitch (see [`Sim::max_steps`]) the
-    /// accumulator is cleared, so `alpha` reads `0.0` on the next frame.
+    /// **Note:** after a capped hitch (see [`Sim::max_steps`]) only whole
+    /// steps are dropped, so `alpha` keeps the leftover fraction.
     pub fn alpha(&self) -> f32 {
         let step = self.step.as_secs_f64();
         if step <= 0.0 {
@@ -191,7 +200,7 @@ mod tests {
         sim.max_steps = 4;
         let ran = sim.step(Duration::from_secs(10));
         assert_eq!(ran, 4);
-        assert_eq!(sim.leftover(), Duration::ZERO);
+        assert!(sim.leftover() < sim.step, "keeps only fraction, got {:?}", sim.leftover());
     }
 
     #[test]

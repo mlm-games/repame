@@ -15,16 +15,16 @@ rust-version = "1.98"
 [workspace.dependencies]
 bevy_ecs = "0.19"
 # Repose UI shell (incl. the `gamepad` backend).
-repose-core = "0.29"
-repose-ui = "0.29"
-repose-material = "0.29"
-repose-canvas = "0.29"
-repose-docking = "0.29"
-repose-platform = "0.29"
-repose-render-wgpu = "0.29"
-repose-text = "0.29"
-repose-app = "0.29"
-repose-tree = "0.29"
+repose-core = "0.30"
+repose-ui = "0.30"
+repose-material = "0.30"
+repose-canvas = "0.30"
+repose-docking = "0.30"
+repose-platform = "0.30"
+repose-render-wgpu = "0.30"
+repose-text = "0.30"
+repose-app = "0.30"
+repose-tree = "0.30"
 wgpu = "30"
 glam = "0.33"
 bytemuck = { version = "1", features = ["derive"] }
@@ -52,3 +52,4 @@ repame-shell = { path = "crates/repame-shell", version = "0.1" }
 
 # renamite-player = { path = "../renamite/crates/renamite-player"}
 # renamite-player-ui = { path = "../renamite/crates/renamite-player-ui"}
+

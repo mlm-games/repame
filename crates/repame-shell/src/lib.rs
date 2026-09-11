@@ -95,15 +95,19 @@ impl GamepadPoller {
     pub fn new() -> Self {
         Self {
             backend: create_backend().map(|b| Box::new(b) as Box<dyn GamepadBackend>),
+            // Pads already plugged in report `Connected` on the first
+            // `poll()` (backend synthesizes the boot list), so the set is
+            // correct from the first frame with no button press required.
             connected: HashSet::new(),
         }
     }
 
     /// Drain hardware events since the last call. Tracks connection state
-    /// so [`GamepadPoller::connected_ids`] works even for pads connected
-    /// before startup: gilrs only emits `Connected` on its own schedule,
-    /// so any button/axis event from an unknown id implicitly marks that
-    /// pad connected (first input at the latest).
+    /// so [`GamepadPoller::connected_ids`] stays live: boot-plugged pads
+    /// arrive as synthesized `Connected` events on the first `poll`,
+    /// hotplug `Connected` / `Disconnected` update the set, and any
+    /// button/axis event from an unknown id implicitly marks that pad
+    /// connected (covers a hotplug racing the first `poll`).
     pub fn poll(&mut self) -> Vec<GamepadEvent> {
         let Some(backend) = &mut self.backend else {
             return Vec::new();

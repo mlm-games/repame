@@ -11,7 +11,7 @@ description = "sim-side particles, trauma shake, flash, floaters, transitions fo
 # Engine APIs (same-repo path deps; versions match repame workspace).
 repame-sim = { path = "../repame-sim", version = "0.1" }
 repame-sprite = { path = "../repame-sprite", version = "0.1" }
-repose-core = "0.29"
+repose-core = "0.30"
 rand = "0.10"
 noise = "0.9"
 serde = { version = "1", features = ["derive"] }

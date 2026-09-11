@@ -43,6 +43,11 @@ use repame_sim::bevy_ecs::component::{
 use repame_sim::bevy_ecs::prelude::*;
 use repame_sim::bevy_ecs::resource::IsResource;
 
+// COMPAT: pinned to bevy_ecs 0.19's `Component` trait shape
+// (`STORAGE_TYPE`, `Mutability`, `register_required_components`). A bevy
+// bump that changes the trait (0.20+ registrar API) breaks here first:
+// update the body once, all four resources follow. SparseSet is
+// deliberate but load-free for singletons; Table would do identically.
 macro_rules! fx_resource {
     ($($t:ty),*) => {
         $(

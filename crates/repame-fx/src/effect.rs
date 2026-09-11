@@ -29,6 +29,10 @@ impl Jittered {
 
 /// Color keys over normalized life 0..1, lerped in linear RGBA.
 /// (hanabi `ColorOverLifetimeModifier`, enoki gradients.)
+///
+/// Keys must be sorted ascending by time; unsorted keys trip a
+/// `debug_assert` in [`sample`](Gradient::sample) (release builds walk
+/// forward and silently return the wrong color).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Gradient {
     pub keys: Vec<(f32, [f32; 4])>,
@@ -55,6 +59,10 @@ impl Gradient {
         if self.keys.is_empty() {
             return [1.0, 1.0, 1.0, 1.0];
         }
+        debug_assert!(
+            self.keys.windows(2).all(|w| w[0].0 <= w[1].0),
+            "gradient keys must be sorted ascending by time"
+        );
         let mut prev = self.keys[0];
         if t <= prev.0 {
             return prev.1;
@@ -136,6 +144,24 @@ pub struct EffectDef {
     pub drag_per_sec: f32,
     pub gradient: Gradient,
     pub ease: EaseKind,
+    /// Atlas page sampled by this effect's particles (default 0).
+    #[serde(default)]
+    pub page: u32,
+    /// Normalized atlas sub-rect sampled by this effect's particles:
+    /// full page by default (solid tinted rects), a sprite cell for
+    /// textured particles (sparks, smoke puffs).
+    #[serde(default = "uv_min_default")]
+    pub uv_min: [f32; 2],
+    #[serde(default = "uv_max_default")]
+    pub uv_max: [f32; 2],
+}
+
+fn uv_min_default() -> [f32; 2] {
+    [0.0, 0.0]
+}
+
+fn uv_max_default() -> [f32; 2] {
+    [1.0, 1.0]
 }
 
 impl Default for EffectDef {
@@ -149,6 +175,9 @@ impl Default for EffectDef {
             drag_per_sec: 0.0,
             gradient: Gradient::fade_out([1.0, 1.0, 1.0, 1.0]),
             ease: EaseKind::QuadOut,
+            page: 0,
+            uv_min: uv_min_default(),
+            uv_max: uv_max_default(),
         }
     }
 }

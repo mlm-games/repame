@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use glam::{Mat4, Vec2, Vec3};
 use repose_canvas::{Canvas, DrawScope, Embedded};
 use repose_core::locals::effective_density_scale;
-use repose_core::{Color, Modifier, Rect, View};
+use repose_core::{Color, Dp, Modifier, Px, Rect, View};
 use repose_render_wgpu::{Callback, CallbackResources, ScreenDescriptor, WgpuCallback};
 use repose_ui::Box as UiBox;
 use repose_ui::ViewExt;
@@ -305,9 +305,11 @@ pub struct FrameInput {
     pub world_size: [f32; 2],
     /// Cold-start viewport size in **dp** (physical px / density), used for
     /// the GPU camera until the first painted [`FrameGeom`] arrives.
-    /// Must be dp, not physical px, or the first frame's fit is off by
-    /// the density factor on HiDPI screens.
-    pub viewport_px: [f32; 2],
+    /// Named for its units: divide physical px by density before storing
+    /// here, or the first frame's fit is off by the density factor on
+    /// HiDPI screens. (Contrast [`FrameGeom::viewport_px`], which is
+    /// genuinely physical px.)
+    pub viewport_dp: [f32; 2],
     pub sprites: Vec<SpriteInstance>,
     /// World-anchored text, drawn after the sprite pass on the canvas
     /// viewport. The GPU viewport ignores this field: compose texts as
@@ -507,10 +509,12 @@ pub fn pick_world(local_px: [f32; 2], geom: FrameGeom, world_size: [f32; 2]) -> 
 /// so board sprites, picks, and actor surfaces stay glued - including
 /// under camera shake.
 ///
-/// Timing: viewports publish during draw, so composition-time readers
-/// ([`ActorFrame`] offsets) see the previous frame's geometry. Math is
-/// exact; placement trails the board by one frame under camera motion.
-/// Event-time readers (picks) always see the latest paint.
+/// Timing: the GPU viewport publishes size/fit/look at layout (ahead of
+/// `prepare`, so resizes apply the same frame) and re-publishes at paint;
+/// canvas publishes at draw. Composition-time readers ([`ActorFrame`]
+/// offsets) still see the previous frame's geometry — math is exact,
+/// placement trails the board by one frame under camera motion.
+/// Event-time readers (picks) always see the latest publish.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameGeom {
     /// Effective dp fit of the world extent: `(scale, off_x, off_y)` from
@@ -672,7 +676,7 @@ pub fn Viewport2d(
                     h: scope.size.height,
                 },
                 rgba8(bg),
-                0.0,
+                Px(0.0),
             );
         }
         for spr in draw_input.sprites.iter() {
@@ -711,7 +715,7 @@ pub fn Viewport2d(
                     h: (max_y - min_y).max(0.0),
                 },
                 rgba8(spr.color),
-                0.0,
+                Px(0.0),
             );
         }
         for t in draw_input.texts.iter() {
@@ -720,7 +724,7 @@ pub fn Viewport2d(
                 t.text.clone(),
                 repose_core::Vec2 { x: tx, y: ty },
                 rgba8(t.color),
-                t.size * fit.0 * d,
+                Px(t.size * fit.0 * d),
             );
         }
         if let Some(tint) = draw_input.overlay_color {
@@ -732,7 +736,7 @@ pub fn Viewport2d(
                     h: scope.size.height,
                 },
                 rgba8(tint),
-                0.0,
+                Px(0.0),
             );
         }
     })
@@ -749,16 +753,16 @@ pub fn Viewport2d(
 /// world texts, which stay a canvas-view feature for now: GPU consumers
 /// compose those as sibling views.
 ///
-/// Frame-timing note: the batch camera (and the chroma target size) is
-/// built in `prepare` from the last painted viewport geometry, while
-/// `paint` records the fresh geometry. Steady-state frames agree
-/// exactly; a resize/density change leaves the batch one frame behind
-/// the new rect (same one-frame lag as [`ActorFrame`], below).
+/// Frame-timing: layout publishes the viewport size (plus fit/look from
+/// the snapshot camera) through `on_size_changed` ahead of `prepare`, so
+/// the batch camera, the chroma target size, and picks all share one
+/// fresh geometry — resizes take effect the same frame. `paint`
+/// re-publishes authoritatively from its callback info.
 ///
 /// Layout contract: fills its parent. The payload is rebuilt from the
 /// snapshot every frame (like the canvas draw closure): `prepare`
 /// rebuilds the batch, and camera from the last painted viewport (cold
-/// start falls back to [`FrameInput::viewport_px`]), and `paint`
+/// start falls back to [`FrameInput::viewport_dp`]), and `paint`
 /// records the fresh viewport into `geom_out` and issues the shared
 /// draw calls. Atlas uploads ride along per frame; games drain their
 /// atlas queue once per frame, so each upload applies exactly once.
@@ -779,6 +783,8 @@ pub fn Viewport2dGpu(
     let world_size = input.world_size;
     let pick_geom = geom_out.clone();
     let move_geom = geom_out.clone();
+    let size_geom = geom_out.clone();
+    let size_input = input.clone();
     let on_event = Arc::new(on_event);
     let on_down = on_event.clone();
     let on_touch_down = on_event.clone();
@@ -810,6 +816,21 @@ pub fn Viewport2dGpu(
     };
     let modifier = Modifier::new()
         .fill_max_size()
+        .on_size_changed(move |dp: repose_core::Vec2| {
+            let d = effective_density_scale();
+            let d = if d.is_finite() && d > 1e-6 { d } else { 1.0 };
+            let fit = effective_fit([dp.x, dp.y], size_input.world_size, &size_input.cam);
+            let center = size_input.cam.effective_center();
+            if let Ok(mut g) = size_geom.lock() {
+                g.viewport_px = [dp.x * d, dp.y * d];
+                g.density = d;
+                g.fit = fit;
+                g.look = [
+                    center[0] - size_input.world_size[0] * 0.5,
+                    center[1] - size_input.world_size[1] * 0.5,
+                ];
+            }
+        })
         .on_pointer_down(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
             let Ok(g) = pick_geom.lock() else {
@@ -889,7 +910,7 @@ impl WgpuCallback for GpuViewport {
         let dp = if vp_phys[0] > 1.0 && vp_phys[1] > 1.0 {
             [vp_phys[0] / density, vp_phys[1] / density]
         } else {
-            self.input.viewport_px
+            self.input.viewport_dp
         };
         let fit = effective_fit(dp, self.input.world_size, &self.input.cam);
         let cam_center = self.input.cam.effective_center();
@@ -1010,9 +1031,9 @@ pub fn ActorFrame(
     // `.absolute()` is load-bearing: without it taffy ignores the offsets
     // and every surface stacks at the same fixed spot.
     let mut modifier = Modifier::new()
-        .size(w, h)
+        .size(Dp(w), Dp(h))
         .absolute()
-        .offset(Some(ox), Some(oy), None, None);
+        .offset(Some(Dp(ox)), Some(Dp(oy)), None, None);
     if mirror_x {
         modifier = modifier.scale2(-1.0, 1.0);
     }
@@ -1094,7 +1115,7 @@ mod tests {
         let input = FrameInput {
             cam,
             world_size: [128.0, 128.0],
-            viewport_px: [256.0, 256.0],
+            viewport_dp: [256.0, 256.0],
             sprites: vec![SpriteInstance {
                 center: Vec2::new(64.0, 64.0),
                 size: Vec2::new(32.0, 32.0),

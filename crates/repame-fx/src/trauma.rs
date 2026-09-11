@@ -40,6 +40,16 @@ impl Trauma {
         Self::default()
     }
 
+    /// Non-default noise seed: per-run shake variation, or two
+    /// simultaneous sources that must not correlate. Same seed replays
+    /// the same offsets (deterministic like the default).
+    pub fn with_seed(seed: u32) -> Self {
+        Self {
+            noise: Perlin::new(seed),
+            ..Self::default()
+        }
+    }
+
     /// Add impact. Clamped to 1.
     pub fn add(&mut self, amount: f32) {
         self.amount = (self.amount + amount).clamp(0.0, 1.0);
@@ -114,5 +124,17 @@ mod tests {
         let h = half.offset(0.7);
         let f = full.offset(0.7);
         assert!((h.0 / f.0 - 0.25).abs() < 1e-4);
+    }
+
+    #[test]
+    fn seeds_vary_but_replay() {
+        let mut a = Trauma::with_seed(1);
+        let mut b = Trauma::with_seed(2);
+        let mut a2 = Trauma::with_seed(1);
+        a.add(1.0);
+        b.add(1.0);
+        a2.add(1.0);
+        assert_eq!(a.offset(0.73), a2.offset(0.73));
+        assert_ne!(a.offset(0.73), b.offset(0.73));
     }
 }

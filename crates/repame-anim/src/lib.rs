@@ -227,8 +227,8 @@ pub enum LoopMode {
     /// loops, spinning coins.
     #[default]
     Loop,
-    /// Hold the last cell and stop. Reports finished once through the
-    /// `ended` flag of [`advance`](AnimPlayer::advance) and stays there
+    /// Hold the last cell and stop. Reports finished once through
+    /// [`Advance::ended`] and stays there
     /// until [`play`](AnimPlayer::play) restarts it: one-shot attacks,
     /// death animations, UI pop-ins.
     Once,
@@ -386,8 +386,8 @@ impl AnimPlayer {
     ///
     /// Set when the one-shot finishes and cleared by [`play`](AnimPlayer::play)
     /// (which restarts the strip) or [`stop`](AnimPlayer::stop). Looping
-    /// animations never set this; watch the `ended` flag of
-    /// [`advance`](AnimPlayer::advance) for their wrap moments instead.
+    /// animations never set this; watch [`Advance::ended`] (or `wraps`)
+    /// for their wrap moments instead.
     pub fn is_finished(&self) -> bool {
         self.finished
     }
@@ -481,51 +481,65 @@ impl AnimPlayer {
         };
         self.finished = false;
     }
+}
 
-    /// Advance the clock by `dt` seconds.
+/// Outcome of one [`advance`](AnimPlayer::advance) call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Advance {
+    /// True when the advance crossed into a different cell. Use it to
+    /// refresh atlas lookups and to fire per-step effects (footstep
+    /// sounds, particles) exactly once per cell.
+    pub frame_changed: bool,
+    /// Full laps ([`Loop`](LoopMode::Loop)) or bounces
+    /// ([`PingPong`](LoopMode::PingPong)) crossed by this advance — all
+    /// of them, even across hitches, so per-lap audio never drops laps.
+    /// For [`Once`](LoopMode::Once): 1 on the finishing advance, else 0.
+    pub wraps: u32,
+}
+
+impl Advance {
+    /// Any lap, bounce, or finish on this advance. Looping animations
+    /// never set [`is_finished`](AnimPlayer::is_finished), so this (or
+    /// `wraps`) is the way to count their laps.
+    pub fn ended(&self) -> bool {
+        self.wraps > 0
+    }
+}
+
+impl AnimPlayer {
+    /// Advance the clock by `dt` seconds, returning what happened.
     ///
-    /// Returns `(frame_changed, ended)`:
-    ///
-    /// - `frame_changed` is true when the advance crossed into a different
-    ///   cell. Use it to refresh atlas lookups and to fire per-step effects
-    ///   (footstep sounds, particles) exactly once per cell.
-    /// - `ended` is true when a [`Once`](LoopMode::Once) animation finishes
-    ///   on this advance, or when a [`Loop`](LoopMode::Loop) /
-    ///   [`PingPong`](LoopMode::PingPong) animation wraps or bounces. A
-    ///   looping animation never sets [`is_finished`](AnimPlayer::is_finished),
-    ///   so this flag is the way to count its laps.
-    ///
-    /// The call is a no-op (returning `(false, false)`) while paused, at a
-    /// `speed_scale` of `0`, on strips with fewer than two cells, at
+    /// The call is a no-op (returning [`Advance::default`]) while paused,
+    /// at a `speed_scale` of `0`, on strips with fewer than two cells, at
     /// non-positive `fps`, or for non-positive/non-finite `dt`. Oversized
-    /// `dt` values (hitch frames) cross as many cells as they cover: a loop
-    /// wraps once per advance at most for the flag, while the cell always
-    /// lands exactly.
-    pub fn advance(&mut self, dt: f32) -> (bool, bool) {
+    /// `dt` values (hitch frames) cross as many cells as they cover and
+    /// report every lap in `wraps`, while the cell always lands exactly.
+    pub fn advance(&mut self, dt: f32) -> Advance {
         if !self.playing || self.frames <= 1 || self.fps <= 0.0 {
-            return (false, false);
+            return Advance::default();
         }
         if !dt.is_finite() || dt <= 0.0 {
-            return (false, false);
+            return Advance::default();
         }
         let before = self.frame();
-        // Signed rate: direction needs no flag mapping. PingPong phases
+
         // advance on the same clock (the leg folds out in `cell`).
         let step = dt * self.fps * self.speed_scale;
         if step == 0.0 {
-            return (false, false);
+            return Advance::default();
         }
         let last = (self.frames - 1) as f32;
         let pos_before = self.pos;
         match self.loop_mode {
             LoopMode::Loop => {
-                self.pos = (self.pos + step).rem_euclid(self.frames as f32);
-                let wrapped = if step > 0.0 {
-                    pos_before + step >= self.frames as f32
-                } else {
-                    pos_before + step < 0.0
-                };
-                (self.frame() != before, wrapped)
+                let n = self.frames as f32;
+                self.pos = (self.pos + step).rem_euclid(n);
+                let wraps =
+                    (pos_before.div_euclid(n) - (pos_before + step).div_euclid(n)).abs() as u32;
+                Advance {
+                    frame_changed: self.frame() != before,
+                    wraps,
+                }
             }
             LoopMode::Once => {
                 self.pos += step;
@@ -533,17 +547,26 @@ impl AnimPlayer {
                     self.pos = if step > 0.0 { last } else { 0.0 };
                     self.playing = false;
                     self.finished = true;
-                    (self.frame() != before, true)
+                    Advance {
+                        frame_changed: self.frame() != before,
+                        wraps: 1,
+                    }
                 } else {
-                    (self.frame() != before, false)
+                    Advance {
+                        frame_changed: self.frame() != before,
+                        wraps: 0,
+                    }
                 }
             }
             LoopMode::PingPong => {
                 let period = 2.0 * last;
                 let raw = self.pos + step;
-                let ended = raw >= period || raw < 0.0;
+                let wraps = (raw.div_euclid(period) - pos_before.div_euclid(period)).abs() as u32;
                 self.pos = raw.rem_euclid(period);
-                (self.frame() != before, ended)
+                Advance {
+                    frame_changed: self.frame() != before,
+                    wraps,
+                }
             }
         }
     }
@@ -668,18 +691,43 @@ mod tests {
         p.play();
         assert_eq!(p.frame(), 0);
         assert_eq!(p.frame_progress(), 0.0);
-        // Half a cell at 10 fps.
-        let (changed, ended) = p.advance(0.05);
-        assert!(!changed && !ended);
+        let r = p.advance(0.05);
+        assert!(!r.frame_changed && !r.ended());
         assert!((p.frame_progress() - 0.5).abs() < 1e-6);
-        // Full wrap: 4 cells at 10 fps = 0.4 s per loop.
         let mut looped = false;
         for _ in 0..8 {
-            let (_, e) = p.advance(0.05);
-            looped |= e;
+            looped |= p.advance(0.05).ended();
         }
         assert!(looped);
         assert!(p.is_playing() && !p.is_finished());
+    }
+
+    #[test]
+    fn hitch_reports_every_lap() {
+        let def = AnimDef {
+            frames: 4,
+            w: 8,
+            h: 8,
+            fps: 10.0,
+            xorigin: 0.0,
+            yorigin: 0.0,
+        };
+        let mut p = AnimPlayer::new(&def, LoopMode::Loop);
+        p.play();
+        let r = p.advance(10.0);
+        assert_eq!(r.wraps, 25, "every lap reported, got {}", r.wraps);
+        assert!(r.ended());
+        assert_eq!(p.frame(), 0);
+        let mut q = AnimPlayer::new(&def, LoopMode::PingPong);
+        q.play();
+        let r = q.advance(10.0);
+        assert_eq!(r.wraps, 16, "every bounce reported, got {}", r.wraps);
+        let mut s = AnimPlayer::new(&def, LoopMode::Loop);
+        s.play();
+        s.set_frame_and_progress(1, 0.0);
+        s.play_backwards();
+        let r = s.advance(10.0);
+        assert_eq!(r.wraps, 25, "reverse laps reported, got {}", r.wraps);
     }
 
     #[test]
@@ -696,8 +744,7 @@ mod tests {
         p.play();
         let mut ended = false;
         for _ in 0..10 {
-            let (_, e) = p.advance(0.05);
-            ended |= e;
+            ended |= p.advance(0.05).ended();
         }
         assert!(ended);
         assert_eq!(p.frame(), 2);
@@ -783,8 +830,8 @@ mod tests {
         q.play();
         q.set_frame_and_progress(2, 0.0);
         q.play_backwards();
-        let (changed, ended) = q.advance(0.05);
-        assert!(changed && !ended);
+        let r = q.advance(0.05);
+        assert!(r.frame_changed && !r.ended());
         assert_eq!(q.frame(), 1);
     }
 
@@ -840,7 +887,12 @@ mod tests {
         // there is no second flag to disagree with.
         p.set_speed_scale(2.0);
         p.advance(0.05);
-        assert_eq!(p.frame(), 1, "positive rate steps forward, got {}", p.frame());
+        assert_eq!(
+            p.frame(),
+            1,
+            "positive rate steps forward, got {}",
+            p.frame()
+        );
         q.set_speed_scale(1.0);
         q.advance(0.1);
         assert_eq!(

@@ -40,7 +40,7 @@ use glam::DVec2;
 use repose_canvas::{Canvas, DrawScope};
 use repose_core::geometry::Rect;
 use repose_core::input::PointerEvent;
-use repose_core::{Color, Modifier, RenderContext, Vec2, View, request_frame, theme};
+use repose_core::{Color, Modifier, Px, RenderContext, Vec2, View, request_frame, theme};
 
 pub use renamite_player::{Player, PlayerError};
 pub use renamite_player_ui::{PlayerHost, PlayerHostRef};
@@ -281,7 +281,7 @@ fn paint_chrome(scope: &mut DrawScope, artboard: DVec2, scale: f64, offset: DVec
             h: height as f32 + 8.0,
         },
         Color(0, 0, 0, 48),
-        3.0,
+        Px(3.0),
     );
 
     // Checkerboard (transparent pixels read as a neutral grid).
@@ -304,7 +304,7 @@ fn paint_chrome(scope: &mut DrawScope, artboard: DVec2, scale: f64, offset: DVec
                     h: (tile_world * scale).ceil() as f32,
                 },
                 color,
-                0.0,
+                Px(0.0),
             );
         }
     }
@@ -323,7 +323,7 @@ fn paint_chrome(scope: &mut DrawScope, artboard: DVec2, scale: f64, offset: DVec
             h: 1.0,
         },
         border,
-        0.0,
+        Px(0.0),
     );
     scope.draw_rect(
         Rect {
@@ -333,7 +333,7 @@ fn paint_chrome(scope: &mut DrawScope, artboard: DVec2, scale: f64, offset: DVec
             h: 1.0,
         },
         border,
-        0.0,
+        Px(0.0),
     );
     scope.draw_rect(
         Rect {
@@ -343,7 +343,7 @@ fn paint_chrome(scope: &mut DrawScope, artboard: DVec2, scale: f64, offset: DVec
             h: bh,
         },
         border,
-        0.0,
+        Px(0.0),
     );
     scope.draw_rect(
         Rect {
@@ -353,7 +353,7 @@ fn paint_chrome(scope: &mut DrawScope, artboard: DVec2, scale: f64, offset: DVec
             h: bh,
         },
         border,
-        0.0,
+        Px(0.0),
     );
 }
 

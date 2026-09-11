@@ -3401,6 +3401,7 @@ dependencies = [
 name = "repame-fx"
 version = "0.1.9"
 dependencies = [
+ "bevy_ecs",
  "getrandom 0.4.3",
  "glam 0.33.7",
  "noise",

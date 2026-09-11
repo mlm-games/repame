@@ -52,7 +52,7 @@ pub struct FullscreenTexture {
 /// sprite batch): uniforms refresh each prepare, texture uploads ride
 /// along only on change frames.
 pub struct FullscreenPass {
-    id: &'static str,
+    id: String,
     wgsl: &'static str,
     desc: FullscreenDesc,
     uniforms: Vec<u8>,
@@ -62,9 +62,9 @@ pub struct FullscreenPass {
 impl FullscreenPass {
     /// `id` disambiguates pipelines when several passes share one app;
     /// `wgsl` must follow the module binding contract above.
-    pub fn new(id: &'static str, wgsl: &'static str, desc: FullscreenDesc) -> Self {
+    pub fn new(id: impl Into<String>, wgsl: &'static str, desc: FullscreenDesc) -> Self {
         Self {
-            id,
+            id: id.into(),
             wgsl,
             desc,
             uniforms: Vec::new(),
@@ -106,7 +106,7 @@ struct PassInstance {
 }
 
 struct PassResources {
-    passes: HashMap<&'static str, PassInstance>,
+    passes: HashMap<String, PassInstance>,
 }
 
 impl FullscreenPass {
@@ -145,11 +145,11 @@ impl FullscreenPass {
         let key = (screen.target_format, screen.sample_count);
         let fresh = resources
             .get::<PassResources>()
-            .is_none_or(|r| !r.passes.contains_key(self.id));
+            .is_none_or(|r| !r.passes.contains_key(self.id.as_str()));
         let stale = !fresh
             && resources
                 .get::<PassResources>()
-                .is_some_and(|r| r.passes[self.id].key != key);
+                .is_some_and(|r| r.passes[self.id.as_str()].key != key);
         if !fresh && !stale {
             return;
         }
@@ -286,13 +286,13 @@ impl FullscreenPass {
         };
         match resources.get_mut::<PassResources>() {
             Some(all) => {
-                all.passes.insert(self.id, instance);
+                all.passes.insert(self.id.clone(), instance);
             }
             None => {
                 let mut all = PassResources {
                     passes: HashMap::new(),
                 };
-                all.passes.insert(self.id, instance);
+                all.passes.insert(self.id.clone(), instance);
                 resources.insert(all);
             }
         }
@@ -326,8 +326,8 @@ impl FullscreenPass {
                 continue;
             }
             let fresh = match &inst.slots[slot] {
-                Some((_, w, h)) if *w == up.w && *h == up.h => false,
-                _ => true,
+                Some((_, w, h)) => *w != up.w || *h != up.h,
+                None => true,
             };
             if fresh {
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -416,10 +416,10 @@ impl FullscreenPass {
         let Some(all) = resources.get_mut::<PassResources>() else {
             return Vec::new();
         };
-        let Some(inst) = all.passes.get_mut(self.id) else {
+        let Some(inst) = all.passes.get_mut(self.id.as_str()) else {
             return Vec::new();
         };
-        // Uniform buffer was sized at creation; grow + rebind when this
+
         // frame's data outgrows it (effect snapshots are fixed-size in
         // practice, so this is a safety net, not a hot path).
         let need = uniforms.len() as u64;
@@ -476,10 +476,10 @@ impl WgpuCallback for FullscreenPass {
         let Some(all) = resources.get::<PassResources>() else {
             return;
         };
-        let Some(inst) = all.passes.get(self.id) else {
+        let Some(inst) = all.passes.get(self.id.as_str()) else {
             return;
         };
-        // Zero-texture passes (uniform-only, e.g. viewport backgrounds)
+
         // need no art: draw with the uniform bind group alone. Textured
         // passes with no uploads yet keep the old behavior (skip: nothing
         // to shade with).

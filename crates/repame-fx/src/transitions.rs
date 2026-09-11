@@ -15,6 +15,8 @@ pub const HALF_TICKS: i32 = 40;
 /// Custom id convention for spiral-vortex wipes.
 pub const VORTEX_CUSTOM_ID: u8 = 1;
 
+use bevy_ecs::prelude::*;
+
 /// What the transition looks like. Timing/alpha/blocking are identical
 /// for every variant; only the game's renderer interprets the kind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -34,7 +36,7 @@ enum Phase {
     Uncover,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Resource)]
 pub struct TransitionFx {
     phase: Phase,
     t: i32,

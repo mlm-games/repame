@@ -1,11 +1,13 @@
 //! Fullscreen flash: one-shot color overlay with an eased fade.
 //! The game maps [`Flash::rgba`] onto `FrameInput.overlay_color`.
 
+use bevy_ecs::prelude::*;
+
 use super::effect::EaseKind;
 
 /// White hit-flash, red damage vignette, gold pickup glow: all the
 /// same struct, different color and duration.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Resource)]
 pub struct Flash {
     pub color: [f32; 4],
     /// Ticks left / total (100 Hz).

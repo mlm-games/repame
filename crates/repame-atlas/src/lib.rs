@@ -177,6 +177,10 @@ impl Atlas {
     }
 
     /// Ensure a 1x1 white pixel exists; returns its UvRect.
+    /// The drained [`AtlasWrite`] for this key has no pixel data (the
+    /// atlas is CPU packing only): upload `[255, 255, 255, 255]` for it —
+    /// see `repame_sprite::AtlasUpload::white_for` — then sample the
+    /// returned rect for solid-tint particles/untextured quads.
     pub fn ensure_white(&mut self) -> Result<UvRect, AllocError> {
         let id = atlas_id(WHITE_TEXEL_NAME);
         if let Some(uv) = self.uv_rect(id) {
@@ -440,9 +444,7 @@ mod tests {
         let (out, ow, oh) = pad_rgba(&src, 2, 2, 1);
         assert_eq!((ow, oh), (4, 4));
         assert_eq!(out.len(), 4 * 4 * 4);
-        // Center 2x2 matches src.
-        assert_eq!(&out[(1 * 4 + 1) * 4..(1 * 4 + 1) * 4 + 4], &[255, 0, 0, 255]);
-        // Corner replicates nearest edge.
+        assert_eq!(&out[20..24], &[255, 0, 0, 255]);
         assert_eq!(&out[0..4], &[255, 0, 0, 255]);
     }
 }

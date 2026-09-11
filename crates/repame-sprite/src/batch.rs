@@ -84,6 +84,34 @@ impl AtlasUpload {
             rgba,
         }
     }
+
+    /// 1x1 white texel upload for [`repame_atlas::Atlas::ensure_white`]:
+    /// pair with the drained write for the white key (usually 1x1 at the
+    /// returned `x/y/page`). Sampling it gives solid tint (particles,
+    /// untextured quads) instead of random atlas art.
+    pub fn white(page: u32, x: u32, y: u32) -> Self {
+        Self {
+            page,
+            x,
+            y,
+            w: 1,
+            h: 1,
+            rgba: vec![255, 255, 255, 255],
+        }
+    }
+
+    /// White upload built straight from the drained [`repame_atlas::AtlasWrite`]
+    /// for the white key.
+    pub fn white_for(write: &repame_atlas::AtlasWrite) -> Self {
+        Self {
+            page: write.page,
+            x: write.x,
+            y: write.y,
+            w: write.w.max(1),
+            h: write.h.max(1),
+            rgba: vec![255; write.w.max(1) as usize * write.h.max(1) as usize * 4],
+        }
+    }
 }
 
 /// Pure transform rows mapping quad corners (-0.5..0.5) to world coords,
@@ -232,7 +260,7 @@ const _: () = assert!(size_of::<BatchInstance>() == 80);
 /// change drops atlas contents (logged); the game must re-upload
 /// afterwards.
 pub struct SpriteBatch {
-    id: &'static str,
+    id: String,
     desc: BatchDesc,
     camera: [[f32; 4]; 4],
     instances: Vec<BatchInstance>,
@@ -244,9 +272,9 @@ impl SpriteBatch {
         Self::with_id("sprite_batch.default", desc)
     }
 
-    pub fn with_id(id: &'static str, desc: BatchDesc) -> Self {
+    pub fn with_id(id: impl Into<String>, desc: BatchDesc) -> Self {
         Self {
-            id,
+            id: id.into(),
             desc,
             camera: Mat4::IDENTITY.to_cols_array_2d(),
             instances: Vec::new(),
@@ -254,8 +282,8 @@ impl SpriteBatch {
         }
     }
 
-    pub fn id(&self) -> &'static str {
-        self.id
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn clear(&mut self) {
@@ -303,7 +331,17 @@ impl SpriteBatch {
         page: u32,
     ) {
         self.push_blended(
-            center, size, rotation, anchor, flip_x, flip_y, uv_min, uv_max, tint, page, 0.0,
+            center,
+            size,
+            rotation,
+            anchor,
+            flip_x,
+            flip_y,
+            uv_min,
+            uv_max,
+            tint,
+            page,
+            0.0,
             SpriteBlend::Alpha,
         );
     }
@@ -366,13 +404,15 @@ impl SpriteBatch {
 struct BatchEntry {
     key: (wgpu::TextureFormat, u32, u32, u32, TextureFilter),
     pipeline_alpha: wgpu::RenderPipeline,
+    pipeline_multiply: wgpu::RenderPipeline,
     pipeline_additive: wgpu::RenderPipeline,
     corners: wgpu::Buffer,
     instances: wgpu::Buffer,
     instance_cap: usize,
-    /// Alpha instance count + total; additive range is
-    /// `alpha..total`. `paint` draws both ranges.
+    /// Sorted ranges: `0..alpha` alpha, `alpha..multiply_end` multiply,
+    /// `multiply_end..total` additive.
     last_alpha: u32,
+    last_multiply_end: u32,
     last_total: u32,
     camera: wgpu::Buffer,
     cam_bind: wgpu::BindGroup,
@@ -381,7 +421,7 @@ struct BatchEntry {
 }
 
 struct BatchResources {
-    batches: HashMap<&'static str, BatchEntry>,
+    batches: HashMap<String, BatchEntry>,
 }
 
 const CORNERS: &[f32] = &[
@@ -434,7 +474,7 @@ impl SpriteBatch {
         );
         let needs = match resources.get::<BatchResources>() {
             None => true,
-            Some(all) => match all.batches.get(self.id) {
+            Some(all) => match all.batches.get(self.id.as_str()) {
                 None => true,
                 Some(e) => e.key != key,
             },
@@ -444,7 +484,7 @@ impl SpriteBatch {
         }
         if resources
             .get::<BatchResources>()
-            .is_some_and(|all| all.batches.contains_key(self.id))
+            .is_some_and(|all| all.batches.contains_key(self.id.as_str()))
         {
             log::warn!(
                 "sprite_batch[{}]: rebuilding pipeline/texture (format/sample/desc changed); atlas contents dropped, re-upload required",
@@ -660,6 +700,17 @@ impl SpriteBatch {
             })
         };
         let pipeline_alpha = mk_pipeline("sprite_batch_pipeline", wgpu::BlendState::ALPHA_BLENDING);
+        let pipeline_multiply = mk_pipeline(
+            "sprite_batch_pipeline_mul",
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Dst,
+                    dst_factor: wgpu::BlendFactor::Zero,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent::OVER,
+            },
+        );
         let pipeline_additive = mk_pipeline(
             "sprite_batch_pipeline_add",
             wgpu::BlendState {
@@ -678,11 +729,13 @@ impl SpriteBatch {
         let entry = BatchEntry {
             key,
             pipeline_alpha,
+            pipeline_multiply,
             pipeline_additive,
             corners,
             instances,
             instance_cap: self.instances.len().max(1),
             last_alpha: 0,
+            last_multiply_end: 0,
             last_total: 0,
             camera,
             cam_bind,
@@ -691,13 +744,13 @@ impl SpriteBatch {
         };
         match resources.get_mut::<BatchResources>() {
             Some(all) => {
-                all.batches.insert(self.id, entry);
+                all.batches.insert(self.id.clone(), entry);
             }
             None => {
                 let mut all = BatchResources {
                     batches: HashMap::new(),
                 };
-                all.batches.insert(self.id, entry);
+                all.batches.insert(self.id.clone(), entry);
                 resources.insert(all);
             }
         }
@@ -706,36 +759,54 @@ impl SpriteBatch {
     /// Record this batch's instance counts after uploading. Split out so
     /// sibling payloads (e.g. viewport views rebuilding the batch per
     /// frame) can share one prepared pipeline.
-    fn finish_prepare(&self, alpha: u32, total: u32, resources: &mut CallbackResources) {
-        if let Some(all) = resources.get_mut::<BatchResources>() {
-            if let Some(res) = all.batches.get_mut(self.id) {
-                res.last_alpha = alpha;
-                res.last_total = total;
-            }
+    fn finish_prepare(
+        &self,
+        alpha: u32,
+        multiply_end: u32,
+        total: u32,
+        resources: &mut CallbackResources,
+    ) {
+        if let Some(all) = resources.get_mut::<BatchResources>()
+            && let Some(res) = all.batches.get_mut(self.id.as_str())
+        {
+            res.last_alpha = alpha;
+            res.last_multiply_end = multiply_end;
+            res.last_total = total;
         }
     }
 
-    fn sorted_instances(&self) -> (Vec<BatchInstance>, u32) {
+    fn blend_group(flags: u32) -> u32 {
+        match flags {
+            1 => 2, // additive last
+            2 => 1, // multiply middle
+            _ => 0, // alpha first
+        }
+    }
+
+    fn sorted_instances(&self) -> (Vec<BatchInstance>, u32, u32) {
         let mut v = self.instances.clone();
         v.sort_by(|a, b| {
-            let ga = u32::from(a.flags == 1);
-            let gb = u32::from(b.flags == 1);
-            ga.cmp(&gb).then_with(|| {
-                a.z.total_cmp(&b.z).then_with(|| {
-                    // Stable tiebreak: keep deterministic order for equal z.
-                    a.page.total_cmp(&b.page)
-                })
-            })
+            Self::blend_group(a.flags)
+                .cmp(&Self::blend_group(b.flags))
+                .then_with(|| a.z.total_cmp(&b.z).then_with(|| a.page.total_cmp(&b.page)))
         });
-        let alpha = v.iter().take_while(|i| i.flags != 1).count() as u32;
-        (v, alpha)
+        let alpha = v
+            .iter()
+            .take_while(|i| Self::blend_group(i.flags) == 0)
+            .count() as u32;
+        let multiply_end = alpha
+            + v[alpha as usize..]
+                .iter()
+                .take_while(|i| Self::blend_group(i.flags) == 1)
+                .count() as u32;
+        (v, alpha, multiply_end)
     }
 }
 
 /// Draw the prepared batch for one id. Shared by [`SpriteBatch`] and
 /// viewport payloads so all GPU consumers issue identical draw calls.
 pub fn draw_batch_with_id(
-    id: &'static str,
+    id: &str,
     rpass: &mut wgpu::RenderPass<'_>,
     resources: &CallbackResources,
 ) {
@@ -756,9 +827,13 @@ pub fn draw_batch_with_id(
         rpass.set_pipeline(&res.pipeline_alpha);
         rpass.draw(0..6, 0..res.last_alpha);
     }
-    if res.last_total > res.last_alpha {
+    if res.last_multiply_end > res.last_alpha {
+        rpass.set_pipeline(&res.pipeline_multiply);
+        rpass.draw(0..6, res.last_alpha..res.last_multiply_end);
+    }
+    if res.last_total > res.last_multiply_end {
         rpass.set_pipeline(&res.pipeline_additive);
-        rpass.draw(0..6, res.last_alpha..res.last_total);
+        rpass.draw(0..6, res.last_multiply_end..res.last_total);
     }
 }
 
@@ -777,15 +852,15 @@ impl WgpuCallback for SpriteBatch {
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         self.ensure_resources(device, screen, resources);
-        let (sorted, alpha) = self.sorted_instances();
+        let (sorted, alpha, multiply_end) = self.sorted_instances();
         let total = sorted.len() as u32;
         let Some(all) = resources.get_mut::<BatchResources>() else {
             return Vec::new();
         };
-        let Some(res) = all.batches.get_mut(self.id) else {
+        let Some(res) = all.batches.get_mut(self.id.as_str()) else {
             return Vec::new();
         };
-        // Grow the instance buffer with doubling (Bevy/wgpu best practice).
+
         if sorted.len() > res.instance_cap {
             let new_cap = sorted.len().next_power_of_two().max(64);
             res.instances = device.create_buffer(&wgpu::BufferDescriptor {
@@ -849,7 +924,7 @@ impl WgpuCallback for SpriteBatch {
                 },
             );
         }
-        self.finish_prepare(alpha, total, resources);
+        self.finish_prepare(alpha, multiply_end, total, resources);
         Vec::new()
     }
 
@@ -859,7 +934,7 @@ impl WgpuCallback for SpriteBatch {
         rpass: &mut wgpu::RenderPass<'static>,
         resources: &CallbackResources,
     ) {
-        draw_batch_with_id(self.id, rpass, resources);
+        draw_batch_with_id(self.id.as_str(), rpass, resources);
     }
 }
 
@@ -982,6 +1057,37 @@ mod tests {
         // Default anchor centers: top-left at (8, 17).
         let p = apply((inst.row0, inst.row1), [-0.5, -0.5]);
         assert_eq!(p, [8.0, 17.0]);
+    }
+
+    #[test]
+    fn z_and_blend_sort_into_ranges() {
+        use super::super::SpriteBlend;
+        let mut batch = SpriteBatch::with_id("test.sort", BatchDesc::default());
+        let quad = |z: f32, blend: SpriteBlend| SpriteInstance {
+            center: glam::Vec2::new(0.0, 0.0),
+            size: glam::Vec2::new(1.0, 1.0),
+            z,
+            blend,
+            ..Default::default()
+        };
+        batch.push_sprite(&quad(5.0, SpriteBlend::Alpha));
+        batch.push_sprite(&quad(1.0, SpriteBlend::Additive));
+        batch.push_sprite(&quad(3.0, SpriteBlend::Multiply));
+        batch.push_sprite(&quad(2.0, SpriteBlend::Alpha));
+        batch.push_sprite(&quad(0.0, SpriteBlend::Multiply));
+        let (sorted, alpha, mul_end) = batch.sorted_instances();
+        assert_eq!((alpha, mul_end, sorted.len() as u32), (2, 4, 5));
+        assert_eq!([sorted[0].z, sorted[1].z], [2.0, 5.0]);
+        assert_eq!([sorted[2].z, sorted[3].z], [0.0, 3.0]);
+        assert_eq!(sorted[4].z, 1.0);
+        assert_eq!(sorted[4].flags, 1);
+    }
+
+    #[test]
+    fn white_upload_is_1x1_white() {
+        let up = AtlasUpload::white(2, 5, 7);
+        assert_eq!((up.page, up.x, up.y, up.w, up.h), (2, 5, 7, 1, 1));
+        assert_eq!(up.rgba, vec![255, 255, 255, 255]);
     }
 
     /// End-to-end GPU proof: upload atlas pages, draw textured quads

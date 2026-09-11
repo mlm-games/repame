@@ -3,11 +3,12 @@
 //! sim positions). Follows Bevy's `2d_screen_shake` example and the
 //! retired `ScreenEffectsConfig` numbers (`trauma_decay` 1.5).
 
+use bevy_ecs::prelude::*;
 use noise::{NoiseFn, Perlin};
 
 /// Screen-shake state. Plain data: the game owns one (resource, field,
 /// whatever fits) and maps [`Trauma::offset`] onto its camera.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Resource)]
 pub struct Trauma {
     /// 0 (still) .. 1 (full shake). Clamped on add.
     pub amount: f32,
@@ -154,5 +155,17 @@ mod tests {
         a2.add(1.0);
         assert_eq!(a.offset(0.73), a2.offset(0.73));
         assert_ne!(a.offset(0.73), b.offset(0.73));
+    }
+
+    #[test]
+    fn camera_offset_scales_px_to_world() {
+        let mut tr = Trauma::new();
+        tr.add(1.0);
+        let (dx_px, dy_px, roll) = tr.offset(0.5);
+        let (dx_w, dy_w, roll_w) = tr.camera_offset(0.5, 2.0, 2.0);
+        assert!((dx_w - dx_px).abs() < 1e-5 && (dy_w - dy_px).abs() < 1e-5);
+        assert_eq!(roll_w, roll);
+        let (zx, zy, _) = tr.camera_offset(0.5, 1.0, 0.0);
+        assert!(zx.is_finite() && zy.is_finite());
     }
 }

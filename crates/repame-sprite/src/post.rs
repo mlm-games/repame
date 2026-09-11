@@ -8,6 +8,8 @@
 //! horizontal RGB split, ported from `game-utils-bevy`'s
 //! `screen_effects.wgsl`.
 
+use std::collections::HashMap;
+
 use repose_render_wgpu::{CallbackResources, ScreenDescriptor};
 
 use super::batch::draw_batch_with_id;
@@ -77,20 +79,23 @@ struct PostTargets {
 }
 
 struct PostResources {
-    targets: Option<PostTargets>,
+    targets: HashMap<String, PostTargets>,
 }
 
 fn ensure_targets(
     device: &wgpu::Device,
     screen: &ScreenDescriptor,
     resources: &mut CallbackResources,
+    id: &str,
     w: u32,
     h: u32,
 ) {
     let key = (screen.target_format, screen.sample_count, w, h);
-    let fresh = resources
-        .get::<PostResources>()
-        .is_none_or(|r| r.targets.as_ref().is_none_or(|t| t.key != key));
+    let fresh = resources.get::<PostResources>().is_none_or(|r| {
+        r.targets
+            .get(id)
+            .is_none_or(|t| t.key != key)
+    });
     if !fresh {
         return;
     }
@@ -311,11 +316,13 @@ fn ensure_targets(
     };
     match resources.get_mut::<PostResources>() {
         Some(all) => {
-            all.targets = Some(targets);
+            all.targets.insert(id.to_string(), targets);
         }
         None => {
+            let mut targets_map = HashMap::new();
+            targets_map.insert(id.to_string(), targets);
             resources.insert(PostResources {
-                targets: Some(targets),
+                targets: targets_map,
             });
         }
     }
@@ -333,17 +340,17 @@ pub(crate) fn prepare_composite(
     encoder: &mut wgpu::CommandEncoder,
     screen: &ScreenDescriptor,
     resources: &mut CallbackResources,
-    batch_id: &'static str,
+    batch_id: &str,
     w: u32,
     h: u32,
     amount: f32,
     background: Option<[f32; 4]>,
 ) {
-    ensure_targets(device, screen, resources, w, h);
+    ensure_targets(device, screen, resources, batch_id, w, h);
     let Some(all) = resources.get::<PostResources>() else {
         return;
     };
-    let Some(t) = all.targets.as_ref() else {
+    let Some(t) = all.targets.get(batch_id) else {
         return;
     };
     queue.write_buffer(
@@ -396,13 +403,14 @@ pub(crate) fn prepare_composite(
 /// has already set the viewport to the callback rect, which matches the
 /// offscreen texture 1:1 (both come from the painted frame geometry).
 pub(crate) fn paint_composite(
+    id: &str,
     rpass: &mut wgpu::RenderPass<'static>,
     resources: &CallbackResources,
 ) {
     let Some(all) = resources.get::<PostResources>() else {
         return;
     };
-    let Some(t) = all.targets.as_ref() else {
+    let Some(t) = all.targets.get(id) else {
         return;
     };
     rpass.set_pipeline(&t.pipeline);
@@ -473,7 +481,7 @@ mod tests {
             resources: &CallbackResources,
         ) {
             if use_composite(self.amount) {
-                paint_composite(rpass, resources);
+                paint_composite("sprite_batch.default", rpass, resources);
             } else {
                 draw_batch_with_id("sprite_batch.default", rpass, resources);
             }

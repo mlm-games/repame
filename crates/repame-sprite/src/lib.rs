@@ -21,8 +21,8 @@ use repose_ui::ViewExt;
 
 pub mod batch;
 pub use batch::{
-    AtlasUpload, BatchDesc, SpriteBatch, TextureFilter, draw_batch, draw_batch_with_id,
-    frame_uv, instance_rows, screen_camera, sprite_aabb,
+    AtlasUpload, BatchDesc, SpriteBatch, TextureFilter, draw_batch, draw_batch_with_id, frame_uv,
+    instance_rows, screen_camera, sprite_aabb,
 };
 
 pub mod fullscreen;
@@ -69,6 +69,11 @@ pub struct Camera2d {
     /// axis (a quarter of the area); `0.5` shows twice as much. Applied on
     /// canvas and GPU alike. Non-positive values fall back to `1.0`.
     pub zoom: f32,
+    /// Roll in radians around the look point (trauma shake). Defaults to `0.0`.
+    ///
+    /// Applied after look/zoom on canvas, GPU, picks, and actor surfaces,
+    /// so all consumers stay glued. Positive is clockwise in y-down space.
+    pub roll: f32,
 }
 
 impl Default for Camera2d {
@@ -78,6 +83,7 @@ impl Default for Camera2d {
             offset: Vec2::ZERO,
             units_per_pixel: 1.0,
             zoom: 1.0,
+            roll: 0.0,
         }
     }
 }
@@ -178,15 +184,23 @@ impl Camera2d {
     }
 
     /// Framing matrix used by GPU + picks. Prefer this over raw ortho.
+    /// Includes [`roll`](Camera2d::roll) around the look point.
     pub fn fit_matrix(&self, canvas_dp: [f32; 2], world_size: [f32; 2]) -> Mat4 {
         let fit = effective_fit(canvas_dp, world_size, self);
-        fit_view_proj(canvas_dp, world_size, self.effective_center(), fit)
+        fit_view_proj_with_roll(
+            canvas_dp,
+            world_size,
+            self.effective_center(),
+            fit,
+            self.roll,
+        )
     }
 
     /// World under a dp-space cursor (canvas coords, density already divided out).
+    /// Includes [`roll`](Camera2d::roll).
     pub fn dp_to_world_pt(&self, canvas_dp: [f32; 2], world_size: [f32; 2], dp: [f32; 2]) -> Vec2 {
         let fit = effective_fit(canvas_dp, world_size, self);
-        let w = dp_to_world(dp, world_size, self.effective_center(), fit);
+        let w = dp_to_world_with_roll(dp, world_size, self.effective_center(), fit, self.roll);
         Vec2::new(w[0], w[1])
     }
 
@@ -472,6 +486,19 @@ pub fn fit_view_proj(
     cam_center: [f32; 2],
     fit: (f32, f32, f32),
 ) -> Mat4 {
+    fit_view_proj_with_roll(canvas_dp, world_size, cam_center, fit, 0.0)
+}
+
+/// [`fit_view_proj`] plus camera roll around the look point.
+/// Roll rotates world points around `cam_center` before the contain-fit
+/// mapping; `0.0` is exactly [`fit_view_proj`].
+pub fn fit_view_proj_with_roll(
+    canvas_dp: [f32; 2],
+    world_size: [f32; 2],
+    cam_center: [f32; 2],
+    fit: (f32, f32, f32),
+    roll: f32,
+) -> Mat4 {
     let w = canvas_dp[0].max(1.0);
     let h = canvas_dp[1].max(1.0);
     let (s, ox, oy) = fit;
@@ -482,12 +509,28 @@ pub fn fit_view_proj(
     let sy = -2.0 * s / h;
     let tx = 2.0 * (ox - lx * s) / w - 1.0;
     let ty = 1.0 - 2.0 * (oy - ly * s) / h;
-    Mat4::from_cols(
+    let base = Mat4::from_cols(
         glam::Vec4::new(sx, 0.0, 0.0, 0.0),
         glam::Vec4::new(0.0, sy, 0.0, 0.0),
         glam::Vec4::new(0.0, 0.0, 0.001, 0.0),
         glam::Vec4::new(tx, ty, 0.0, 1.0),
-    )
+    );
+    if !roll.is_finite() || roll.abs() < 1e-7 {
+        return base;
+    }
+    let (c, r) = (roll.cos(), roll.sin());
+    let rot = Mat4::from_cols(
+        glam::Vec4::new(c, r, 0.0, 0.0),
+        glam::Vec4::new(-r, c, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, 1.0, 0.0),
+        glam::Vec4::new(
+            cam_center[0] - c * cam_center[0] + r * cam_center[1],
+            cam_center[1] - r * cam_center[0] - c * cam_center[1],
+            0.0,
+            1.0,
+        ),
+    );
+    base * rot
 }
 
 /// World point -> dp canvas point through the fit. `cam_center` shifts the
@@ -499,10 +542,22 @@ pub fn world_to_dp(
     cam_center: [f32; 2],
     fit: (f32, f32, f32),
 ) -> [f32; 2] {
+    world_to_dp_with_roll(world, world_size, cam_center, fit, 0.0)
+}
+
+/// [`world_to_dp`] plus camera roll around `cam_center`.
+pub fn world_to_dp_with_roll(
+    world: [f32; 2],
+    world_size: [f32; 2],
+    cam_center: [f32; 2],
+    fit: (f32, f32, f32),
+    roll: f32,
+) -> [f32; 2] {
     let (s, ox, oy) = fit;
+    let [wx, wy] = rotate_about(world, cam_center, roll);
     [
-        ox + (world[0] - (cam_center[0] - world_size[0] * 0.5)) * s,
-        oy + (world[1] - (cam_center[1] - world_size[1] * 0.5)) * s,
+        ox + (wx - (cam_center[0] - world_size[0] * 0.5)) * s,
+        oy + (wy - (cam_center[1] - world_size[1] * 0.5)) * s,
     ]
 }
 
@@ -514,14 +569,36 @@ pub fn dp_to_world(
     cam_center: [f32; 2],
     fit: (f32, f32, f32),
 ) -> [f32; 2] {
+    dp_to_world_with_roll(dp, world_size, cam_center, fit, 0.0)
+}
+
+/// Inverse of [`world_to_dp_with_roll`].
+pub fn dp_to_world_with_roll(
+    dp: [f32; 2],
+    world_size: [f32; 2],
+    cam_center: [f32; 2],
+    fit: (f32, f32, f32),
+    roll: f32,
+) -> [f32; 2] {
     let (s, ox, oy) = fit;
     if !s.is_finite() || s.abs() < 1e-6 {
         return cam_center;
     }
-    [
+    let base = [
         (dp[0] - ox) / s + (cam_center[0] - world_size[0] * 0.5),
         (dp[1] - oy) / s + (cam_center[1] - world_size[1] * 0.5),
-    ]
+    ];
+    rotate_about(base, cam_center, -roll)
+}
+
+fn rotate_about(p: [f32; 2], center: [f32; 2], roll: f32) -> [f32; 2] {
+    if !roll.is_finite() || roll.abs() < 1e-7 {
+        return p;
+    }
+    let (c, r) = (roll.cos(), roll.sin());
+    let dx = p[0] - center[0];
+    let dy = p[1] - center[1];
+    [center[0] + c * dx - r * dy, center[1] + r * dx + c * dy]
 }
 
 /// Viewport-local physical-px press -> world point through the painted
@@ -534,14 +611,12 @@ pub fn pick_world(local_px: [f32; 2], geom: FrameGeom, world_size: [f32; 2]) -> 
     } else {
         1.0
     };
-    dp_to_world(
+    dp_to_world_with_roll(
         [local_px[0] / d, local_px[1] / d],
         world_size,
-        [
-            geom.look[0] + world_size[0] * 0.5,
-            geom.look[1] + world_size[1] * 0.5,
-        ],
+        geom.pivot,
         geom.fit,
+        geom.roll,
     )
 }
 
@@ -569,6 +644,11 @@ pub struct FrameGeom {
     pub density: f32,
     /// Painted viewport size in physical px (drives the GPU camera).
     pub viewport_px: [f32; 2],
+    /// Camera roll in radians around the look point.
+    pub roll: f32,
+    /// Camera look point in world coords (`cam.effective_center()` at
+    /// publish time). Roll pivot for [`surface_dp`] and picks.
+    pub pivot: [f32; 2],
 }
 
 impl Default for FrameGeom {
@@ -578,6 +658,8 @@ impl Default for FrameGeom {
             look: [0.0, 0.0],
             density: 1.0,
             viewport_px: [1.0, 1.0],
+            roll: 0.0,
+            pivot: [0.0, 0.0],
         }
     }
 }
@@ -613,6 +695,21 @@ impl From<FrameGeom> for GeomHandle {
     }
 }
 
+impl From<std::sync::Arc<std::sync::Mutex<FrameGeom>>> for GeomHandle {
+    /// Migrate GPU call sites that still hold the raw mutex handle.
+    fn from(arc: std::sync::Arc<std::sync::Mutex<FrameGeom>>) -> Self {
+        Self(arc)
+    }
+}
+
+impl From<std::rc::Rc<std::cell::Cell<FrameGeom>>> for GeomHandle {
+    /// Migrate canvas call sites that still hold the old cell handle:
+    /// snapshots the current value into the shared handle.
+    fn from(rc: std::rc::Rc<std::cell::Cell<FrameGeom>>) -> Self {
+        Self(Arc::new(Mutex::new(rc.get())))
+    }
+}
+
 /// Press slop in physical px: pointer-up farther than this from
 /// pointer-down cancels the `Click` (drag-off-cancel).
 pub const CLICK_SLOP_PX: f32 = 12.0;
@@ -625,12 +722,15 @@ fn click_within_slop(a: [f32; 2], b: [f32; 2]) -> bool {
 
 /// World-anchored surface rect in dp: `([off_x, off_y], [w, h])` for a
 /// `size` box centered on `center`. Pure; `ActorFrame` is its view form.
+/// The center rotates with [`FrameGeom::roll`] about [`FrameGeom::pivot`];
+/// size stays axis-aligned.
 pub fn surface_dp(center: [f32; 2], size: [f32; 2], geom: FrameGeom) -> ([f32; 2], [f32; 2]) {
     let (s, ox, oy) = geom.fit;
+    let r = rotate_about(center, geom.pivot, geom.roll);
     (
         [
-            ox + (center[0] - size[0] * 0.5 - geom.look[0]) * s,
-            oy + (center[1] - size[1] * 0.5 - geom.look[1]) * s,
+            ox + (r[0] - size[0] * 0.5 - geom.look[0]) * s,
+            oy + (r[1] - size[1] * 0.5 - geom.look[1]) * s,
         ],
         [size[0] * s, size[1] * s],
     )
@@ -672,7 +772,6 @@ pub fn Viewport2d(
     let world_size = input.world_size;
     let pick_geom = geom_out.clone();
     let move_geom = geom_out.clone();
-    let press_geom = geom_out.clone();
     let release_geom = geom_out.clone();
     let draw_input = input.clone();
     let draw_geom = geom_out.clone();
@@ -723,17 +822,16 @@ pub fn Viewport2d(
         })
         .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
-            if let Some(start) = press_up.take() {
-                if click_within_slop(start, [p.x, p.y]) {
-                    let g = release_geom.get();
-                    let world = pick_world([p.x, p.y], g, world_size);
-                    on_up_click(PickEvent::Click {
-                        world: Vec2::new(world[0], world[1]),
-                        screen: [p.x, p.y],
-                    });
-                }
+            if let Some(start) = press_up.take()
+                && click_within_slop(start, [p.x, p.y])
+            {
+                let g = release_geom.get();
+                let world = pick_world([p.x, p.y], g, world_size);
+                on_up_click(PickEvent::Click {
+                    world: Vec2::new(world[0], world[1]),
+                    screen: [p.x, p.y],
+                });
             }
-            let _ = press_geom.get();
             if is_touch(&ev) {
                 on_up(PickEvent::TouchUp { id: ev.id.0 });
             }
@@ -761,13 +859,16 @@ pub fn Viewport2d(
             ],
             density: d,
             viewport_px: [scope.size.width, scope.size.height],
+            roll: cam.roll,
+            pivot: cam_center,
         });
         let project = |wx: f32, wy: f32| -> [f32; 2] {
-            let [dx, dy] = world_to_dp(
+            let [dx, dy] = world_to_dp_with_roll(
                 [wx, wy],
                 draw_input.world_size,
                 cam_center,
                 (fit.0, fit.1, fit.2),
+                cam.roll,
             );
             [dx * d, dy * d]
         };
@@ -883,27 +984,24 @@ pub fn Viewport2dGpu(
     desc: BatchDesc,
     on_event: impl Fn(PickEvent) + 'static,
 ) -> View {
-    Viewport2dGpuWithId(
-        input,
-        geom_out,
-        uploads,
-        desc,
-        "viewport2d.main",
-        on_event,
-    )
+    Viewport2dGpuWithId(input, geom_out, uploads, desc, "viewport2d.main", on_event)
 }
 
 /// GPU viewport with an explicit batch id so a second viewport/minimap can
-/// coexist (each id owns its pipeline/instances in `CallbackResources`).
+/// coexist (each id owns its pipeline/instances in `CallbackResources`,
+/// including its bg/overlay/composite targets).
 #[allow(non_snake_case)]
 pub fn Viewport2dGpuWithId(
     input: FrameInput,
     geom_out: GeomHandle,
     uploads: Vec<AtlasUpload>,
     desc: BatchDesc,
-    batch_id: &'static str,
+    batch_id: impl Into<String>,
     on_event: impl Fn(PickEvent) + 'static,
 ) -> View {
+    let batch_id: String = batch_id.into();
+    let bg_id = format!("{batch_id}.background");
+    let overlay_id = format!("{batch_id}.overlay");
     let input = Arc::new(input);
     let world_size = input.world_size;
     let pick_geom = geom_out.clone();
@@ -931,7 +1029,7 @@ pub fn Viewport2dGpuWithId(
         uploads: Arc::from(uploads.into_boxed_slice()),
         desc,
         bg: FullscreenPass::new(
-            "viewport2d.background",
+            bg_id,
             fullscreen::SOLID_WGSL,
             FullscreenDesc {
                 texture_slots: 0,
@@ -939,7 +1037,7 @@ pub fn Viewport2dGpuWithId(
             },
         ),
         overlay: FullscreenPass::new(
-            "viewport2d.overlay",
+            overlay_id,
             fullscreen::SOLID_WGSL,
             FullscreenDesc {
                 texture_slots: 0,
@@ -962,6 +1060,8 @@ pub fn Viewport2dGpuWithId(
                     center[0] - size_input.world_size[0] * 0.5,
                     center[1] - size_input.world_size[1] * 0.5,
                 ],
+                roll: size_input.cam.roll,
+                pivot: center,
             });
         })
         .on_pointer_down(move |ev: repose_core::input::PointerEvent| {
@@ -999,15 +1099,15 @@ pub fn Viewport2dGpuWithId(
         .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
             let start = press_up.lock().ok().and_then(|mut s| s.take());
-            if let Some(start) = start {
-                if click_within_slop(start, [p.x, p.y]) {
-                    let g = release_geom.get();
-                    let world = pick_world([p.x, p.y], g, world_size);
-                    on_up_click(PickEvent::Click {
-                        world: Vec2::new(world[0], world[1]),
-                        screen: [p.x, p.y],
-                    });
-                }
+            if let Some(start) = start
+                && click_within_slop(start, [p.x, p.y])
+            {
+                let g = release_geom.get();
+                let world = pick_world([p.x, p.y], g, world_size);
+                on_up_click(PickEvent::Click {
+                    world: Vec2::new(world[0], world[1]),
+                    screen: [p.x, p.y],
+                });
             }
             if is_touch(&ev) {
                 on_up(PickEvent::TouchUp { id: ev.id.0 });
@@ -1027,7 +1127,7 @@ pub fn Viewport2dGpuWithId(
 struct GpuViewport {
     input: Arc<FrameInput>,
     geom: Arc<Mutex<FrameGeom>>,
-    batch_id: &'static str,
+    batch_id: String,
     uploads: Arc<[AtlasUpload]>,
     desc: BatchDesc,
     bg: FullscreenPass,
@@ -1060,10 +1160,8 @@ impl WgpuCallback for GpuViewport {
         } else {
             self.input.viewport_dp
         };
-        let fit = effective_fit(dp, self.input.world_size, &self.input.cam);
-        let cam_center = self.input.cam.effective_center();
-        let mut batch = SpriteBatch::with_id(self.batch_id, self.desc);
-        batch.set_camera(fit_view_proj(dp, self.input.world_size, cam_center, fit));
+        let mut batch = SpriteBatch::with_id(self.batch_id.clone(), self.desc);
+        batch.set_camera(self.input.cam.fit_matrix(dp, self.input.world_size));
         for s in &self.input.sprites {
             batch.push_sprite(s);
         }
@@ -1072,20 +1170,18 @@ impl WgpuCallback for GpuViewport {
         let composite = post::use_composite(self.input.chroma);
         // Background first (uniform-only fill, same color the canvas
         // path fills under the batch). Skipped when the snapshot has
-        // none so transparent scenes keep compositing; skipped when the
-        // composite path clears offscreen with the same color instead.
-        if let Some(bg) = self.input.background {
-            if !composite {
-                let words = [bg[0], bg[1], bg[2], bg[3]];
-                self.bg.prepare_with(
-                    device,
-                    queue,
-                    screen,
-                    resources,
-                    bytemuck::cast_slice(&words),
-                    &[],
-                );
-            }
+        if let Some(bg) = self.input.background
+            && !composite
+        {
+            let words = [bg[0], bg[1], bg[2], bg[3]];
+            self.bg.prepare_with(
+                device,
+                queue,
+                screen,
+                resources,
+                bytemuck::cast_slice(&words),
+                &[],
+            );
         }
         if let Some(ov) = self.input.overlay_color {
             let words = [ov[0], ov[1], ov[2], ov[3]];
@@ -1107,7 +1203,7 @@ impl WgpuCallback for GpuViewport {
                 encoder,
                 screen,
                 resources,
-                self.batch_id,
+                self.batch_id.as_str(),
                 w,
                 h,
                 self.input.chroma,
@@ -1135,6 +1231,7 @@ impl WgpuCallback for GpuViewport {
             &self.input.cam,
         );
         let cam = self.input.cam.effective_center();
+        let roll = self.input.cam.roll;
         if let Ok(mut g) = self.geom.lock() {
             *g = FrameGeom {
                 fit,
@@ -1144,17 +1241,17 @@ impl WgpuCallback for GpuViewport {
                 ],
                 density: d,
                 viewport_px: vp,
+                roll,
+                pivot: cam,
             };
         }
         if post::use_composite(self.input.chroma) {
-            post::paint_composite(rpass, resources);
+            post::paint_composite(self.batch_id.as_str(), rpass, resources);
         } else {
-            // Snapshot background first (opaque uniform fill), then the
-            // sprite batch on top: same order as the canvas path.
             if self.input.background.is_some() {
                 self.bg.paint(info, rpass, resources);
             }
-            draw_batch_with_id(self.batch_id, rpass, resources);
+            draw_batch_with_id(self.batch_id.as_str(), rpass, resources);
         }
         if self.input.overlay_color.is_some() {
             self.overlay.paint(info, rpass, resources);
@@ -1222,10 +1319,12 @@ pub fn ActorFrame(
     let ([ox, oy], [w, h]) = surface_dp(center, size, geom.get());
     // `.absolute()` is load-bearing: without it taffy ignores the offsets
     // and every surface stacks at the same fixed spot.
-    let mut modifier = Modifier::new()
-        .size(Dp(w), Dp(h))
-        .absolute()
-        .offset(Some(Dp(ox)), Some(Dp(oy)), None, None);
+    let mut modifier = Modifier::new().size(Dp(w), Dp(h)).absolute().offset(
+        Some(Dp(ox)),
+        Some(Dp(oy)),
+        None,
+        None,
+    );
     if mirror_x {
         modifier = modifier.scale2(-1.0, 1.0);
     }
@@ -1303,6 +1402,7 @@ mod tests {
             offset: Vec2::ZERO,
             units_per_pixel: 0.5,
             zoom: 1.0,
+            roll: 0.0,
         };
         let input = FrameInput {
             cam,
@@ -1326,11 +1426,13 @@ mod tests {
             look: [0.0, 0.0],
             density: 1.0,
             viewport_px: [256.0, 256.0],
+            roll: 0.0,
+            pivot: [64.0, 64.0],
         }));
         let payload = GpuViewport {
             input: Arc::new(input.clone()),
             geom,
-            batch_id: "test.viewport2d.main",
+            batch_id: "test.viewport2d.main".to_string(),
             uploads: Arc::from(uploads.into_boxed_slice()),
             desc: BatchDesc {
                 layer_size: 2,
@@ -1388,8 +1490,10 @@ mod tests {
                 look: [0.0, 0.0],
                 density: 1.0,
                 viewport_px: [256.0, 256.0],
+                roll: 0.0,
+                pivot: [64.0, 64.0],
             })),
-            batch_id: "test.viewport2d.overlay",
+            batch_id: "test.viewport2d.overlay".to_string(),
             uploads: Arc::from(
                 vec![AtlasUpload {
                     page: 0,
@@ -1456,6 +1560,8 @@ mod tests {
             look: [0.0, 0.0],
             density: 1.25,
             viewport_px: [1250.0, 750.0],
+            roll: 0.0,
+            pivot: [400.0, 300.0],
         };
         let ([ox, oy], [w, h]) = surface_dp([400.0, 300.0], [64.0, 80.0], geom);
         assert!(
@@ -1520,6 +1626,7 @@ mod tests {
             offset: Vec2::ZERO,
             units_per_pixel: 0.0,
             zoom: 0.0,
+            roll: 0.0,
         };
         let m = bad.view_proj([0.0, 0.0]);
         assert!(m.is_finite(), "view_proj must stay finite, got {m:?}");
@@ -1533,6 +1640,7 @@ mod tests {
             offset: Vec2::ZERO,
             units_per_pixel: 1.0,
             zoom: 2.0,
+            roll: 0.0,
         };
         let world_size = [800.0, 600.0];
         let density = 1.25;
@@ -1555,7 +1663,8 @@ mod tests {
                 (px[0] - gpu_px[0]).abs() < 1e-2 && (px[1] - gpu_px[1]).abs() < 1e-2,
                 "canvas/GPU disagree for {world:?}: canvas {px:?} vs gpu {gpu_px:?}"
             );
-            let back = cam.dp_to_world_pt(canvas_dp, world_size, [px[0] / density, px[1] / density]);
+            let back =
+                cam.dp_to_world_pt(canvas_dp, world_size, [px[0] / density, px[1] / density]);
             assert!(
                 (back.x - world[0]).abs() < 1e-3 && (back.y - world[1]).abs() < 1e-3,
                 "pick round trip for {world:?} gave {back:?}"
@@ -1592,6 +1701,8 @@ mod tests {
             look: [0.0, 0.0],
             density: 1.25,
             viewport_px: [1250.0, 750.0],
+            roll: 0.0,
+            pivot: [400.0, 300.0],
         };
         let world_size = [800.0, 600.0];
         let a = pick_world([125.0, 75.0], geom, world_size);
@@ -1615,6 +1726,7 @@ mod tests {
             offset: Vec2::new(10.0, -10.0),
             units_per_pixel: 1.0,
             zoom: 1.0,
+            roll: 0.0,
         };
         assert_eq!(cam.effective_center(), [410.0, 290.0]);
         let fit = effective_fit(canvas_dp, world_size, &cam);
@@ -1690,5 +1802,78 @@ mod tests {
         assert!(!is_touch(&ev_of(PointerKind::Mouse)));
         // Touch zones sample window-physical px (origin + position).
         assert_eq!(screen_of(&ev_of(PointerKind::Touch)), [15.0, 27.0]);
+    }
+
+    #[test]
+    fn click_slop_cancels_drags() {
+        assert!(click_within_slop([100.0, 100.0], [105.0, 105.0]));
+        assert!(!click_within_slop(
+            [100.0, 100.0],
+            [100.0 + CLICK_SLOP_PX + 1.0, 100.0]
+        ));
+    }
+
+    #[test]
+    fn roll_roundtrips_and_moves_pixels() {
+        let cam = Camera2d {
+            center: Vec2::new(400.0, 300.0),
+            offset: Vec2::ZERO,
+            units_per_pixel: 1.0,
+            zoom: 1.0,
+            roll: std::f32::consts::FRAC_PI_2,
+        };
+        let world = [800.0, 600.0];
+        let dp = [1000.0, 600.0];
+        let fit = effective_fit(dp, world, &cam);
+        for p in [[400.0, 300.0], [500.0, 300.0], [0.0, 0.0]] {
+            let fwd = world_to_dp_with_roll(p, world, cam.effective_center(), fit, cam.roll);
+            let back = dp_to_world_with_roll(fwd, world, cam.effective_center(), fit, cam.roll);
+            assert!(
+                (back[0] - p[0]).abs() < 1e-3 && (back[1] - p[1]).abs() < 1e-3,
+                "roll roundtrip for {p:?} gave {back:?}"
+            );
+        }
+        let plain = world_to_dp([500.0, 300.0], world, cam.effective_center(), fit);
+        let rolled =
+            world_to_dp_with_roll([500.0, 300.0], world, cam.effective_center(), fit, cam.roll);
+        assert!(
+            (plain[0] - rolled[0]).abs() + (plain[1] - rolled[1]).abs() > 1.0,
+            "roll must move pixels, plain {plain:?} rolled {rolled:?}"
+        );
+        let m0 = fit_view_proj_with_roll(dp, world, cam.effective_center(), fit, 0.0);
+        let legacy = fit_view_proj(dp, world, cam.effective_center(), fit);
+        assert_eq!(m0, legacy);
+    }
+
+    #[test]
+    fn surface_tracks_roll_about_pivot() {
+        let geom = FrameGeom {
+            fit: (1.0, 0.0, 0.0),
+            look: [0.0, 0.0],
+            density: 1.0,
+            viewport_px: [800.0, 600.0],
+            roll: std::f32::consts::FRAC_PI_2,
+            pivot: [400.0, 300.0],
+        };
+        let ([ox, oy], _) = surface_dp([500.0, 300.0], [10.0, 10.0], geom);
+        assert!(
+            (ox - 395.0).abs() < 1e-3 && (oy - 395.0).abs() < 1e-3,
+            "rolled surface, got ({ox},{oy})"
+        );
+    }
+
+    #[test]
+    fn geom_handle_compat_wraps_legacy_handles() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let rc = Rc::new(Cell::new(FrameGeom {
+            fit: (2.0, 1.0, 2.0),
+            ..Default::default()
+        }));
+        let h: GeomHandle = rc.into();
+        assert_eq!(h.get().fit, (2.0, 1.0, 2.0));
+        let arc = Arc::new(Mutex::new(FrameGeom::default()));
+        let h2: GeomHandle = arc.into();
+        assert_eq!(h2.get().density, 1.0);
     }
 }

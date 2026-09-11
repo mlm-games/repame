@@ -1,4 +1,6 @@
-#[derive(Clone, Debug)]
+use bevy_ecs::prelude::*;
+
+#[derive(Clone, Debug, Resource)]
 pub struct Chroma {
     /// Current split amount (bevy `chromatic_intensity` units).
     pub strength: f32,

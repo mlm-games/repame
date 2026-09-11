@@ -27,7 +27,7 @@ pub struct ActionState<A: ActionLike> {
     active_contexts: HashSet<String>,
     /// Currently-held button bindings (key/mouse/pad). Releases only drop
     /// the action when *no* binding for it remains down (OR semantics).
-    down_buttons: Vec<Binding>,
+    down_buttons: HashSet<Binding>,
 }
 
 impl<A: ActionLike> ActionState<A> {
@@ -40,7 +40,7 @@ impl<A: ActionLike> ActionState<A> {
             consumed: HashSet::new(),
             axes: HashMap::new(),
             active_contexts: HashSet::new(),
-            down_buttons: Vec::new(),
+            down_buttons: HashSet::new(),
         }
     }
 
@@ -94,11 +94,9 @@ impl<A: ActionLike> ActionState<A> {
         match binding {
             Binding::Key(_) | Binding::Mouse(_) | Binding::Pad(_) => {
                 if down {
-                    if !self.down_buttons.iter().any(|b| b == binding) {
-                        self.down_buttons.push(binding.clone());
-                    }
+                    self.down_buttons.insert(binding.clone());
                 } else {
-                    self.down_buttons.retain(|b| b != binding);
+                    self.down_buttons.remove(binding);
                 }
             }
             Binding::Axis { .. } => {}
@@ -121,7 +119,7 @@ impl<A: ActionLike> ActionState<A> {
     fn binding_down(&self, binding: &Binding) -> bool {
         match binding {
             Binding::Key(_) | Binding::Mouse(_) | Binding::Pad(_) => {
-                self.down_buttons.iter().any(|b| b == binding)
+                self.down_buttons.contains(binding)
             }
             Binding::Axis { axis, threshold } => {
                 Binding::axis_active(*threshold, self.axis_value(*axis))

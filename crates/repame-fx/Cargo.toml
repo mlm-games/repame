@@ -9,6 +9,7 @@ description = "sim-side particles, trauma shake, flash, floaters, transitions fo
 
 [dependencies]
 repame-sim.workspace = true
+bevy_ecs.workspace = true
 repame-sprite.workspace = true
 repame-atlas.workspace = true
 repose-core.workspace = true

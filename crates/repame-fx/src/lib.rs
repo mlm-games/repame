@@ -37,44 +37,7 @@ pub use particles::{Particle, Spawner, burst, particle_sprites, particle_sprites
 pub use transitions::{TransitionFx, TransitionVisual, VORTEX_CUSTOM_ID};
 pub use trauma::Trauma;
 
-use repame_sim::bevy_ecs::component::{
-    ComponentId, Mutable, RequiredComponentsRegistrator, StorageType,
-};
 use repame_sim::bevy_ecs::prelude::*;
-use repame_sim::bevy_ecs::resource::IsResource;
-
-// COMPAT: pinned to bevy_ecs 0.19's `Component` trait shape
-// (`STORAGE_TYPE`, `Mutability`, `register_required_components`). A bevy
-// bump that changes the trait (0.20+ registrar API) breaks here first:
-// update the body once, all four resources follow. SparseSet is
-// deliberate but load-free for singletons; Table would do identically.
-macro_rules! fx_resource {
-    ($($t:ty),*) => {
-        $(
-            impl Component for $t {
-                const STORAGE_TYPE: StorageType = StorageType::SparseSet;
-                type Mutability = Mutable;
-                fn register_required_components(
-                    _id: ComponentId,
-                    required: &mut RequiredComponentsRegistrator,
-                ) {
-                    let rid = if let Some(id) = required
-                        .components_registrator()
-                        .component_id::<$t>()
-                    {
-                        id
-                    } else {
-                        required.components_registrator().register_component::<$t>()
-                    };
-                    required.register_required::<IsResource>(move || IsResource::new(rid));
-                }
-            }
-            impl Resource for $t {}
-        )*
-    };
-}
-
-fx_resource!(Trauma, Flash, TransitionFx, Chroma);
 
 /// Register all fx resources on a `Sim` world. Call once at boot.
 pub fn init_resources(world: &mut World) {

@@ -19,7 +19,7 @@ log.workspace = true
 web-time.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"
+wasm-bindgen.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
-winit = "0.30"
+winit.workspace = true

@@ -28,8 +28,6 @@ repose-tree = "0.30"
 wgpu = "30"
 glam = "0.33"
 bytemuck = { version = "1", features = ["derive"] }
-gilrs = "0.11"
-kira = "0.12"
 cpal = "0.18"
 symphonia = { version = "0.6", features = ["all"] }
 web-workers = "0.3"
@@ -40,6 +38,9 @@ rand = "0.10"
 noise = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+getrandom = "0.4"
+wasm-bindgen = "0.2"
+winit = "0.30"
 renamite-player = { version = "0.2" }
 renamite-player-ui = { version = "0.2" }
 

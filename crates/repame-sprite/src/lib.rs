@@ -270,7 +270,8 @@ impl Camera2d {
 }
 
 /// Blend mode per sprite. Alpha is the default; Additive draws with
-/// `One + One` (second pipeline, split draw ranges).
+/// `SrcAlpha + One` (GML `bm_add` parity, second pipeline, split draw
+/// ranges) so the tint alpha scales the glow.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SpriteBlend {
     #[default]

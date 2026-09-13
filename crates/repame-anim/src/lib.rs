@@ -29,14 +29,12 @@ pub struct AnimDef {
 impl AnimDef {
     /// Normalized anchor (`[0.5, 0.5]` = centered), straight into
     /// `SpriteInstance.anchor`. Zero-size cells anchor top-left.
+    /// Deliberately unclamped.
     pub fn anchor(&self) -> [f32; 2] {
         if self.w == 0 || self.h == 0 {
             return [0.0, 0.0];
         }
-        [
-            (self.xorigin / self.w as f32).clamp(0.0, 1.0),
-            (self.yorigin / self.h as f32).clamp(0.0, 1.0),
-        ]
+        [self.xorigin / self.w as f32, self.yorigin / self.h as f32]
     }
 
     /// Frame index wrapped to the strip (negative-safe for ping-pong).
@@ -112,7 +110,11 @@ impl AnimCatalog {
     pub fn empty() -> Self {
         Self {
             defs: HashMap::new(),
-            atlas: Atlas::new(AtlasDesc { size: 64, max_pages: 1, padding: 0 }),
+            atlas: Atlas::new(AtlasDesc {
+                size: 64,
+                max_pages: 1,
+                padding: 0,
+            }),
         }
     }
     /// Parse JSON and pack every frame. `serde_json` maps sort keys, so
@@ -581,7 +583,11 @@ mod tests {
     fn catalog() -> AnimCatalog {
         AnimCatalog::from_json(
             JSON,
-            AtlasDesc { size: 64, max_pages: 1, padding: 0 },
+            AtlasDesc {
+                size: 64,
+                max_pages: 1,
+                padding: 0,
+            },
         )
         .expect("fits")
     }
@@ -629,14 +635,22 @@ mod tests {
         assert!(matches!(
             AnimCatalog::from_json(
                 "not json",
-                AtlasDesc { size: 64, max_pages: 1, padding: 0 }
+                AtlasDesc {
+                    size: 64,
+                    max_pages: 1,
+                    padding: 0
+                }
             ),
             Err(CatalogError::Json(_))
         ));
         assert!(matches!(
             AnimCatalog::from_json(
                 JSON,
-                AtlasDesc { size: 8, max_pages: 1, padding: 0 }
+                AtlasDesc {
+                    size: 8,
+                    max_pages: 1,
+                    padding: 0
+                }
             ),
             Err(CatalogError::AtlasFull { .. })
         ));
@@ -644,7 +658,11 @@ mod tests {
         assert!(matches!(
             AnimCatalog::from_json(
                 big,
-                AtlasDesc { size: 64, max_pages: 4, padding: 0 }
+                AtlasDesc {
+                    size: 64,
+                    max_pages: 4,
+                    padding: 0
+                }
             ),
             Err(CatalogError::CellTooLarge { .. })
         ));
@@ -652,7 +670,11 @@ mod tests {
         assert!(matches!(
             AnimCatalog::from_json(
                 dup,
-                AtlasDesc { size: 64, max_pages: 1, padding: 0 }
+                AtlasDesc {
+                    size: 64,
+                    max_pages: 1,
+                    padding: 0
+                }
             ),
             Err(CatalogError::DuplicateStem { .. })
         ));

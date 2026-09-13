@@ -88,29 +88,11 @@ fn lerp_rgba(a: [f32; 4], b: [f32; 4], f: f32) -> [f32; 4] {
     ]
 }
 
-/// Size/alpha curve over life.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
-pub enum EaseKind {
-    #[default]
-    Linear,
-    QuadOut,
-    CubicOut,
-    BackOut,
-}
-
-impl EaseKind {
-    /// Ease life fraction 0..1 into curve value 0..1.
-    pub fn apply(self, t: f32) -> f32 {
-        use repose_core::animation::Easing;
-        let ease = match self {
-            EaseKind::Linear => Easing::Linear,
-            EaseKind::QuadOut => Easing::EaseOut,
-            EaseKind::CubicOut => Easing::CubicOut,
-            EaseKind::BackOut => Easing::BackOut,
-        };
-        ease.interpolate(t.clamp(0.0, 1.0))
-    }
-}
+/// Size/alpha curve over life. Re-exported from upstream
+/// (`repose_core::animation::EaseKind`): one easing family for the UI
+/// framework and the sim-side effect defs, so `.fx.ron` curves and UI
+/// tweens can never disagree.
+pub use repose_core::animation::EaseKind;
 
 /// Spawn policy: continuous rate and/or one-shot burst cap.
 /// (hanabi `SpawnerSettings::rate`, enoki spawner state.)
@@ -200,20 +182,6 @@ mod tests {
     #[test]
     fn gradient_empty_is_white() {
         assert_eq!(Gradient::default().sample(0.3), [1.0, 1.0, 1.0, 1.0]);
-    }
-
-    #[test]
-    fn ease_endpoints_hold() {
-        for ease in [
-            EaseKind::Linear,
-            EaseKind::QuadOut,
-            EaseKind::CubicOut,
-            EaseKind::BackOut,
-        ] {
-            assert!(ease.apply(0.0).abs() < 1e-4);
-            assert!((ease.apply(1.0) - 1.0).abs() < 1e-4);
-        }
-        assert!(EaseKind::QuadOut.apply(0.5) > 0.5);
     }
 
     #[test]

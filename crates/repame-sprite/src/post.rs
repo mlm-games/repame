@@ -91,11 +91,9 @@ fn ensure_targets(
     h: u32,
 ) {
     let key = (screen.target_format, screen.sample_count, w, h);
-    let fresh = resources.get::<PostResources>().is_none_or(|r| {
-        r.targets
-            .get(id)
-            .is_none_or(|t| t.key != key)
-    });
+    let fresh = resources
+        .get::<PostResources>()
+        .is_none_or(|r| r.targets.get(id).is_none_or(|t| t.key != key));
     if !fresh {
         return;
     }

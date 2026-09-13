@@ -43,9 +43,9 @@ pub struct Camera2d {
     /// World-space point the camera follows (the follow target, room
     /// center, or player position). Defaults to `(0, 0)`.
     ///
-    /// Scroll limits (see [`apply_limits`]) clamp this field; put
-    /// momentary displacement such as trauma shake in [`offset`](Camera2d::offset)
-    /// instead so it can push past the limits.
+    /// Scroll limits (`game_utils_repame::feel::apply_limits`) clamp this
+    /// field; put momentary displacement such as trauma shake in
+    /// [`offset`](Camera2d::offset) instead so it can push past the limits.
     pub center: Vec2,
     /// Momentary displacement added to [`center`](Camera2d::center).
     /// Defaults to `(0, 0)`.
@@ -88,90 +88,10 @@ impl Default for Camera2d {
     }
 }
 
-/// Scroll limits in world units. Disabled by default.
-///
-/// The clamp applies to [`center`](Camera2d::center) only: pass the follow
-/// target through [`apply_limits`] before writing it into the camera, and
-/// keep momentary displacement in [`offset`](Camera2d::offset) so shake
-/// bypasses the clamp by design.
-#[derive(Clone, Copy, Debug)]
-pub struct CameraLimits {
-    /// Smallest visible center `x`. Defaults to `0.0`.
-    pub left: f32,
-    /// Smallest visible center `y`. Defaults to `0.0`.
-    pub top: f32,
-    /// Largest visible center `x`. Defaults to `0.0`.
-    pub right: f32,
-    /// Largest visible center `y`. Defaults to `0.0`.
-    pub bottom: f32,
-    /// Master switch. Defaults to `false` (no clamping).
-    pub enabled: bool,
-}
-
-impl Default for CameraLimits {
-    fn default() -> Self {
-        Self {
-            left: 0.0,
-            top: 0.0,
-            right: 0.0,
-            bottom: 0.0,
-            enabled: false,
-        }
-    }
-}
-
-/// Clamp a follow target into scroll limits.
-///
-/// Returns `center` unchanged when limits are disabled or when a pair is
-/// inverted (`left > right` is normalized, never a trap). Each axis clamps
-/// independently, so a corner target slides along the clamped edge.
-///
-/// ```rust
-/// use repame_sprite::{CameraLimits, apply_limits};
-///
-/// let limits = CameraLimits { left: 100.0, top: 100.0, right: 700.0, bottom: 500.0, enabled: true };
-/// assert_eq!(apply_limits([50.0, 300.0], limits), [100.0, 300.0]);
-/// assert_eq!(apply_limits([400.0, 300.0], limits), [400.0, 300.0]);
-/// ```
-pub fn apply_limits(center: [f32; 2], limits: CameraLimits) -> [f32; 2] {
-    if !limits.enabled {
-        return center;
-    }
-    [
-        center[0].clamp(limits.left.min(limits.right), limits.left.max(limits.right)),
-        center[1].clamp(limits.top.min(limits.bottom), limits.top.max(limits.bottom)),
-    ]
-}
-
-/// Ease the camera toward its follow target.
-///
-/// Moves `current` toward `target` with exponential smoothing at `speed`
-/// world units per second: fast when far away, settling gently without
-/// overshooting. Large `speed` values approach a snap; the motion is
-/// frame-rate independent for a fixed `dt`.
-///
-/// - `speed <= 0` (or non-finite) snaps directly to `target`.
-/// - `dt <= 0` holds `current` (a paused frame never moves the camera).
-///
-/// ```rust
-/// use repame_sprite::smooth_toward;
-///
-/// let p = smooth_toward([0.0, 0.0], [100.0, 0.0], 5.0, 0.016);
-/// assert!(p[0] > 0.0 && p[0] < 100.0);
-/// ```
-pub fn smooth_toward(current: [f32; 2], target: [f32; 2], speed: f32, dt: f32) -> [f32; 2] {
-    if dt <= 0.0 {
-        return current;
-    }
-    if speed <= 0.0 || !speed.is_finite() {
-        return target;
-    }
-    let t = 1.0 - (-speed * dt).exp();
-    [
-        current[0] + (target[0] - current[0]) * t,
-        current[1] + (target[1] - current[1]) * t,
-    ]
-}
+/// Scroll limits and follow smoothing live in `game_utils_repame::feel`
+/// (`CameraLimits`, `apply_limits`, `smooth_toward`): they are game-side
+/// snapshot-production math, not renderer internals. This crate only
+/// frames what the snapshot already contains.
 
 impl Camera2d {
     /// Effective look point: `center + offset`.
@@ -760,9 +680,10 @@ fn rgba8(c: [f32; 4]) -> Color {
 /// ([`ActorFrame`]); the viewport, picks, and actor surfaces therefore
 /// share one transform by construction.
 ///
-/// Canvas note: the canvas path draws debug solids (axis-aligned bounding
-/// boxes of the snapshot quads). Rotated sprites are exact on the GPU
-/// viewport; on canvas they draw as their AABB with a debug assert.
+/// Canvas note: sprites draw through the shared [`effective_fit`]
+/// framing; rotation rides the upstream transform stack
+/// (`DrawScope::draw_rect_rotated`), so rotated sprites are exact on
+/// canvas and GPU alike.
 #[allow(non_snake_case)] // Repose view convention (cf. resims `Viewport3d`).
 pub fn Viewport2d(
     input: FrameInput,
@@ -886,42 +807,39 @@ pub fn Viewport2d(
             );
         }
         for spr in draw_input.sprites.iter() {
-            if spr.rotation.abs() > 1e-4 {
-                debug_assert!(
-                    false,
-                    "canvas viewport draws rotated sprites as AABB; use GPU viewport for exact rotation"
-                );
-            }
-            let (row0, row1) = batch::instance_rows(
-                [spr.center.x, spr.center.y],
-                [spr.size.x, spr.size.y],
-                spr.rotation,
-                [spr.anchor.x, spr.anchor.y],
-                spr.flip_x,
-                spr.flip_y,
-            );
-            let mut min_x = f32::INFINITY;
-            let mut min_y = f32::INFINITY;
-            let mut max_x = f32::NEG_INFINITY;
-            let mut max_y = f32::NEG_INFINITY;
-            for corner in [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]] {
-                let wx = row0[0] * corner[0] + row0[1] * corner[1] + row0[3];
-                let wy = row1[0] * corner[0] + row1[1] * corner[1] + row1[3];
-                let [px, py] = project(wx, wy);
-                min_x = min_x.min(px);
-                min_y = min_y.min(py);
-                max_x = max_x.max(px);
-                max_y = max_y.max(py);
-            }
-            scope.draw_rect(
+            // Exact rotation via the upstream transform stack
+            // (`draw_rect_rotated`): draw the unrotated, mirror-adjusted
+            // quad, rotated in px about the projected center. The world→px
+            // map is a uniform scale (`px_per_world`) plus `cam.roll`, so
+            // the rect origin is `pivot - anchor * size * k` (built from
+            // the pivot, never projected through roll twice) and the angle
+            // is always `roll + rotation`: mirroring is fully captured by
+            // the mirrored anchor rect as a set, commuting with rotation.
+            // Matches `batch::instance_rows` (R(θ) after mirror, anchor
+            // pinned at `center`) and the GPU batch pixel-for-pixel.
+            let px_per_world = fit.0 * d;
+            let [px, py] = project(spr.center.x, spr.center.y);
+            let ax = if spr.flip_x {
+                1.0 - spr.anchor.x
+            } else {
+                spr.anchor.x
+            };
+            let ay = if spr.flip_y {
+                1.0 - spr.anchor.y
+            } else {
+                spr.anchor.y
+            };
+            scope.draw_rect_rotated(
                 Rect {
-                    x: min_x,
-                    y: min_y,
-                    w: (max_x - min_x).max(0.0),
-                    h: (max_y - min_y).max(0.0),
+                    x: px - ax * spr.size.x * px_per_world,
+                    y: py - ay * spr.size.y * px_per_world,
+                    w: (spr.size.x * px_per_world).max(0.0),
+                    h: (spr.size.y * px_per_world).max(0.0),
                 },
                 rgba8(spr.color),
                 Px(0.0),
+                cam.roll + spr.rotation,
+                repose_core::Vec2 { x: px, y: py },
             );
         }
         for t in draw_input.texts.iter() {
@@ -1663,6 +1581,75 @@ mod tests {
     }
 
     #[test]
+    fn canvas_rotated_rect_matches_instance_rows() {
+        // The canvas path draws the unrotated mirror-adjusted quad plus a
+        // px-space rotation; the GPU path draws `instance_rows` corners.
+        // Both must land on the same px corners (compared as sets) for
+        // rotation x flip x anchor x camera-roll combinations.
+        let cam = Camera2d {
+            center: Vec2::new(400.0, 300.0),
+            offset: Vec2::ZERO,
+            units_per_pixel: 1.0,
+            zoom: 1.0,
+            roll: 0.3,
+        };
+        let world_size = [800.0, 600.0];
+        let canvas_dp = [800.0, 600.0];
+        let fit = effective_fit(canvas_dp, world_size, &cam);
+        let center = cam.effective_center();
+        let project = |wx: f32, wy: f32| -> [f32; 2] {
+            world_to_dp_with_roll([wx, wy], world_size, center, fit, cam.roll)
+        };
+        let k = fit.0;
+        for (rotation, flip_x, flip_y, anchor) in [
+            (0.7f32, false, false, [0.5, 0.5]),
+            (0.7, true, false, [0.5, 0.5]),
+            (0.7, false, true, [0.5, 0.5]),
+            (0.7, true, true, [0.5, 0.5]),
+            (-1.2, true, false, [0.0, 0.0]),
+            (2.1, false, true, [1.0, 0.25]),
+            (0.0, true, false, [0.5, 0.5]),
+        ] {
+            let size = [64.0f32, 40.0];
+            let ctr = [400.0f32, 300.0];
+            // GPU reference: instance_rows corners through the projection.
+            let (row0, row1) = batch::instance_rows(ctr, size, rotation, anchor, flip_x, flip_y);
+            let mut expect = [[0.0f32; 2]; 4];
+            for (i, corner) in [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
+                .iter()
+                .enumerate()
+            {
+                let wx = row0[0] * corner[0] + row0[1] * corner[1] + row0[3];
+                let wy = row1[0] * corner[0] + row1[1] * corner[1] + row1[3];
+                expect[i] = project(wx, wy);
+            }
+            // Canvas path: mirror-adjusted rect about the pivot, rotated
+            // by roll + rotation. Mirroring is captured by the rect as a
+            // set, so the angle never negates (it commutes).
+            let ax = if flip_x { 1.0 - anchor[0] } else { anchor[0] };
+            let ay = if flip_y { 1.0 - anchor[1] } else { anchor[1] };
+            let [px, py] = project(ctr[0], ctr[1]);
+            let angle = cam.roll + rotation;
+            let (c, s) = (angle.cos(), angle.sin());
+            let (ox, oy) = (px - ax * size[0] * k, py - ay * size[1] * k);
+            let w = size[0] * k;
+            let h = size[1] * k;
+            for (i, corner) in [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]].iter().enumerate() {
+                let rx = px + (ox + corner[0] - px) * c - (oy + corner[1] - py) * s;
+                let ry = py + (ox + corner[0] - px) * s + (oy + corner[1] - py) * c;
+                let mut best = f32::INFINITY;
+                for e in expect {
+                    best = best.min((rx - e[0]).hypot(ry - e[1]));
+                }
+                assert!(
+                    best < 1e-2,
+                    "rot={rotation} flip=({flip_x},{flip_y}) anchor={anchor:?}: corner {i} ({rx},{ry}) matches none of {expect:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     #[allow(deprecated)]
     fn camera_guards_never_div_by_zero() {
         let bad = Camera2d {
@@ -1782,44 +1769,6 @@ mod tests {
         // Offset 10 world units at scale 1 moves the drawing by 10 dp.
         assert!((dp[0] - dp2[0] + 10.0).abs() < 1e-4);
         assert!((dp[1] - dp2[1] - 10.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn limits_clamp_center_not_offset() {
-        let limits = CameraLimits {
-            left: 100.0,
-            top: 100.0,
-            right: 700.0,
-            bottom: 500.0,
-            enabled: true,
-        };
-        assert_eq!(apply_limits([50.0, 300.0], limits), [100.0, 300.0]);
-        assert_eq!(apply_limits([400.0, 900.0], limits), [400.0, 500.0]);
-        assert_eq!(apply_limits([400.0, 300.0], limits), [400.0, 300.0]);
-        assert_eq!(
-            apply_limits(
-                [50.0, 50.0],
-                CameraLimits {
-                    enabled: false,
-                    ..limits
-                }
-            ),
-            [50.0, 50.0]
-        );
-    }
-
-    #[test]
-    fn smoothing_converges_without_overshoot() {
-        let target = [100.0, 0.0];
-        let p1 = smooth_toward([0.0, 0.0], target, 5.0, 0.016);
-        assert!(p1[0] > 0.0 && p1[0] < 100.0, "eases forward, got {p1:?}");
-        let mut p = [0.0, 0.0];
-        for _ in 0..600 {
-            p = smooth_toward(p, target, 5.0, 0.016);
-        }
-        assert!((p[0] - 100.0).abs() < 1e-2, "settles, got {p:?}");
-        assert_eq!(smooth_toward([1.0, 2.0], target, 0.0, 0.016), target);
-        assert_eq!(smooth_toward([1.0, 2.0], target, 5.0, 0.0), [1.0, 2.0]);
     }
 
     #[test]

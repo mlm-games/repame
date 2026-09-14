@@ -20,8 +20,9 @@ Pattern initially tested using [resims](https://github.com/mlm-games/resims)'s o
 | `repame-actors` | Live vector actors (`.ren` rigs via `renamite-player`). |
 | `repame-fx` | Sim-side particles, trauma shake, flash, floaters, transitions. |
 | `repame-input` | Leafwing-shaped action map / `ActionState` edges-at-tick-end. |
+| `repame-view3d` | 3D viewport: orbit `Camera3d`, mesh snapshots, depth-tested wgpu pass. Long-term foundation (flat-shaded for now; glTF/skinning/PBR later). |
 
-Planned, not yet scaffolded: `repame-view3d` (glTF/skinning/PBR viewport for rustbox, and for more 3D games later). Should be usable externally too, but do consider, that it is in a very early phase, and might have many bugs (though the api might not change heavily)
+Planned, not yet scaffolded: physics bridge, glTF/skinning/PBR, chunk mesher (all plug in behind `repame-view3d`'s `MeshGroup` / `Frame3d`).
 
 # Internal notes
 

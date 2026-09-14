@@ -46,6 +46,7 @@ renamite-player-ui = { path = "../renamite/crates/renamite-player-ui", version =
 renamite-render-bridge = { path = "../renamite/crates/renamite-render-bridge", version = "0.2" }
 
 repame-sim = { path = "crates/repame-sim", version = "0.2.0" }
+repame-view3d = { path = "crates/repame-view3d", version = "0.2.0" }
 repame-atlas = { path = "crates/repame-atlas", version = "0.2.0" }
 repame-anim = { path = "crates/repame-anim", version = "0.2.0" }
 repame-audio = { path = "crates/repame-audio", version = "0.2.0" }

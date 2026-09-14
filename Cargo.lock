@@ -3445,6 +3445,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "repame-view3d"
+version = "0.2.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.7",
+ "log",
+ "repose-core",
+ "repose-render-wgpu",
+ "repose-ui",
+ "wgpu",
+]
+
+[[package]]
 name = "repose-app"
 version = "0.30.4"
 dependencies = [
@@ -3498,6 +3511,7 @@ dependencies = [
 name = "repose-navigation"
 version = "0.30.4"
 dependencies = [
+ "log",
  "repose-core",
  "repose-ui",
  "serde",

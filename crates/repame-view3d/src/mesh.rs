@@ -90,6 +90,8 @@ pub struct MeshGroup {
     /// color (shading already baked per face by the producer, see
     /// [`shade_for_dir`]); with normals it is the albedo the light
     /// modulates. With uvs the texture sample multiplies this first.
+    /// glTF `COLOR_0` multiplies in here at import (see
+    /// [`apply_vertex_colors`](super::gltf::apply_vertex_colors)).
     ///
     /// Hazard: uvs without an uploaded page read empty texels (the batch
     /// texture array starts zeroed, so the sample is black with alpha 0 —

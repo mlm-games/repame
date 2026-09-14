@@ -76,11 +76,12 @@ fn view_bytes<'d, 'b>(
     Some((Some(mime_type.to_string()), bytes))
 }
 
-/// Decode one image's bytes to tight sRGB RGBA8. Accepts PNG/JPEG by magic
-/// bytes (the file's MIME label only selects between the two when both
-/// fail to match — mislabeled views still decode). Anything else is
+/// Decode one image's bytes to tight sRGB RGBA8. Accepts PNG/JPEG/WebP
+/// by magic bytes (the file's MIME label only selects between them when
+/// all fail to match — mislabeled views still decode). Anything else is
 /// [`ImageSkip::UnsupportedEncoding`]; loader rejections are
-/// [`ImageSkip::DecodeFailed`].
+/// [`ImageSkip::DecodeFailed`]. WebP covers Godot exports that embed
+/// `image/webp` buffer views.
 pub fn decode_image_bytes(
     bytes: &[u8],
     mime_type: Option<&str>,
@@ -94,9 +95,10 @@ pub fn decode_image_bytes(
         .or(match mime_type {
             Some("image/png") => Some(ImageFormat::Png),
             Some("image/jpeg") => Some(ImageFormat::Jpeg),
+            Some("image/webp") => Some(ImageFormat::WebP),
             _ => None,
         })
-        .filter(|f| matches!(f, ImageFormat::Png | ImageFormat::Jpeg))
+        .filter(|f| matches!(f, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP))
         .ok_or(ImageSkip::UnsupportedEncoding)?;
     let decoded =
         image::load_from_memory_with_format(bytes, format).map_err(|_| ImageSkip::DecodeFailed)?;
@@ -401,8 +403,26 @@ mod tests {
     }
 
     #[test]
+    fn webp_view_decodes_to_rgba() {
+        let rgba = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+        let mut out = Vec::new();
+        {
+            let enc = image::codecs::webp::WebPEncoder::new_lossless(&mut out);
+            use image::ImageEncoder;
+            enc.write_image(rgba.as_raw(), 1, 1, image::ExtendedColorType::Rgba8)
+                .expect("encode 1x1 webp");
+        }
+        let (w, h, px) = decode_image_bytes(&out, Some("image/webp")).expect("webp decodes");
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(px.as_slice(), &[255, 0, 0, 255]);
+        assert_eq!(
+            decode_image_bytes(b"nope, not webp at all...........", None),
+            Err(ImageSkip::UnsupportedEncoding)
+        );
+    }
+
+    #[test]
     fn mime_less_view_skips() {
-        // Buffer-view images without a MIME label are invalid glTF (the
         // spec requires it, and `gltf::Image::source` unwraps it): the
         // importer skips instead of panicking the host app.
         let png = red_png();
@@ -546,10 +566,55 @@ mod tests {
     }
 
     #[test]
+    fn texture_transform_maps_uvs_before_flip() {
+        let png = red_green_png();
+        let mut bin: Vec<u8> = Vec::new();
+        for p in [
+            [-1f32, 0.0, -1.0],
+            [-1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 0.0, -1.0],
+        ] {
+            bin.extend_from_slice(bytemuck::cast_slice(&p));
+        }
+        for uv in [[0f32, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]] {
+            bin.extend_from_slice(bytemuck::cast_slice(&uv));
+        }
+        for i in [0u16, 1, 2, 0, 2, 3] {
+            bin.extend_from_slice(bytemuck::cast_slice(&[i]));
+        }
+        let geo_len = bin.len();
+        bin.extend_from_slice(&png);
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},"extensionsUsed":["KHR_texture_transform"],"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"TEXCOORD_0":1}},"indices":2,"material":0}}]}}],"materials":[{{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0,"extensions":{{"KHR_texture_transform":{{"offset":[0.5,0.0],"scale":[0.5,1.0]}}}}}}}}}}],"textures":[{{"source":0,"sampler":0}}],"samplers":[{{}}],"images":[{{"bufferView":3,"mimeType":"image/png"}}],"buffers":[{{"byteLength":{}}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":48}},{{"buffer":0,"byteOffset":48,"byteLength":32}},{{"buffer":0,"byteOffset":80,"byteLength":12}},{{"buffer":0,"byteOffset":{geo_len},"byteLength":{}}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[-1.0,0.0,-1.0],"max":[1.0,0.0,1.0]}},{{"bufferView":1,"componentType":5126,"count":4,"type":"VEC2"}},{{"bufferView":2,"componentType":5123,"count":6,"type":"SCALAR"}}]}}"#,
+            bin.len(),
+            png.len(),
+        );
+        let json_bytes = json.as_bytes();
+        let json_pad = (4 - json_bytes.len() % 4) % 4;
+        let bin_pad = (4 - bin.len() % 4) % 4;
+        let total = 12 + 8 + json_bytes.len() + json_pad + 8 + bin.len() + bin_pad;
+        let mut glb = Vec::with_capacity(total);
+        glb.extend_from_slice(&0x46546C67u32.to_le_bytes());
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&((json_bytes.len() + json_pad) as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        glb.extend_from_slice(json_bytes);
+        glb.extend_from_slice(&vec![0x20u8; json_pad]);
+        glb.extend_from_slice(&((bin.len() + bin_pad) as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E4942u32.to_le_bytes());
+        glb.extend_from_slice(&bin);
+        glb.extend_from_slice(&vec![0u8; bin_pad]);
+        let meshes = crate::import_slice(&glb).expect("transform fixture parses");
+        let g = &meshes[0].groups[0];
+        assert_eq!(g.uvs[0], [0.5, 1.0]);
+        assert_eq!(g.uvs[1], [0.5, 0.0]);
+        assert_eq!(g.uvs[2], [1.0, 0.0]);
+    }
+
+    #[test]
     fn missing_texture_strips_uvs_keeps_tint() {
-        // No material → untextured group: uvs exist (copied through) but no
-        // base image, so the textured import leaves them alone (nothing to
-        // strip — no texture was ever intended).
         let glb = textured_quad_gltf(&red_green_png(), 0, false);
         let imported = import_slice_textured(&glb, 4).expect("parses");
         let g = &imported.meshes[0].groups[0];

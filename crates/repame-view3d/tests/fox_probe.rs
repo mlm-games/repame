@@ -19,7 +19,7 @@ fn fox_probe() {
     // Hierarchy: Walk moves every vert through the composed tree.
     let a = &anims[1];
     let bind = m.pose(&vec![glam::Mat4::IDENTITY; m.joint_count()]);
-    assert_eq!(bind.tri_count(), 576);
+    assert_eq!(bind.tri_count(), 576, "fox is single-sided");
     let posed = m.pose(&a.joint_matrices(&skel, m, a.duration() / 2.0));
     let moved = posed
         .positions

@@ -40,17 +40,30 @@ pub fn alpha_mode(material: &gltf::Material<'_>) -> (bool, f32, f32) {
 }
 
 /// A primitive's surface material: glTF metallic/roughness factors plus
-/// the emissive factor, in [`MeshGroup`](super::mesh::MeshGroup) terms.
+/// the emissive factor (scaled by `KHR_materials_emissive_strength`), in
+/// [`MeshGroup`](super::mesh::MeshGroup) terms.
 /// Factors are file-authored (may exceed 1.0 for emissive pops); the batch
 /// clamps metallic/roughness into range at flatten time.
 pub fn material_of(material: &gltf::Material<'_>) -> super::mesh::Material {
     let pbr = material.pbr_metallic_roughness();
     let emissive = material.emissive_factor();
+    let strength = material.emissive_strength().unwrap_or(1.0);
     super::mesh::Material {
         metallic: pbr.metallic_factor(),
         roughness: pbr.roughness_factor(),
-        emissive: [emissive[0], emissive[1], emissive[2]],
+        emissive: [
+            emissive[0] * strength,
+            emissive[1] * strength,
+            emissive[2] * strength,
+        ],
     }
+}
+
+/// Whether the primitive draws on the unlit (flat) path:
+/// `KHR_materials_unlit` set. Unlit groups keep base-color tint/texture
+/// but skip the light entirely (like Godot's `shading_mode = unshaded`).
+pub fn is_unlit(material: &gltf::Material<'_>) -> bool {
+    material.unlit()
 }
 
 impl ImportedMesh {
@@ -162,15 +175,24 @@ fn import_primitive(
     if positions.is_empty() {
         return Err(ImportSkip::NoPositions);
     }
-    let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|it| it.collect());
-    // The material's base-color texcoord selects the UV set (usually 0).
-    // Reading the wrong set samples the wrong texture region — no silent
-    // fallback to set 0.
+    let normals: Vec<[f32; 3]> = reader
+        .read_normals()
+        .map(|it| it.collect())
+        .unwrap_or_default();
+    let normals: Option<Vec<[f32; 3]>> = if normals.is_empty() {
+        None
+    } else {
+        Some(normals)
+    };
     let tex_coord = prim
         .material()
         .pbr_metallic_roughness()
         .base_color_texture()
-        .map(|t| t.tex_coord())
+        .map(|t| {
+            t.texture_transform()
+                .and_then(|xf| xf.tex_coord())
+                .unwrap_or_else(|| t.tex_coord())
+        })
         .unwrap_or(0);
     let uvs: Option<Vec<[f32; 2]>> = reader
         .read_tex_coords(tex_coord)
@@ -197,18 +219,30 @@ fn import_primitive(
         Some(gltf::mesh::util::ReadIndices::U32(it)) => it.collect(),
         None => (0..positions.len() as u32).collect(),
     };
+    let double_sided = prim.material().double_sided();
     let indices: Vec<u32> = match prim.mode() {
         gltf::mesh::Mode::TriangleFan => fan_to_list(&file_indices),
         gltf::mesh::Mode::TriangleStrip => strip_to_list(&file_indices),
         _ => file_indices,
+    };
+    let indices = if double_sided {
+        let mut both = Vec::with_capacity(indices.len() * 2);
+        both.extend_from_slice(&indices);
+        for tri in indices.as_chunks::<3>().0 {
+            both.extend_from_slice(&[tri[0], tri[2], tri[1]]);
+        }
+        both
+    } else {
+        indices
     };
 
     let bc = prim.material().pbr_metallic_roughness().base_color_factor();
     let tint: [f32; 3] = [bc[0], bc[1], bc[2]];
     let (transparent, alpha, alpha_cutoff) = alpha_mode(&prim.material());
 
+    let unlit = is_unlit(&prim.material());
     let normal_mat = Mat4::from_quat(Quat::from_mat4(&world));
-    let lit = normals.is_some();
+    let lit = normals.as_ref().is_some_and(|ns| !ns.is_empty()) && !unlit;
     let textured = uvs.is_some();
 
     let mut group = MeshGroup {
@@ -243,9 +277,46 @@ fn import_primitive(
         }
     }
     if let Some(ts) = &uvs {
-        group.uvs.extend(ts.iter().map(|[u, v]| [*u, 1.0 - *v]));
+        let ts_owned: Option<Vec<[f32; 2]>> = prim
+            .material()
+            .pbr_metallic_roughness()
+            .base_color_texture()
+            .and_then(|i| i.texture_transform())
+            .map(|xf| {
+                let (ox, oy) = (xf.offset()[0], xf.offset()[1]);
+                let (sx, sy) = (xf.scale()[0], xf.scale()[1]);
+                let (s, c) = xf.rotation().sin_cos();
+                ts.iter()
+                    .map(|[u, v]| {
+                        let (x, y) = (u * sx, v * sy);
+                        [ox + c * x + s * y, oy - s * x + c * y]
+                    })
+                    .collect()
+            });
+        let ts_ref: &Vec<[f32; 2]> = ts_owned.as_ref().unwrap_or(ts);
+        group.uvs.extend(ts_ref.iter().map(|[u, v]| [*u, 1.0 - *v]));
     }
     group.indices.extend_from_slice(&indices);
+
+    if let Some(rgba) = reader.read_colors(0).map(|c| {
+        let v: Vec<[f32; 4]> = c.into_rgba_f32().collect();
+        v
+    }) {
+        if rgba.len() == group.colors.len() {
+            for (tint, vc) in group.colors.iter_mut().zip(rgba.iter()) {
+                tint[0] *= vc[0];
+                tint[1] *= vc[1];
+                tint[2] *= vc[2];
+                group.alpha *= vc[3];
+            }
+        } else {
+            log::warn!(
+                "gltf: COLOR_0 len {} != {} verts — skipping vertex colors",
+                rgba.len(),
+                group.colors.len()
+            );
+        }
+    }
 
     let count = group.positions.len();
     if group.indices.iter().any(|i| (*i as usize) >= count) {
@@ -438,5 +509,130 @@ mod tests {
             Err(ImportSkip::NonTriangleMode)
         );
         assert!(triangles_only(gltf::mesh::Mode::TriangleStrip).is_ok());
+    }
+
+    /// Quad fixture with COLOR_0 (u8 RGBA, Godot encoding): per-vert tint
+    /// multiplies the base factor, alpha channel scales group alpha.
+    fn color_quad_gltf() -> Vec<u8> {
+        let mut bin: Vec<u8> = Vec::new();
+        for p in [
+            [-1f32, 0.0, -1.0],
+            [-1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 0.0, -1.0],
+        ] {
+            bin.extend_from_slice(bytemuck::cast_slice(&p));
+        }
+        for c in [
+            [255u8, 255, 255, 255],
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [255, 255, 255, 128],
+        ] {
+            bin.extend_from_slice(&c);
+        }
+        for i in [0u16, 1, 2, 0, 2, 3] {
+            bin.extend_from_slice(bytemuck::cast_slice(&[i]));
+        }
+        let json = [
+            r#"{"asset":{"version":"2.0"},"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"COLOR_0":1},"indices":2,"material":0}]}],"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1.0,1.0,1.0,1.0]}}],"buffers":[{"byteLength":"#,
+            &bin.len().to_string(),
+            r#"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":48},{"buffer":0,"byteOffset":48,"byteLength":16},{"buffer":0,"byteOffset":64,"byteLength":12}],"accessors":[{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[-1.0,0.0,-1.0],"max":[1.0,0.0,1.0]},{"bufferView":1,"componentType":5121,"count":4,"type":"VEC4","normalized":true},{"bufferView":2,"componentType":5123,"count":6,"type":"SCALAR"}]}"#,
+        ]
+        .concat();
+        let json_bytes = json.as_bytes();
+        let json_pad = (4 - json_bytes.len() % 4) % 4;
+        let bin_pad = (4 - bin.len() % 4) % 4;
+        let total = 12 + 8 + json_bytes.len() + json_pad + 8 + bin.len() + bin_pad;
+        let mut glb = Vec::with_capacity(total);
+        glb.extend_from_slice(&0x46546C67u32.to_le_bytes());
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&((json_bytes.len() + json_pad) as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        glb.extend_from_slice(json_bytes);
+        glb.extend_from_slice(&vec![0x20u8; json_pad]);
+        glb.extend_from_slice(&((bin.len() + bin_pad) as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E4942u32.to_le_bytes());
+        glb.extend_from_slice(&bin);
+        glb.extend_from_slice(&vec![0u8; bin_pad]);
+        glb
+    }
+
+    #[test]
+    fn color_0_multiplies_tint_and_alpha() {
+        let meshes = import_slice(&color_quad_gltf()).expect("color fixture parses");
+        let g = &meshes[0].groups[0];
+        assert_eq!(g.colors.len(), 4);
+        assert_eq!(g.colors[0], [1.0, 1.0, 1.0], "white stays");
+        assert_eq!(g.colors[1], [1.0, 0.0, 0.0], "red multiplies");
+        assert_eq!(g.colors[2], [0.0, 1.0, 0.0], "green multiplies");
+        let expect = 128.0f32 / 255.0;
+        assert!(
+            (g.alpha - expect).abs() < 1e-3,
+            "alpha scaled by the 50% vert: {}",
+            g.alpha
+        );
+        assert!(g.normals.is_empty());
+    }
+
+    #[test]
+    fn double_sided_emits_reversed_winding_copy() {
+        let mut bin: Vec<u8> = Vec::new();
+        for p in [
+            [-1f32, 0.0, -1.0],
+            [-1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 0.0, -1.0],
+        ] {
+            bin.extend_from_slice(bytemuck::cast_slice(&p));
+        }
+        for i in [0u16, 1, 2, 0, 2, 3] {
+            bin.extend_from_slice(bytemuck::cast_slice(&[i]));
+        }
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1,"material":0}}]}}],"materials":[{{"doubleSided":true}}],"buffers":[{{"byteLength":{}}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":48}},{{"buffer":0,"byteOffset":48,"byteLength":12}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[-1.0,0.0,-1.0],"max":[1.0,0.0,1.0]}},{{"bufferView":1,"componentType":5123,"count":6,"type":"SCALAR"}}]}}"#,
+            bin.len()
+        );
+        let json_bytes = json.as_bytes();
+        let json_pad = (4 - json_bytes.len() % 4) % 4;
+        let bin_pad = (4 - bin.len() % 4) % 4;
+        let total = 12 + 8 + json_bytes.len() + json_pad + 8 + bin.len() + bin_pad;
+        let mut glb = Vec::with_capacity(total);
+        glb.extend_from_slice(&0x46546C67u32.to_le_bytes());
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&((json_bytes.len() + json_pad) as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        glb.extend_from_slice(json_bytes);
+        glb.extend_from_slice(&vec![0x20u8; json_pad]);
+        glb.extend_from_slice(&((bin.len() + bin_pad) as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E4942u32.to_le_bytes());
+        glb.extend_from_slice(&bin);
+        glb.extend_from_slice(&vec![0u8; bin_pad]);
+        let meshes = import_slice(&glb).expect("double-sided parses");
+        let g = &meshes[0].groups[0];
+        assert_eq!(g.tri_count(), 4, "front + reversed copy");
+        assert_eq!(&g.indices[0..6], &[0, 1, 2, 0, 2, 3]);
+        assert_eq!(&g.indices[6..12], &[0, 2, 1, 0, 3, 2]);
+    }
+
+    #[test]
+    fn unlit_material_skips_normals() {
+        let doc_json = r#"{"asset":{"version":"2.0"},"extensionsUsed":["KHR_materials_unlit"],"materials":[{"extensions":{"KHR_materials_unlit":{}}}],"scenes":[{"nodes":[]}]}"#;
+        let gltf = gltf::Gltf::from_slice_without_validation(&wrap_json(doc_json))
+            .expect("unlit fixture parses");
+        let mats: Vec<gltf::Material> = gltf.document.materials().collect();
+        assert_eq!(mats.len(), 1);
+        assert!(is_unlit(&mats[0]), "extension detected");
+    }
+
+    #[test]
+    fn emissive_strength_scales_emissive() {
+        let doc_json = r#"{"asset":{"version":"2.0"},"extensionsUsed":["KHR_materials_emissive_strength"],"materials":[{"emissiveFactor":[1.0,0.5,0.0],"extensions":{"KHR_materials_emissive_strength":{"emissiveStrength":3.0}}}],"scenes":[{"nodes":[]}]}"#;
+        let gltf = gltf::Gltf::from_slice_without_validation(&wrap_json(doc_json)).expect("parses");
+        let mats: Vec<gltf::Material> = gltf.document.materials().collect();
+        let m = material_of(&mats[0]);
+        assert_eq!(m.emissive, [3.0, 1.5, 0.0], "strength scales: {m:?}");
     }
 }

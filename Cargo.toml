@@ -14,8 +14,8 @@ rust-version = "1.98"
 
 [workspace.dependencies]
 bevy_ecs = "0.19"
-gltf = { version = "1.4", default-features = false, features = ["utils", "import", "names"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+gltf = { version = "1.4", default-features = false, features = ["utils", "import", "names", "KHR_materials_unlit", "KHR_materials_emissive_strength", "KHR_texture_transform"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # Repose UI shell (incl. the `gamepad` backend).
 repose-core = { path = "../repose/crates/repose-core", version = "0.30", features = ["serde"] }
 repose-ui = { path = "../repose/crates/repose-ui", version = "0.30" }

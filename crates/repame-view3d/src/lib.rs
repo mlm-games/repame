@@ -15,8 +15,9 @@
 //! groups opt in with [`MeshGroup::pick_id`]). Bone attachments ride
 //! [`attach_to_joint`](crate::attach_to_joint) (Godot `BoneAttachment3D`:
 //! rigid props fixed to animated joints). Base-color textures decode from
-//! embedded buffer views ([`textures`]: PNG/JPEG by magic bytes, one image
-//! per array layer, aspect-preserving downscale only) and link through each
+//! embedded buffer views ([`textures`]: PNG/JPEG/WebP by magic bytes, one
+//! image per array layer, aspect-preserving downscale only) and link
+//! through each
 //! primitive's material ([`import_slice_textured`]) — tint, texture,
 //! and light compose in that order; groups without pixels keep their tint
 //! (never an invisible discard). Transparency is a second pass

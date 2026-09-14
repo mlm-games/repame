@@ -957,32 +957,82 @@ pub fn import_skinned(bytes: &[u8]) -> Result<Vec<SkinnedMesh>, gltf::Error> {
                 }
                 None => (vec![Mat4::IDENTITY], HashMap::new(), vec![usize::MAX]),
             };
-            let normals: Vec<[f32; 3]> = reader
-                .read_normals()
-                .map(|it| it.collect())
-                .unwrap_or_default();
-            // Same texcoord rule as the static importer: the material's
-            // base-color texture selects the set, never silently set 0.
             let tex_coord = prim
                 .material()
                 .pbr_metallic_roughness()
                 .base_color_texture()
-                .map(|t| t.tex_coord())
+                .map(|t| {
+                    t.texture_transform()
+                        .and_then(|xf| xf.tex_coord())
+                        .unwrap_or_else(|| t.tex_coord())
+                })
                 .unwrap_or(0);
-            let uvs: Vec<[f32; 2]> = reader
+            let mut uvs: Vec<[f32; 2]> = reader
                 .read_tex_coords(tex_coord)
                 .map(|it| it.into_f32().collect())
                 .unwrap_or_default();
+            if !uvs.is_empty()
+                && let Some(xf) = prim
+                    .material()
+                    .pbr_metallic_roughness()
+                    .base_color_texture()
+                    .and_then(|i| i.texture_transform())
+            {
+                let (ox, oy) = (xf.offset()[0], xf.offset()[1]);
+                let (sx, sy) = (xf.scale()[0], xf.scale()[1]);
+                let (s, c) = xf.rotation().sin_cos();
+                for [u, v] in &mut uvs {
+                    let (x, y) = (*u * sx, *v * sy);
+                    (*u, *v) = (ox + c * x + s * y, oy - s * x + c * y);
+                }
+            }
             let indices: Vec<u32> = match reader.read_indices() {
                 Some(gltf::mesh::util::ReadIndices::U8(it)) => it.map(u32::from).collect(),
                 Some(gltf::mesh::util::ReadIndices::U16(it)) => it.map(u32::from).collect(),
                 Some(gltf::mesh::util::ReadIndices::U32(it)) => it.collect(),
                 None => (0..positions.len() as u32).collect(),
             };
+            let indices = if prim.material().double_sided() {
+                let mut both = Vec::with_capacity(indices.len() * 2);
+                both.extend_from_slice(&indices);
+                for tri in indices.as_chunks::<3>().0 {
+                    both.extend_from_slice(&[tri[0], tri[2], tri[1]]);
+                }
+                both
+            } else {
+                indices
+            };
             let bc = prim.material().pbr_metallic_roughness().base_color_factor();
-            let tint = [bc[0], bc[1], bc[2]];
-            let (transparent, alpha, alpha_cutoff) = super::gltf::alpha_mode(&prim.material());
-            // Same guarded link as the static importer (see `gltf.rs`).
+            let mut colors = vec![[bc[0], bc[1], bc[2]]; positions.len()];
+            let mut alpha = super::gltf::alpha_mode(&prim.material()).1;
+            if let Some(rgba) = reader
+                .read_colors(0)
+                .map(|c| c.into_rgba_f32().collect::<Vec<[f32; 4]>>())
+            {
+                if rgba.len() == colors.len() {
+                    for (tint, vc) in colors.iter_mut().zip(rgba.iter()) {
+                        tint[0] *= vc[0];
+                        tint[1] *= vc[1];
+                        tint[2] *= vc[2];
+                        alpha *= vc[3];
+                    }
+                } else {
+                    log::warn!(
+                        "gltf skin: COLOR_0 len {} != {} verts — skipping",
+                        rgba.len(),
+                        colors.len()
+                    );
+                }
+            }
+            let normals: Vec<[f32; 3]> = if super::gltf::is_unlit(&prim.material()) {
+                Vec::new()
+            } else {
+                reader
+                    .read_normals()
+                    .map(|it| it.collect())
+                    .unwrap_or_default()
+            };
+            let (transparent, _, alpha_cutoff) = super::gltf::alpha_mode(&prim.material());
             let base_image = prim
                 .material()
                 .pbr_metallic_roughness()
@@ -995,7 +1045,7 @@ pub fn import_skinned(bytes: &[u8]) -> Result<Vec<SkinnedMesh>, gltf::Error> {
                 });
             out.push(SkinnedMesh {
                 name: format!("skin_{}", mesh.index()),
-                colors: vec![tint; positions.len()],
+                colors,
                 positions,
                 normals,
                 uvs: uvs.iter().map(|[u, v]| [*u, 1.0 - *v]).collect(),
@@ -1554,7 +1604,7 @@ mod tests {
         assert_eq!(m.joint_count(), 9);
         let id = vec![Mat4::IDENTITY; m.joint_count()];
         let bind = m.pose(&id);
-        assert_eq!(bind.tri_count(), 715);
+        assert_eq!(bind.tri_count(), 715 * 2);
         let anims = import_animations(&bytes).expect("gnome anims parse");
         assert_eq!(anims.len(), 4);
         let a = &anims[0];

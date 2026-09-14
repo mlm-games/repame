@@ -12,6 +12,7 @@ repame-sim.workspace = true
 bevy_ecs.workspace = true
 repame-sprite.workspace = true
 repame-atlas.workspace = true
+repame-view3d.workspace = true
 repose-core.workspace = true
 rand.workspace = true
 noise.workspace = true

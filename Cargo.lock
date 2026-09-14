@@ -3471,6 +3471,7 @@ dependencies = [
  "repame-atlas",
  "repame-sim",
  "repame-sprite",
+ "repame-view3d",
  "repose-core",
  "serde",
 ]

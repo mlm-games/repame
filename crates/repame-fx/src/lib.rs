@@ -21,19 +21,30 @@
 //! headless-testable, identical on desktop/web/mobile.
 
 pub mod chroma;
+pub mod decals;
 pub mod effect;
 pub mod flash;
 pub mod numbers;
 pub mod particles;
+pub mod particles3d;
 pub mod transitions;
 pub mod trauma;
 
 pub use chroma::Chroma;
 
+pub use decals::{
+    Decal, DecalDef, blob_shadow, decal_groups, spawn_blob_shadow, spawn_decal, step_decals,
+};
 pub use effect::{EaseKind, EffectDef, Gradient, Jittered, SpawnerDef};
 pub use flash::Flash;
 pub use numbers::{DamageNumber, spawn_number, step_numbers};
-pub use particles::{Particle, Spawner, burst, particle_sprites, particle_sprites_with_white, step_particles, tick_spawners};
+pub use particles::{
+    Particle, Spawner, burst, particle_sprites, particle_sprites_with_white, step_particles,
+    tick_spawners,
+};
+pub use particles3d::{
+    Particle3, Spawner3, burst3, particle_groups, spawn_particle3, step_particles3, tick_spawners3,
+};
 pub use transitions::{TransitionFx, TransitionVisual, VORTEX_CUSTOM_ID};
 pub use trauma::Trauma;
 

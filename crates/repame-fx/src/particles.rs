@@ -218,9 +218,7 @@ pub fn particle_sprites_with_white<'a>(
     particle_sprites(particles)
         .into_iter()
         .map(|mut s| {
-            let full = s.uv_min == Vec2::ZERO
-                && s.uv_max == Vec2::ONE
-                && s.page == white.page;
+            let full = s.uv_min == Vec2::ZERO && s.uv_max == Vec2::ONE && s.page == white.page;
             if full {
                 s.uv_min = Vec2::from_array(white.min);
                 s.uv_max = Vec2::from_array(white.max);

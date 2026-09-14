@@ -14,10 +14,12 @@
 //! picking, and CPU mesh picking (ray vs groups through the same camera;
 //! groups opt in with [`MeshGroup::pick_id`]). Bone attachments ride
 //! [`attach_to_joint`](crate::attach_to_joint) (Godot `BoneAttachment3D`:
-//! rigid props fixed to animated joints). Textures plug into
-//! the same path: mesh groups carry uvs + one array page, and the batch
-//! owns the texture array (fed from per-frame uploads) — tint, texture,
-//! and light compose in that order. Transparency is a second pass
+//! rigid props fixed to animated joints). Base-color textures decode from
+//! embedded buffer views ([`textures`]: PNG/JPEG by magic bytes, one image
+//! per array layer, aspect-preserving downscale only) and link through each
+//! primitive's material ([`import_slice_textured`]) — tint, texture,
+//! and light compose in that order; groups without pixels keep their tint
+//! (never an invisible discard). Transparency is a second pass
 //! (alpha-blend, no depth writes, back-to-front after opaque), with a
 //! per-group cutoff for MASK-style cutouts; glTF alpha modes resolve via
 //! [`alpha_mode`]. Frustum culling drops fully-off-screen depth-tested
@@ -47,6 +49,7 @@ pub mod mesh;
 pub mod pick;
 pub mod render;
 pub mod skin;
+pub mod textures;
 pub mod viewport;
 
 pub use camera::{FAR, NEAR, OPENGL_TO_WGPU, OrbitCamera};
@@ -63,5 +66,9 @@ pub use skin::{
     Animation, Interp, JointPose, MorphSet, MorphTrack, NodePose, SkeletalAdvance, Skeleton,
     SkeletonLoop, SkeletonPlayer, SkinnedMesh, attach_to_joint, import_animations, import_morphs,
     import_skeleton, import_skinned,
+};
+pub use textures::{
+    ImageSkip, PlacedPage, TextureImage, TexturedImport, decode_document_images,
+    decode_image_bytes, decode_slice_images, import_slice_textured,
 };
 pub use viewport::{CLICK_SLOP_PX, Frame3d, GeomHandle, View3dEvent, Viewport3d, ViewportGeom};

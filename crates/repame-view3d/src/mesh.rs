@@ -5,6 +5,12 @@
 //! vertex/index/tint/normal/uv lists, so the GPU path stays stable while
 //! the asset side grows.
 //!
+//! Base-color textures arrive decoded ([`textures`](crate::textures)):
+//! groups carry the material's document image in [`base_image`](Self::base_image),
+//! resolved to [`texture_page`](Self::texture_page) with uvs scaled into
+//! the placed rect by [`import_slice_textured`](crate::import_slice_textured)
+//! (static) or [`assign_page`](crate::SkinnedMesh::assign_page) (skinned).
+//!
 //! Lighting is opt-in per group: groups without normals draw flat
 //! (backwards-compatible with the original flat path); groups with normals
 //! are shaded by the frame's [`SceneLight`](crate::SceneLight) as
@@ -84,6 +90,14 @@ pub struct MeshGroup {
     /// color (shading already baked per face by the producer, see
     /// [`shade_for_dir`]); with normals it is the albedo the light
     /// modulates. With uvs the texture sample multiplies this first.
+    ///
+    /// Hazard: uvs without an uploaded page read empty texels (the batch
+    /// texture array starts zeroed, so the sample is black with alpha 0 —
+    /// a fully transparent quad that discards). Importers therefore keep
+    /// `texture_page` at 0 and games assign the drained page after
+    /// uploading (see [`import_slice_textured`](super::gltf::import_slice_textured)).
+    /// Either upload the page or strip the uvs — never submit both
+    /// unassigned uvs and an empty page.
     pub colors: Vec<[f32; 3]>,
     /// Per-vertex normals (unit length, world space). Empty = unlit.
     pub normals: Vec<[f32; 3]>,
@@ -92,6 +106,13 @@ pub struct MeshGroup {
     pub uvs: Vec<[f32; 2]>,
     /// Texture array layer sampled when `uvs` is non-empty.
     pub texture_page: u32,
+    /// Document image index behind this group's base-color texture
+    /// (`None` = untextured material). Set by the glTF importers from the
+    /// material's base-color texture; the textured import
+    /// ([`import_slice_textured`](super::gltf::import_slice_textured))
+    /// resolves it to [`texture_page`](Self::texture_page) once the game
+    /// uploads the decoded pixels. Informational for procedural groups.
+    pub base_image: Option<usize>,
     /// Pick id for CPU ray picking (`0` = unpickable, skipped by
     /// [`pick_ray`](crate::pick_ray)). One id per group: scenes with one
     /// pickable object per group get per-object hits; bulk terrain stays
@@ -127,6 +148,7 @@ impl Default for MeshGroup {
             normals: Vec::new(),
             uvs: Vec::new(),
             texture_page: 0,
+            base_image: None,
             pick_id: 0,
             transparent: false,
             alpha: 1.0,

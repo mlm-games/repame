@@ -749,6 +749,12 @@ pub struct SkinnedMesh {
     pub node_to_joint: HashMap<usize, usize>,
     pub joint_nodes: Vec<usize>,
     pub texture_page: u32,
+    /// Document image index behind the base-color texture (`None` =
+    /// untextured material). Games resolve it through the textured import's
+    /// page map and call [`assign_page`](SkinnedMesh::assign_page) once —
+    /// the baked pose copies `texture_page` per frame, so the bind mesh is
+    /// the single place to set it.
+    pub base_image: Option<usize>,
     pub pick_id: u32,
     /// Alpha-blend pass (glTF `BLEND`).
     pub transparent: bool,
@@ -847,6 +853,26 @@ impl SkinnedMesh {
         }
         group
     }
+
+    /// Assign a packed texture page to the bind mesh: sets `texture_page`
+    /// and scales uvs into the placed rect (`placed_w`/`placed_h` inside a
+    /// `layer_size` layer at the origin). The baked pose copies both per
+    /// frame, so call once after import — never per frame. Uv-less meshes
+    /// only record the page (nothing to scale); callers with no pixels for
+    /// this mesh should clear `uvs` instead (see
+    /// [`import_slice_textured`](super::gltf::import_slice_textured)).
+    pub fn assign_page(&mut self, page: u32, placed_w: u32, placed_h: u32, layer_size: u32) {
+        self.texture_page = page;
+        if self.uvs.is_empty() || layer_size == 0 {
+            return;
+        }
+        let sx = placed_w as f32 / layer_size as f32;
+        let sy = placed_h as f32 / layer_size as f32;
+        for uv in &mut self.uvs {
+            uv[0] *= sx;
+            uv[1] *= sy;
+        }
+    }
 }
 
 /// Parse every skinned primitive in `bytes` into [`SkinnedMesh`]s (bind
@@ -935,8 +961,16 @@ pub fn import_skinned(bytes: &[u8]) -> Result<Vec<SkinnedMesh>, gltf::Error> {
                 .read_normals()
                 .map(|it| it.collect())
                 .unwrap_or_default();
+            // Same texcoord rule as the static importer: the material's
+            // base-color texture selects the set, never silently set 0.
+            let tex_coord = prim
+                .material()
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .map(|t| t.tex_coord())
+                .unwrap_or(0);
             let uvs: Vec<[f32; 2]> = reader
-                .read_tex_coords(0)
+                .read_tex_coords(tex_coord)
                 .map(|it| it.into_f32().collect())
                 .unwrap_or_default();
             let indices: Vec<u32> = match reader.read_indices() {
@@ -948,6 +982,17 @@ pub fn import_skinned(bytes: &[u8]) -> Result<Vec<SkinnedMesh>, gltf::Error> {
             let bc = prim.material().pbr_metallic_roughness().base_color_factor();
             let tint = [bc[0], bc[1], bc[2]];
             let (transparent, alpha, alpha_cutoff) = super::gltf::alpha_mode(&prim.material());
+            // Same guarded link as the static importer (see `gltf.rs`).
+            let base_image = prim
+                .material()
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .and_then(|t| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        t.texture().source().index()
+                    }))
+                    .ok()
+                });
             out.push(SkinnedMesh {
                 name: format!("skin_{}", mesh.index()),
                 colors: vec![tint; positions.len()],
@@ -961,6 +1006,7 @@ pub fn import_skinned(bytes: &[u8]) -> Result<Vec<SkinnedMesh>, gltf::Error> {
                 node_to_joint,
                 joint_nodes,
                 texture_page: 0,
+                base_image,
                 pick_id: 0,
                 transparent,
                 alpha,

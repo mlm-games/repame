@@ -69,13 +69,23 @@ impl ImportedMesh {
 /// major); normals use the inverse-transpose rotation only (uniform-scale
 /// safe — non-uniform scale renormalizes on the way out). One group per
 /// primitive; material base-color factor becomes the tint (textures stay
-/// game-decoded: uvs copy through verbatim).
+/// game-decoded: uvs copy through verbatim, `texture_page` stays 0 — see
+/// the hazard note on [`MeshGroup`](super::mesh::MeshGroup) `uvs`: push
+/// groups with uvs only after uploading their page, or use
+/// [`import_slice_textured`]).
 pub fn import_slice(bytes: &[u8]) -> Result<Vec<ImportedMesh>, gltf::Error> {
     let (doc, buffers, _) = gltf::import_slice(bytes)?;
     Ok(import_document(&doc, &buffers))
 }
 
-fn import_document(doc: &gltf::Document, buffers: &[gltf::buffer::Data]) -> Vec<ImportedMesh> {
+/// Scene-graph walk shared by [`import_slice`] and the textured import
+/// (which parses without image decoding so one bad/external image never
+/// sinks the geometry). Buffers come from [`gltf::import_buffers`] in both
+/// paths.
+pub(crate) fn import_document(
+    doc: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+) -> Vec<ImportedMesh> {
     let mut out = Vec::new();
     for scene in doc.scenes() {
         for node in scene.nodes() {
@@ -153,7 +163,33 @@ fn import_primitive(
         return Err(ImportSkip::NoPositions);
     }
     let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|it| it.collect());
-    let uvs: Option<Vec<[f32; 2]>> = reader.read_tex_coords(0).map(|it| it.into_f32().collect());
+    // The material's base-color texcoord selects the UV set (usually 0).
+    // Reading the wrong set samples the wrong texture region — no silent
+    // fallback to set 0.
+    let tex_coord = prim
+        .material()
+        .pbr_metallic_roughness()
+        .base_color_texture()
+        .map(|t| t.tex_coord())
+        .unwrap_or(0);
+    let uvs: Option<Vec<[f32; 2]>> = reader
+        .read_tex_coords(tex_coord)
+        .map(|it| it.into_f32().collect());
+    // Document image behind the base-color texture (`None` = untextured
+    // material). The textured import resolves this to `texture_page`.
+    // Guarded (never a panic on corrupt files): the geometry importer
+    // previously never touched textures, and a dangling texture/source
+    // index must not sink the mesh.
+    let base_image = prim
+        .material()
+        .pbr_metallic_roughness()
+        .base_color_texture()
+        .and_then(|t| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                t.texture().source().index()
+            }))
+            .ok()
+        });
 
     let file_indices: Vec<u32> = match reader.read_indices() {
         Some(gltf::mesh::util::ReadIndices::U8(it)) => it.map(u32::from).collect(),
@@ -181,6 +217,7 @@ fn import_primitive(
         alpha,
         alpha_cutoff,
         material: material_of(&prim.material()),
+        base_image,
         ..Default::default()
     };
     group.positions.reserve_exact(positions.len());

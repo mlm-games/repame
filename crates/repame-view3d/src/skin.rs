@@ -730,6 +730,11 @@ fn collect_skeleton(
 /// slots so animation tracks (keyed by node) drive the right matrices;
 /// `joint_nodes` is the inverse (joint slot -> node index) for hierarchy
 /// composition in [`Animation::joint_matrices`].
+///
+/// `transparent`/`alpha`/`alpha_cutoff` carry the material's alpha mode
+/// (see [`alpha_mode`](super::gltf::alpha_mode)): [`pose`](SkinnedMesh::pose)
+/// copies them into every baked group, so animated BLEND/MASK materials
+/// fade and cut out exactly like static ones.
 #[derive(Clone, Debug, Default)]
 pub struct SkinnedMesh {
     pub name: String,
@@ -745,6 +750,13 @@ pub struct SkinnedMesh {
     pub joint_nodes: Vec<usize>,
     pub texture_page: u32,
     pub pick_id: u32,
+    /// Alpha-blend pass (glTF `BLEND`).
+    pub transparent: bool,
+    /// Base-color alpha (group multiplier; glTF `BLEND` fades, `MASK`
+    /// gates on it when the texel is opaque).
+    pub alpha: f32,
+    /// Alpha cutoff (glTF `MASK` threshold; 0.0 = keep everything).
+    pub alpha_cutoff: f32,
     pub depth_test: bool,
 }
 
@@ -761,11 +773,18 @@ impl SkinnedMesh {
     /// `inverse_bind`) into a world-space [`MeshGroup`]. Normals rotate by
     /// the blended matrix's 3x3 and renormalize. Unweighted verts (all-zero
     /// weights) hold bind pose.
+    ///
+    /// Transparency/alpha/cutoff carry through from the bind mesh (usually
+    /// identity/opaque — see [`SkinnedMesh`] defaults); the group is
+    /// otherwise rebuilt per frame from the pose.
     pub fn pose(&self, joint_matrices: &[Mat4]) -> MeshGroup {
         let mut group = MeshGroup {
             texture_page: self.texture_page,
             pick_id: self.pick_id,
             depth_test: self.depth_test,
+            transparent: self.transparent,
+            alpha: self.alpha,
+            alpha_cutoff: self.alpha_cutoff,
             ..Default::default()
         };
         if self.is_empty() {
@@ -925,6 +944,7 @@ pub fn import_skinned(bytes: &[u8]) -> Result<Vec<SkinnedMesh>, gltf::Error> {
             };
             let bc = prim.material().pbr_metallic_roughness().base_color_factor();
             let tint = [bc[0], bc[1], bc[2]];
+            let (transparent, alpha, alpha_cutoff) = super::gltf::alpha_mode(&prim.material());
             out.push(SkinnedMesh {
                 name: format!("skin_{}", mesh.index()),
                 colors: vec![tint; positions.len()],
@@ -939,6 +959,9 @@ pub fn import_skinned(bytes: &[u8]) -> Result<Vec<SkinnedMesh>, gltf::Error> {
                 joint_nodes,
                 texture_page: 0,
                 pick_id: 0,
+                transparent,
+                alpha,
+                alpha_cutoff,
                 depth_test: true,
             });
         }
@@ -1370,6 +1393,7 @@ mod tests {
             texture_page: 0,
             pick_id: 3,
             depth_test: true,
+            ..Default::default()
         }
     }
 

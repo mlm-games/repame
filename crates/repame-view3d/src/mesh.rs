@@ -34,7 +34,14 @@ pub type Rgb = [f32; 3];
 /// When present it must match `positions` in length and `texture_page`
 /// selects the batch texture array layer; the texel multiplies the tint
 /// (then lighting applies to the product).
-#[derive(Clone, Debug, Default)]
+///
+/// Transparency is per group (never per vertex): `transparent` selects
+/// the alpha-blend pass (no depth writes, back-to-front after all opaque
+/// groups); `alpha` scales every fragment's alpha (uniform fades like
+/// ghost previews); `alpha_cutoff` discards below a threshold (glTF
+/// `MASK`). All three default to opaque, so existing groups compile and
+/// draw untouched.
+#[derive(Clone, Debug)]
 pub struct MeshGroup {
     /// World-space positions, Y-up right-handed.
     pub positions: Vec<[f32; 3]>,
@@ -55,12 +62,42 @@ pub struct MeshGroup {
     /// pickable object per group get per-object hits; bulk terrain stays
     /// `0` and uses ground-plane picks instead.
     pub pick_id: u32,
+    /// Alpha-blend pass (`true`) or opaque pass (`false`, default).
+    /// Transparent groups skip depth writes but still depth-test, and
+    /// draw back-to-front after every opaque group.
+    pub transparent: bool,
+    /// Group alpha multiplier (0..1, default 1.0). Multiplies the texel
+    /// alpha for textured groups; fades untextured groups uniformly.
+    /// The opaque pass still writes 1.0 out, but `alpha_cutoff` below
+    /// gates on this value in both passes.
+    pub alpha: f32,
+    /// Alpha cutoff (default 0.0 = keep everything). Fragments whose
+    /// final alpha falls below this discard, in both passes.
+    pub alpha_cutoff: f32,
     /// Triangle indices into `positions` / `colors` / `normals` / `uvs`.
     pub indices: Vec<u32>,
     /// Opaque geometry occludes (`true`) or always draws (`false`, e.g.
     /// flat ground overlays and editor gizmo quads that must stay visible
     /// under grazing angles).
     pub depth_test: bool,
+}
+
+impl Default for MeshGroup {
+    fn default() -> Self {
+        Self {
+            positions: Vec::new(),
+            colors: Vec::new(),
+            normals: Vec::new(),
+            uvs: Vec::new(),
+            texture_page: 0,
+            pick_id: 0,
+            transparent: false,
+            alpha: 1.0,
+            alpha_cutoff: 0.0,
+            indices: Vec::new(),
+            depth_test: false,
+        }
+    }
 }
 
 impl MeshGroup {
@@ -70,6 +107,29 @@ impl MeshGroup {
 
     pub fn tri_count(&self) -> usize {
         self.indices.len() / 3
+    }
+
+    /// AABB of `positions` as `(min, max)`, or `None` when empty or
+    /// non-finite. NaN poisons every ordering, so finiteness is named
+    /// explicitly — the same never-panic contract as the batch validator.
+    /// Shared by frustum culling ([`SceneBatch`](super::render::SceneBatch))
+    /// and CPU picking ([`group_bounds`](super::pick::group_bounds)).
+    pub fn bounds(&self) -> Option<([f32; 3], [f32; 3])> {
+        let mut verts = self.positions.iter();
+        let first = Vec3::from(*verts.next()?);
+        let mut min = first;
+        let mut max = first;
+        for p in verts {
+            let v = Vec3::from(*p);
+            min = min.min(v);
+            max = max.max(v);
+        }
+        if min.is_finite() && max.is_finite() && min.x <= max.x && min.y <= max.y && min.z <= max.z
+        {
+            Some((min.into(), max.into()))
+        } else {
+            None
+        }
     }
 
     /// Push one triangle (counter-clockwise when viewed from outside).

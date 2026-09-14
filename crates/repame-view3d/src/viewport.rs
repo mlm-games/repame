@@ -450,6 +450,7 @@ impl WgpuCallback for GpuViewport3d {
         let desc = self.effective_desc();
         let mut batch = SceneBatch::with_desc(self.batch_id.clone(), desc);
         batch.set_camera(self.input.cam.view_proj(aspect));
+        batch.set_camera_pos(self.input.cam.eye().into());
         batch.set_light(self.input.light);
         for g in &self.input.groups {
             batch.push_group(g);

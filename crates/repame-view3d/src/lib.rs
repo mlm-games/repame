@@ -3,8 +3,8 @@
 //! Long-term companion to `repame-sprite`: games build a [`Frame3d`] per
 //! frame (plain data, cheap to rebuild during composition) and mount
 //! [`Viewport3d`] as a Repose view, which draws the mesh snapshot through
-//! a depth-tested wgpu pass and reports orbit gestures + ground picks back.
-//! Camera state lives in game signals, never in the renderer.
+//! a depth-tested wgpu pass and reports orbit gestures + mesh/ground picks
+//! back. Camera state lives in game signals, never in the renderer.
 //!
 //! Scope (full 3D, deeply — lands behind [`MeshGroup`] / [`Frame3d`]):
 //! flat-shaded and single-light lit indexed meshes with a real GPU depth
@@ -13,13 +13,18 @@
 //! [`MeshGroup::pick_id`]). Textures plug into
 //! the same path: mesh groups carry uvs + one array page, and the batch
 //! owns the texture array (fed from per-frame uploads) — tint, texture,
-//! and light compose in that order. glTF static import ([`gltf`]) and CPU
-//! skinning + animation tracks ([`skin`]) emit the same groups, so imported
-//! scenes compose with procedural ones; the chunk mesher plugs in behind
-//! [`ChunkCache`] / [`Frame3d`]. The renderer only ever sees
-//! vertex/index/tint/normal/uv lists, so the GPU path stays stable while
-//! the asset side grows. The resims `resims-view3d` starter scene (CPU
-//! painter sort, no depth) is the reference producer, not a dependency.
+//! and light compose in that order. Transparency is a second pass
+//! (alpha-blend, no depth writes, back-to-front after opaque), with a
+//! per-group cutoff for MASK-style cutouts; glTF alpha modes resolve via
+//! [`alpha_mode`]. Frustum culling drops fully-off-screen depth-tested
+//! groups before flattening (`groups_culled` reports the count). glTF
+//! static import ([`gltf`]) and CPU skinning + animation tracks ([`skin`])
+//! emit the same groups, so imported scenes compose with procedural ones;
+//! the chunk mesher plugs in behind [`ChunkCache`] / [`Frame3d`]. The
+//! renderer only ever sees vertex/index/tint/normal/uv lists, so the GPU
+//! path stays stable while the asset side grows. The resims
+//! `resims-view3d` starter scene (CPU painter sort, no depth) is the
+//! reference producer, not a dependency.
 //!
 //! ```ignore
 //! let mut frame = Frame3d::default();
@@ -43,7 +48,8 @@ pub mod viewport;
 pub use camera::{FAR, NEAR, OPENGL_TO_WGPU, OrbitCamera};
 pub use chunk::{ChunkCache, ChunkDraw, ChunkEntry, validate_group};
 pub use gltf::{
-    ImportSkip, ImportedMesh, fan_to_list, flatten_imported, import_slice, strip_to_list,
+    ImportSkip, ImportedMesh, alpha_mode, fan_to_list, flatten_imported, import_slice,
+    strip_to_list,
 };
 pub use mesh::{MeshGroup, Rgb, shade, shade_for_dir};
 pub use pick::{MeshHit, group_bounds, pick_ray, pick_screen, ray_aabb, ray_triangle};

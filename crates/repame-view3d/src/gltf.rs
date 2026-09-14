@@ -22,8 +22,21 @@ pub struct ImportedMesh {
     /// Node name (`mesh_{index}` fallback), for pick ids / debugging.
     pub name: String,
     /// Draw groups (one per primitive, world-space, lit when the source
-    /// had normals, tinted by the material base-color factor).
+    /// had normals, tinted by the material base-color factor, alpha mode
+    /// carried from [`alpha_mode`]).
     pub groups: Vec<MeshGroup>,
+}
+
+/// A primitive's alpha behavior: glTF `alphaMode` plus the resolved
+/// cutoff, in [`MeshGroup`] terms. `(transparent, alpha, alpha_cutoff)`.
+pub fn alpha_mode(material: &gltf::Material<'_>) -> (bool, f32, f32) {
+    use gltf::material::AlphaMode as M;
+    let bc = material.pbr_metallic_roughness().base_color_factor();
+    match material.alpha_mode() {
+        M::Opaque => (false, 1.0, 0.0),
+        M::Mask => (false, bc[3], material.alpha_cutoff().unwrap_or(0.5)),
+        M::Blend => (true, bc[3], 0.0),
+    }
 }
 
 impl ImportedMesh {
@@ -142,6 +155,7 @@ fn import_primitive(
 
     let bc = prim.material().pbr_metallic_roughness().base_color_factor();
     let tint: [f32; 3] = [bc[0], bc[1], bc[2]];
+    let (transparent, alpha, alpha_cutoff) = alpha_mode(&prim.material());
 
     let normal_mat = Mat4::from_quat(Quat::from_mat4(&world));
     let lit = normals.is_some();
@@ -149,6 +163,9 @@ fn import_primitive(
 
     let mut group = MeshGroup {
         depth_test: true,
+        transparent,
+        alpha,
+        alpha_cutoff,
         ..Default::default()
     };
     group.positions.reserve_exact(positions.len());
@@ -229,6 +246,23 @@ pub fn flatten_imported(meshes: &[ImportedMesh]) -> Vec<MeshGroup> {
 mod tests {
     use super::*;
 
+    /// Minimal JSON-only glTF container (no buffers): enough for material
+    /// / alpha-mode fixtures without rebuilding the binary quad.
+    pub(crate) fn wrap_json(json: &str) -> Vec<u8> {
+        let json_bytes = json.as_bytes();
+        let json_pad = (4 - json_bytes.len() % 4) % 4;
+        let total = 12 + 8 + json_bytes.len() + json_pad;
+        let mut glb = Vec::with_capacity(total);
+        glb.extend_from_slice(&0x46546C67u32.to_le_bytes()); // "glTF"
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&((json_bytes.len() + json_pad) as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes()); // "JSON"
+        glb.extend_from_slice(json_bytes);
+        glb.extend_from_slice(&vec![0x20u8; json_pad]);
+        glb
+    }
+
     fn quad_gltf() -> Vec<u8> {
         let mut bin: Vec<u8> = Vec::new();
         for p in [
@@ -305,6 +339,23 @@ mod tests {
     fn garbage_bytes_error_instead_of_panic() {
         assert!(import_slice(&[]).is_err());
         assert!(import_slice(&[0u8; 64]).is_err());
+    }
+
+    #[test]
+    fn alpha_modes_map_to_group_fields() {
+        // OPAQUE is the gltf default (no alphaMode key): opaque, full.
+        let glb = quad_gltf();
+        let meshes = import_slice(&glb).expect("fixture parses");
+        let g = &meshes[0].groups[0];
+        assert!(!g.transparent);
+        assert_eq!((g.alpha, g.alpha_cutoff), (1.0, 0.0));
+        // BLEND / MASK resolve directly (no fixture rebuild needed).
+        let doc_json = r#"{"asset":{"version":"2.0"},"materials":[{"alphaMode":"BLEND","alphaCutoff":0.3},{"alphaMode":"MASK"}],"scenes":[{"nodes":[]}]}"#;
+        let (doc, _, _) = gltf::import_slice(wrap_json(doc_json)).expect("material fixture parses");
+        let mats: Vec<gltf::Material> = doc.materials().collect();
+        assert_eq!(mats.len(), 2);
+        assert_eq!(alpha_mode(&mats[0]), (true, 1.0, 0.0));
+        assert_eq!(alpha_mode(&mats[1]), (false, 1.0, 0.5));
     }
 
     #[test]

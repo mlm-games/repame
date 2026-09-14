@@ -39,20 +39,9 @@ pub struct MeshHit {
 
 /// AABB of a group's positions, or `None` when empty or non-finite.
 pub fn group_bounds(group: &MeshGroup) -> Option<(Vec3, Vec3)> {
-    let mut verts = group.positions.iter();
-    let first = Vec3::from(*verts.next()?);
-    let mut min = first;
-    let mut max = first;
-    for p in verts {
-        let v = Vec3::from(*p);
-        min = min.min(v);
-        max = max.max(v);
-    }
-    if min.x <= max.x && min.y <= max.y && min.z <= max.z {
-        Some((min, max))
-    } else {
-        None // NaN extent: unpickable, never a panic
-    }
+    group
+        .bounds()
+        .map(|(min, max)| (Vec3::from(min), Vec3::from(max)))
 }
 
 /// Slab test: does the ray touch the box? Axis-parallel rays (near-zero

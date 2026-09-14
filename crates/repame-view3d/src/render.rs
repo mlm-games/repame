@@ -14,6 +14,12 @@
 //! Groups without uvs sample nothing; groups with uvs multiply the texel
 //! into the tint before lighting. `BatchDesc` matches the sprite batch
 //! shape (layer count + size + filter) so asset code reads the same.
+//!
+//! Frustum culling runs at group granularity in [`SceneBatch::finish`]
+//! (AABB vs the six view-projection planes, extracted per frame —
+//! `groups_culled` reports the count for HUDs). `depth_test = false`
+//! overlays (gizmos, decals) are never culled: they must draw even when
+//! their bounds sit off-screen.
 
 //! Flat-shaded 3D pass: world-space pos+color through a view-projection uniform.
 //! Lit groups add per-vertex normals and sample the frame light from the
@@ -44,6 +50,8 @@ struct VsOut {
     @location(3) uv: vec2<f32>,
     @location(4) tex_mix: f32,
     @location(5) page: f32,
+    @location(6) alpha: f32,
+    @location(7) cutoff: f32,
 };
 
 @vertex
@@ -55,6 +63,8 @@ fn vs_main(
     @location(4) uv: vec2<f32>,
     @location(5) tex_mix: f32,
     @location(6) page: f32,
+    @location(7) alpha: f32,
+    @location(8) cutoff: f32,
 ) -> VsOut {
     var out: VsOut;
     out.pos = camera.view_proj * vec4<f32>(pos, 1.0);
@@ -64,23 +74,31 @@ fn vs_main(
     out.uv = uv;
     out.tex_mix = tex_mix;
     out.page = page;
+    out.alpha = alpha;
+    out.cutoff = cutoff;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var base = in.color;
+    var alpha = in.alpha;
     if (in.tex_mix > 0.5) {
         let tex = textureSample(scene_tex, scene_smp, in.uv, i32(in.page + 0.5));
-        if (tex.a < 0.001) {
+        if (tex.a < 0.001 && in.cutoff < 0.001) {
             discard;
         }
         base = in.color * tex.rgb;
+        alpha = in.alpha * tex.a;
+    }
+    if (alpha < in.cutoff) {
+        discard;
     }
     let n = normalize(in.normal);
     let ndl = max(dot(n, camera.light_dir), 0.0);
     let lit = base * (camera.ambient + camera.light_color * (camera.diffuse * ndl));
-    return vec4<f32>(mix(base, lit, in.lit_flag), 1.0);
+    let rgb = mix(base, lit, in.lit_flag);
+    return vec4<f32>(rgb, alpha);
 }
 "#;
 
@@ -139,6 +157,8 @@ impl Default for SceneLight {
 /// one pipeline. Flat vertices carry a dummy up-normal and `lit = 0.0`
 /// (their baked color passes through untouched); untextured vertices
 /// carry a dummy uv and `tex_mix = 0.0` (no sampling, tint only).
+/// `alpha` is the group multiplier and `cutoff` the discard threshold
+/// (both per-vertex so one buffer serves all three alpha behaviors).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vert {
@@ -149,6 +169,8 @@ struct Vert {
     uv: [f32; 2],
     tex_mix: f32,
     page: f32,
+    alpha: f32,
+    cutoff: f32,
 }
 
 /// Texture sampling for batch layers (same shape as `repame-sprite`).
@@ -238,18 +260,30 @@ struct Pending {
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     texture_page: u32,
+    /// World-space AABB center (computed at push time) for back-to-front
+    /// transparent sorting. Opaque groups ignore it; `None` (degenerate
+    /// bounds — never happens post-validation, belt and braces) sorts
+    /// nearest.
+    center: Option<[f32; 3]>,
     indices: Vec<u32>,
+    transparent: bool,
+    alpha: f32,
+    alpha_cutoff: f32,
     depth_test: bool,
 }
 
 /// One draw call's layer: index range + whether depth testing applies.
-/// Groups flatten depth-tested-first, so tested geometry occludes and
-/// untested overlays (ground decals, gizmos) always draw.
+/// Groups flatten opaque-first (depth-tested, then flat overlays), then
+/// transparent back-to-front, so tested geometry occludes and untested
+/// overlays (ground decals, gizmos) always draw. Transparent ranges carry
+/// the blend pass; a `depth_test = false` transparent group composes
+/// without writing depth (HUD ghosts over the scene).
 #[derive(Clone, Copy)]
 struct DrawRange {
     index_start: u32,
     index_end: u32,
     depth_test: bool,
+    transparent: bool,
 }
 
 /// Per-frame snapshot batch. `Send + Sync` so it can cross into the
@@ -264,6 +298,19 @@ pub struct SceneBatch {
     id: String,
     desc: BatchDesc,
     camera: CameraUniform,
+    /// Camera world position for transparent back-to-front sorting
+    /// ([`SceneBatch::set_camera_pos`]). Defaults to the origin (stable,
+    /// documented) until the viewport feeds the real eye per frame.
+    camera_pos: [f32; 3],
+    /// View-projection matrix for frustum culling ([`SceneBatch::finish`]
+    /// extracts the six planes from it). Set alongside the uniform matrix
+    /// by [`SceneBatch::set_camera`]; identity disables culling (the
+    /// unit tests' default — they assert content preservation directly).
+    view_proj: Mat4,
+    /// Groups culled by the last [`SceneBatch::finish`] (frustum only —
+    /// malformed/degenerate drops are separate, counted nowhere by
+    /// design). HUD/stats readout, reset per `finish`.
+    culled: usize,
     pending: Vec<Pending>,
     uploads: Vec<SceneUpload>,
     verts: Vec<Vert>,
@@ -289,6 +336,9 @@ impl SceneBatch {
                 ambient: [0.35, 0.35, 0.38],
                 _pad1: 0.0,
             },
+            camera_pos: [0.0, 0.0, 0.0],
+            view_proj: Mat4::IDENTITY,
+            culled: 0,
             pending: Vec::new(),
             uploads: Vec::new(),
             verts: Vec::new(),
@@ -303,6 +353,20 @@ impl SceneBatch {
 
     pub fn set_camera(&mut self, view_proj: Mat4) {
         self.camera.view_proj = view_proj.to_cols_array_2d();
+        self.view_proj = view_proj;
+    }
+
+    /// Camera world position for transparent back-to-front sorting (see
+    /// [`SceneBatch::finish`]). The viewport feeds `cam.eye()` from the
+    /// same snapshot as the view-projection matrix, so sort order and
+    /// pixels share one camera.
+    pub fn set_camera_pos(&mut self, pos: [f32; 3]) {
+        self.camera_pos = pos;
+    }
+
+    /// Groups culled by the last [`SceneBatch::finish`].
+    pub fn culled(&self) -> usize {
+        self.culled
     }
 
     /// Frame light for lit groups. Flat groups ignore it entirely.
@@ -369,14 +433,22 @@ impl SceneBatch {
 
     /// Append one group. Malformed groups (index out of range, or
     /// position/color length mismatch, partial normals/uvs, page past the
-    /// batch layers) are dropped with a warning — never a panic, never
-    /// partial draws. Degenerate triangles (zero area, NaN) are culled
-    /// tri-by-tri so one bad triangle can't sink its group: the group draws
-    /// with the surviving triangles. Normals and uvs stay all-or-nothing
-    /// per group. Shares [`validate_group`](super::chunk::validate_group)
-    /// with the chunk cache so both paths agree on malformed.
+    /// batch layers, non-finite alpha) are dropped with a warning — never
+    /// a panic, never partial draws. Degenerate triangles (zero area, NaN)
+    /// are culled tri-by-tri so one bad triangle can't sink its group: the
+    /// group draws with the surviving triangles. Normals and uvs stay
+    /// all-or-nothing per group. Shares
+    /// [`validate_group`](super::chunk::validate_group) with the chunk
+    /// cache so both paths agree on malformed.
     pub fn push_group(&mut self, group: &MeshGroup) {
         if !super::chunk::validate_group(group) {
+            return;
+        }
+        if !group.alpha.is_finite() || !group.alpha_cutoff.is_finite() {
+            log::warn!(
+                "scene_batch[{}]: dropping group (non-finite alpha/cutoff)",
+                self.id,
+            );
             return;
         }
         if !group.uvs.is_empty() && group.texture_page >= self.desc.layers {
@@ -388,21 +460,76 @@ impl SceneBatch {
             );
             return;
         }
+        // AABB center now, while positions are borrowed: `finish` sorts
+        // transparent groups by it without re-walking vertices.
+        let center = group.bounds().map(|(min, max)| {
+            [
+                (min[0] + max[0]) * 0.5,
+                (min[1] + max[1]) * 0.5,
+                (min[2] + max[2]) * 0.5,
+            ]
+        });
         self.pending.push(Pending {
             positions: group.positions.clone(),
             colors: group.colors.clone(),
             normals: group.normals.clone(),
             uvs: group.uvs.clone(),
             texture_page: group.texture_page,
+            center,
             indices: cull_degenerate(&group.positions, &group.indices),
+            transparent: group.transparent,
+            alpha: group.alpha.clamp(0.0, 1.0),
+            alpha_cutoff: group.alpha_cutoff.clamp(0.0, 1.0),
             depth_test: group.depth_test,
         });
     }
 
-    /// Flatten pending groups into the draw buffers, depth-tested first.
-    /// Stable: submission order decides ties, so overlay order stays
-    /// deterministic. Split from [`push_group`] so the viewport payload,
-    /// which rebuilds the batch per frame, shares the path.
+    /// Extract the six frustum planes (world space, normalized) from a
+    /// view-projection matrix. Row-major extraction on the row vectors of
+    /// the column-major `Mat4`: `left = row3 + row0`, etc. (Gribb/Hartmann).
+    ///
+    /// Depth-convention note: the camera bakes `OPENGL_TO_WGPU`, so NDC
+    /// depth is `[0, 1]` (D3D-style), not OpenGL `[-1, 1]`. The side planes
+    /// are convention-free (`|x|,|y| <= w`), but near/far differ: near is
+    /// `row2` (`z >= 0`), far is `row3 - row2` (`z <= w`). Using the
+    /// OpenGL `row3 + row2` near plane here would accept everything (it
+    /// tests `w + z >= 0`, always true post-remap) — the tests pin the far
+    /// plane with a beyond-FAR slab, which only culls with this form.
+    fn frustum_planes(view_proj: &Mat4) -> [[f32; 4]; 6] {
+        let m = view_proj.to_cols_array_2d();
+        // Rows of the row-major view: row[i] = (m[0][i], m[1][i], ...).
+        let row = |i: usize| [m[0][i], m[1][i], m[2][i], m[3][i]];
+        let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+        let sub = |a: [f32; 4], b: [f32; 4]| [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]];
+        let add = |a: [f32; 4], b: [f32; 4]| [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]];
+        let mut planes = [
+            add(r3, r0), // left
+            sub(r3, r0), // right
+            add(r3, r1), // bottom
+            sub(r3, r1), // top
+            r2,          // near (D3D-style: z >= 0)
+            sub(r3, r2), // far (z <= w)
+        ];
+        for p in &mut planes {
+            let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+            if len > 1e-12 {
+                p[0] /= len;
+                p[1] /= len;
+                p[2] /= len;
+                p[3] /= len;
+            }
+        }
+        planes
+    }
+
+    /// Flatten pending groups into the draw buffers: opaque first
+    /// (depth-tested, then flat overlays — submission order decides ties),
+    /// then transparent back-to-front (camera distance of the AABB center;
+    /// groups without bounds sort nearest). Frustum culling drops fully
+    /// outside groups before flattening (`depth_test = false` overlays are
+    /// never culled — gizmos must draw even off-screen). Split from
+    /// [`push_group`] so the viewport payload, which rebuilds the batch
+    /// per frame, shares the path.
     ///
     /// Flat vertices (no normals) carry a dummy up-normal and `lit = 0.0`
     /// so the shader passes their baked color through untouched.
@@ -412,8 +539,41 @@ impl SceneBatch {
         self.verts.clear();
         self.indices.clear();
         self.ranges.clear();
-        self.pending.sort_by_key(|g| !g.depth_test);
+        self.culled = 0;
+        let planes = Self::frustum_planes(&self.view_proj);
+        let culling = self.view_proj != Mat4::IDENTITY;
+        let eye = glam::Vec3::from(self.camera_pos);
+        // Stable partition: opaque keep submission order; transparent sort
+        // back-to-front by AABB-center distance (descending). `sort_by`
+        // (stable) on a pre-partitioned vec keeps both contracts.
+        let mut opaque: Vec<Pending> = Vec::with_capacity(self.pending.len());
+        let mut transparent: Vec<(Pending, f32)> = Vec::new();
         for g in self.pending.drain(..) {
+            // Frustum culling (vertex-exact, only when the camera is real;
+            // `depth_test = false` overlays are never culled — gizmos must
+            // draw even off-screen).
+            if culling && g.depth_test && Self::group_outside(&planes, &g.positions) {
+                self.culled += 1;
+                continue;
+            }
+            if g.transparent {
+                let d = g
+                    .center
+                    .map(|c| (glam::Vec3::from(c) - eye).length_squared());
+                // `None` (degenerate bounds) sorts nearest: it draws last,
+                // on top — visible beats culled when the math gives up.
+                transparent.push((g, d.unwrap_or(-1.0)));
+            } else {
+                opaque.push(g);
+            }
+        }
+        transparent.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        opaque.sort_by_key(|g| !g.depth_test);
+        let ordered: Vec<Pending> = opaque
+            .into_iter()
+            .chain(transparent.into_iter().map(|(g, _)| g))
+            .collect();
+        for g in ordered {
             if g.indices.len() < 3 {
                 continue; // all triangles culled as degenerate: draw nothing
             }
@@ -435,6 +595,8 @@ impl SceneBatch {
                             uv: if textured { g.uvs[i] } else { [0.0, 0.0] },
                             tex_mix: if textured { 1.0 } else { 0.0 },
                             page,
+                            alpha: g.alpha,
+                            cutoff: g.alpha_cutoff,
                         }),
                 );
             let start = self.indices.len() as u32;
@@ -443,8 +605,34 @@ impl SceneBatch {
                 index_start: start,
                 index_end: self.indices.len() as u32,
                 depth_test: g.depth_test,
+                transparent: g.transparent,
             });
         }
+    }
+
+    /// True when every vertex of `positions` sits outside one frustum
+    /// plane. Vertex-exact (no AABB approximation): costs one walk per
+    /// group per frame, only when culling is armed (real camera). Groups
+    /// are small in practice (chunked terrain splits by material, agents
+    /// are single meshes) — and a wrongly-culled group is a missing
+    /// object, so exactness beats cleverness here.
+    fn group_outside(planes: &[[f32; 4]; 6], positions: &[[f32; 3]]) -> bool {
+        if positions.is_empty() {
+            return false;
+        }
+        for p in planes {
+            let mut all_out = true;
+            for v in positions {
+                if p[0] * v[0] + p[1] * v[1] + p[2] * v[2] + p[3] >= 0.0 {
+                    all_out = false;
+                    break;
+                }
+            }
+            if all_out {
+                return true;
+            }
+        }
+        false
     }
 
     pub(crate) fn ensure_resources(
@@ -630,9 +818,19 @@ impl SceneBatch {
                     offset: 52,
                     shader_location: 6,
                 },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 56,
+                    shader_location: 7,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 60,
+                    shader_location: 8,
+                },
             ],
         })];
-        let mk = |label: &'static str, depth_test: bool| {
+        let mk = |label: &'static str, depth_test: bool, transparent: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipe_layout),
@@ -647,7 +845,13 @@ impl SceneBatch {
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: screen.target_format,
-                        blend: Some(wgpu::BlendState::REPLACE),
+                        // Transparent pass blends source alpha over the
+                        // scene (ghosts, glass, water); opaque replaces.
+                        blend: Some(if transparent {
+                            wgpu::BlendState::ALPHA_BLENDING
+                        } else {
+                            wgpu::BlendState::REPLACE
+                        }),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -661,9 +865,12 @@ impl SceneBatch {
                 // Real depth: tested ranges occlude correctly; untested
                 // ranges still run inside the shared UI pass (Always) so
                 // the stencil contract the UI relies on is untouched.
+                // Transparent ranges never write depth (overlapping ghosts
+                // must not occlude each other) but still test it (a ghost
+                // behind a wall stays behind the wall).
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth24PlusStencil8,
-                    depth_write_enabled: Some(true),
+                    depth_write_enabled: Some(!transparent),
                     depth_compare: Some(if depth_test {
                         wgpu::CompareFunction::Less
                     } else {
@@ -693,8 +900,10 @@ impl SceneBatch {
         };
         let entry = SceneEntry {
             key,
-            pipeline_depth: mk("repame_view3d_depth", true),
-            pipeline_flat: mk("repame_view3d_flat", false),
+            pipeline_depth: mk("repame_view3d_depth", true, false),
+            pipeline_flat: mk("repame_view3d_flat", false, false),
+            pipeline_transparent: mk("repame_view3d_transparent", true, true),
+            pipeline_transparent_flat: mk("repame_view3d_transparent_flat", false, true),
             verts: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("repame_view3d_verts"),
                 size: 64,
@@ -827,10 +1036,10 @@ impl SceneBatch {
 
     /// Guard path shared by tests: run validation + flatten without a GPU.
     #[cfg(test)]
-    pub(crate) fn entry_ranges(&self) -> Vec<(u32, u32, bool)> {
+    pub(crate) fn entry_ranges(&self) -> Vec<(u32, u32, bool, bool)> {
         self.ranges
             .iter()
-            .map(|r| (r.index_start, r.index_end, r.depth_test))
+            .map(|r| (r.index_start, r.index_end, r.depth_test, r.transparent))
             .collect()
     }
 
@@ -848,12 +1057,20 @@ impl SceneBatch {
             .map(|v| (v.uv, v.tex_mix, v.page))
             .collect()
     }
+
+    /// Test-only vertex readout after [`finish`]: (alpha, cutoff).
+    #[cfg(test)]
+    pub(crate) fn test_vert_alpha(&self) -> Vec<(f32, f32)> {
+        self.verts.iter().map(|v| (v.alpha, v.cutoff)).collect()
+    }
 }
 
 struct SceneEntry {
     key: (wgpu::TextureFormat, u32, u32, u32, u32),
     pipeline_depth: wgpu::RenderPipeline,
     pipeline_flat: wgpu::RenderPipeline,
+    pipeline_transparent: wgpu::RenderPipeline,
+    pipeline_transparent_flat: wgpu::RenderPipeline,
     verts: wgpu::Buffer,
     vert_cap: usize,
     indices: wgpu::Buffer,
@@ -900,6 +1117,8 @@ pub fn prepare_scene_with_id(
         indices: wgpu::Buffer,
         pipeline_depth: wgpu::RenderPipeline,
         pipeline_flat: wgpu::RenderPipeline,
+        pipeline_transparent: wgpu::RenderPipeline,
+        pipeline_transparent_flat: wgpu::RenderPipeline,
         ranges: Vec<DrawRange>,
     }
     let snapshot: Option<Snapshot> = {
@@ -920,6 +1139,8 @@ pub fn prepare_scene_with_id(
             indices: res.indices.clone(),
             pipeline_depth: res.pipeline_depth.clone(),
             pipeline_flat: res.pipeline_flat.clone(),
+            pipeline_transparent: res.pipeline_transparent.clone(),
+            pipeline_transparent_flat: res.pipeline_transparent_flat.clone(),
             ranges: res.last_ranges.clone(),
         })
     };
@@ -933,10 +1154,11 @@ pub fn prepare_scene_with_id(
     pass.set_vertex_buffer(0, snap.verts.slice(..));
     pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
     for r in &snap.ranges {
-        pass.set_pipeline(if r.depth_test {
-            &snap.pipeline_depth
-        } else {
-            &snap.pipeline_flat
+        pass.set_pipeline(match (r.transparent, r.depth_test) {
+            (true, true) => &snap.pipeline_transparent,
+            (true, false) => &snap.pipeline_transparent_flat,
+            (false, true) => &snap.pipeline_depth,
+            (false, false) => &snap.pipeline_flat,
         });
         pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
     }
@@ -983,11 +1205,151 @@ mod tests {
         batch.finish();
         assert_eq!(batch.len_tris(), 1);
         assert!(!batch.is_empty());
-        assert_eq!(batch.entry_ranges(), vec![(0, 3, true)]);
+        assert_eq!(batch.entry_ranges(), vec![(0, 3, true, false)]);
         // Flat vertices pass through: dummy up-normal, lit 0.
         assert_eq!(batch.test_vert_lighting(), vec![([0.0, 1.0, 0.0], 0.0); 3]);
         // Untextured vertices skip the sample: dummy uv, mix 0.
         assert_eq!(batch.test_vert_texture(), vec![([0.0, 0.0], 0.0, 0.0); 3]);
+        // Opaque defaults: full alpha, no cutoff.
+        assert_eq!(batch.test_vert_alpha(), vec![(1.0, 0.0); 3]);
+        assert_eq!(batch.culled(), 0, "identity camera disables culling");
+    }
+
+    /// Off-screen groups vanish from the draw (frustum), on-screen groups
+    /// stay, and `depth_test = false` overlays survive anywhere. Culling
+    /// arms on a real camera: the identity-matrix default disables it so
+    /// unit tests without a camera assert content directly.
+    #[test]
+    fn frustum_culls_offscreen_groups() {
+        use super::super::camera::OrbitCamera;
+        use glam::Vec3;
+        let cam = OrbitCamera {
+            target: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.9,
+            dist: 30.0,
+            fov_y_deg: 30.0,
+        };
+        let aspect = 16.0 / 9.0;
+        // Visible: a slab under the camera (same shape as the picking
+        // fixtures — the center ray lands on it).
+        let mut near = MeshGroup {
+            depth_test: true,
+            ..Default::default()
+        };
+        near.push_box(0.0, 0.0, 0.0, 20.0, 2.0, 20.0, [1.0, 1.0, 1.0], cam.eye());
+        // Far outside: explicit quads 5000 units up (past FAR = 2000).
+        // Built with `push_quad`, not `push_box`: the box helper only
+        // emits camera-facing planes, so a far-away box emits nothing and
+        // would be dropped as empty before culling ever sees it.
+        let mut far = MeshGroup {
+            depth_test: true,
+            ..Default::default()
+        };
+        far.push_quad(
+            [-10.0, 5000.0, -10.0],
+            [10.0, 5000.0, -10.0],
+            [10.0, 5000.0, 10.0],
+            [-10.0, 5000.0, 10.0],
+            [1.0, 0.0, 0.0],
+        );
+        // Gizmo overlay at the same off-screen spot: never culled.
+        let mut gizmo = MeshGroup {
+            depth_test: false,
+            ..Default::default()
+        };
+        gizmo.push_quad(
+            [-1.0, 5000.0, -1.0],
+            [1.0, 5000.0, -1.0],
+            [1.0, 5000.0, 1.0],
+            [-1.0, 5000.0, 1.0],
+            [0.0, 1.0, 0.0],
+        );
+        let mut batch = SceneBatch::with_id("test.cull");
+        batch.set_camera(cam.view_proj(aspect));
+        batch.set_camera_pos(cam.eye().into());
+        let near_tris = near.tri_count();
+        batch.push_group(&near);
+        batch.push_group(&far);
+        batch.push_group(&gizmo);
+        batch.finish();
+        // near (depth-tested) + gizmo (flat overlay); far is gone.
+        assert_eq!(batch.culled(), 1, "exactly the off-screen slab culls");
+        assert_eq!(batch.len_tris(), near_tris + 2);
+        assert_eq!(
+            batch.entry_ranges(),
+            vec![
+                (0, near_tris as u32 * 3, true, false),
+                (near_tris as u32 * 3, near_tris as u32 * 3 + 6, false, false),
+            ]
+        );
+    }
+
+    /// Transparent groups flatten after every opaque group, back-to-front
+    /// by AABB-center distance from `camera_pos`. Opaque order is untouched
+    /// (depth-tested before flat overlays, submission order on ties).
+    #[test]
+    fn transparent_sorts_back_to_front_after_opaque() {
+        use glam::Vec3 as V3;
+        let eye = V3::new(0.0, 10.0, 30.0);
+        // Opaque slab at the origin.
+        let mut opaque = MeshGroup {
+            depth_test: true,
+            ..Default::default()
+        };
+        opaque.push_box(0.0, 0.0, 0.0, 2.0, 2.0, 2.0, [1.0, 1.0, 1.0], eye);
+        // Two ghosts on the same axis: far at z = -20, near at z = +10.
+        // Pushed near-first so the sort must reorder them.
+        let mut ghost_near = MeshGroup {
+            depth_test: true,
+            transparent: true,
+            alpha: 0.5,
+            ..Default::default()
+        };
+        ghost_near.push_box(0.0, 0.0, 10.0, 2.0, 2.0, 2.0, [0.0, 1.0, 0.0], eye);
+        let mut ghost_far = MeshGroup {
+            depth_test: true,
+            transparent: true,
+            alpha: 0.25,
+            ..Default::default()
+        };
+        ghost_far.push_box(0.0, 0.0, -20.0, 2.0, 2.0, 2.0, [1.0, 0.0, 0.0], eye);
+        let mut batch = SceneBatch::with_id("test.sort");
+        batch.set_camera(Mat4::IDENTITY); // no culling: assert order directly
+        batch.set_camera_pos(eye.into());
+        batch.push_group(&ghost_near);
+        batch.push_group(&ghost_far);
+        batch.push_group(&opaque);
+        batch.finish();
+        let ranges = batch.entry_ranges();
+        assert_eq!(ranges.len(), 3);
+        // Opaque first (not transparent), then far ghost, then near ghost.
+        assert!(!ranges[0].3, "opaque leads");
+        assert!(ranges[1].3 && ranges[2].3, "ghosts trail");
+        let alphas = batch.test_vert_alpha();
+        let at = |range: usize| alphas[(ranges[range].0 as usize)..(ranges[range].1 as usize)][0].0;
+        assert_eq!((at(0), at(1), at(2)), (1.0, 0.25, 0.5));
+    }
+
+    /// Alpha/cutoff ride the vertices: group fade scales every fragment,
+    /// cutoff gates in both passes, non-finite values drop the group.
+    #[test]
+    fn alpha_and_cutoff_plumb_to_vertices() {
+        let mut batch = SceneBatch::with_id("test.alpha");
+        batch.set_camera(Mat4::IDENTITY);
+        let mut g = solid_box();
+        g.transparent = true;
+        g.alpha = 0.4;
+        g.alpha_cutoff = 0.5;
+        batch.push_group(&g);
+        // NaN alpha: dropped, never flattens.
+        let mut bad = solid_box();
+        bad.alpha = f32::NAN;
+        batch.push_group(&bad);
+        batch.finish();
+        assert_eq!(batch.len_tris(), 1);
+        assert_eq!(batch.test_vert_alpha(), vec![(0.4, 0.5); 3]);
+        assert_eq!(batch.entry_ranges(), vec![(0, 3, true, true)]);
     }
 
     #[test]
@@ -1193,6 +1555,7 @@ mod tests {
             pick_id: 0,
             indices: vec![0, 0, 0],
             depth_test: true,
+            ..Default::default()
         });
         // Index out of range.
         batch.push_group(&MeshGroup {
@@ -1204,6 +1567,7 @@ mod tests {
             pick_id: 0,
             indices: vec![0, 1, 9],
             depth_test: true,
+            ..Default::default()
         });
         // Partial normals.
         batch.push_group(&MeshGroup {
@@ -1215,6 +1579,7 @@ mod tests {
             pick_id: 0,
             indices: vec![0, 1, 2],
             depth_test: true,
+            ..Default::default()
         });
         // Partial uvs.
         batch.push_group(&MeshGroup {
@@ -1226,6 +1591,7 @@ mod tests {
             pick_id: 0,
             indices: vec![0, 1, 2],
             depth_test: true,
+            ..Default::default()
         });
         // Page past the batch layers.
         let mut bad_page = solid_box();
@@ -1247,7 +1613,7 @@ mod tests {
         batch.finish();
         assert_eq!(
             batch.entry_ranges(),
-            vec![(0, 3, true), (3, 6, false)],
+            vec![(0, 3, true, false), (3, 6, false, false)],
             "tested range first regardless of push order"
         );
     }
@@ -1761,5 +2127,144 @@ mod tests {
         };
         let i = ((24 * 64 + 40) * 4) as usize;
         assert_eq!([px[i], px[i + 1], px[i + 2], px[i + 3]], [0, 0, 0, 255]);
+    }
+
+    /// End-to-end GPU proof for transparency + cutoff: a red opaque quad
+    /// behind a green 50%-alpha ghost blends to yellow-ish at the center;
+    /// the same ghost with `alpha_cutoff = 0.6` discards and shows pure
+    /// red. Skips gracefully where no GPU exists.
+    #[test]
+    fn offscreen_transparent_blends_and_cutoff_discards() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+
+        struct Blend {
+            cam: OrbitCamera,
+            groups: Vec<MeshGroup>,
+        }
+
+        impl WgpuCallback for Blend {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.blend");
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.set_camera_pos(self.cam.eye().into());
+                for g in &self.groups {
+                    batch.push_group(g);
+                }
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.blend",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut wgpu::RenderPass<'static>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_id("test.blend", rpass, resources);
+            }
+        }
+
+        fn render_case(groups: Vec<MeshGroup>) -> Option<[u8; 4]> {
+            let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("SKIP blend test (no GPU): {e}");
+                    return None;
+                }
+            };
+            let cam = OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: 0.0,
+                pitch: 0.9,
+                dist: 30.0,
+                fov_y_deg: 30.0,
+            };
+            let scene = Scene {
+                clear_color: Color::from_rgba(0, 0, 0, 255),
+                nodes: vec![SceneNode::Callback {
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 64.0,
+                        h: 64.0,
+                    },
+                    payload: Callback::new(Blend { cam, groups }),
+                }],
+            };
+            let px = renderer
+                .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+                .expect("offscreen render");
+            let i = ((32 * 64 + 32) * 4) as usize;
+            Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+        }
+
+        // Two screen-filling quads on the view axis (same corner order as
+        // the depth test): opaque red below, green ghost above.
+        fn sheets(alpha: f32, cutoff: f32) -> Vec<MeshGroup> {
+            let mut back = MeshGroup {
+                depth_test: true,
+                ..Default::default()
+            };
+            back.push_quad(
+                [-5.0, -5.0, 5.0],
+                [5.0, -5.0, 5.0],
+                [5.0, -5.0, -5.0],
+                [-5.0, -5.0, -5.0],
+                [1.0, 0.0, 0.0],
+            );
+            let mut front = MeshGroup {
+                depth_test: true,
+                transparent: true,
+                alpha,
+                alpha_cutoff: cutoff,
+                ..Default::default()
+            };
+            front.push_quad(
+                [-5.0, 5.0, 5.0],
+                [5.0, 5.0, 5.0],
+                [5.0, 5.0, -5.0],
+                [-5.0, 5.0, -5.0],
+                [0.0, 1.0, 0.0],
+            );
+            vec![back, front]
+        }
+
+        // 50% green over red. Blending runs in the sRGB offscreen
+        // target (not linear): 0.5 red + 0.5 green per channel reads back
+        // as sRGB 188 (linear ~0.5 encodes to 188), matching the flat
+        // gray pin in `offscreen_lit_shades_by_normal`. Pin that, not 128.
+        let Some(px) = render_case(sheets(0.5, 0.0)) else {
+            return;
+        };
+        assert_eq!(px, [188, 188, 0, 255], "half-green over red blends: {px:?}");
+
+        // Cutoff above the ghost's alpha discards it: pure red shows.
+        let Some(px) = render_case(sheets(0.5, 0.6)) else {
+            return;
+        };
+        assert_eq!(px, [255, 0, 0, 255], "cutoff discards the ghost: {px:?}");
     }
 }

@@ -3402,6 +3402,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "repame-physics"
+version = "0.2.0"
+dependencies = [
+ "bevy_ecs",
+ "glam 0.33.7",
+ "log",
+ "repame-sim",
+]
+
+[[package]]
 name = "repame-shell"
 version = "0.2.0"
 dependencies = [

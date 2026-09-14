@@ -1,0 +1,14 @@
+[package]
+name = "repame-physics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Sim-side character/voxel physics: AABB mover over a VoxelQuery plus repame-sim systems"
+
+[dependencies]
+bevy_ecs.workspace = true
+glam.workspace = true
+log.workspace = true
+repame-sim.workspace = true

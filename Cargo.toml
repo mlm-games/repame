@@ -55,6 +55,7 @@ repame-shell = { path = "crates/repame-shell", version = "0.2.0" }
 repame-actors = { path = "crates/repame-actors", version = "0.2.0" }
 repame-fx = { path = "crates/repame-fx", version = "0.2.0" }
 repame-input = { path = "crates/repame-input", version = "0.2.0" }
+repame-physics = { path = "crates/repame-physics", version = "0.2.0" }
 
 # renamite-player = { version = "0.2" }
 # renamite-player-ui = { version = "0.2" }

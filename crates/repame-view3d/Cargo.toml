@@ -15,3 +15,5 @@ repose-core.workspace = true
 repose-ui.workspace = true
 repose-render-wgpu.workspace = true
 log.workspace = true
+gltf.workspace = true
+serde.workspace = true

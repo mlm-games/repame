@@ -20,9 +20,10 @@ Pattern initially tested using [resims](https://github.com/mlm-games/resims)'s o
 | `repame-actors` | Live vector actors (`.ren` rigs via `renamite-player`). |
 | `repame-fx` | Sim-side particles, trauma shake, flash, floaters, transitions. |
 | `repame-input` | Leafwing-shaped action map / `ActionState` edges-at-tick-end. |
-| `repame-view3d` | 3D viewport: orbit camera, mesh snapshots (flat/lit/textured), depth-tested wgpu pass, CPU mesh picking. Long-term foundation (glTF/skinning/PBR/chunk mesher later). |
+| `repame-view3d` | 3D viewport: orbit camera, mesh snapshots (flat/lit/textured), depth-tested wgpu pass, CPU mesh picking, glTF static import + CPU skinning/animation tracks, dirty-tracked chunk cache. Long-term foundation (PBR/shadows later). |
+| `repame-physics` | Sim-side character/voxel physics: AABB mover over `VoxelQuery` + pushback, `repame-sim` systems + transform snapshots. |
 
-Planned, not yet scaffolded: physics bridge, glTF/skinning/PBR, chunk mesher (all plug in behind `repame-view3d`'s `MeshGroup` / `Frame3d`).
+Planned, not yet scaffolded: PBR material params, shadows (all plug in behind `repame-view3d`'s `MeshGroup` / `Frame3d`).
 
 # Internal notes
 

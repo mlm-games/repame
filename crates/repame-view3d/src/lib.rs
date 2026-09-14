@@ -49,5 +49,9 @@ pub use mesh::{MeshGroup, Rgb, shade, shade_for_dir};
 pub use pick::{MeshHit, group_bounds, pick_ray, pick_screen, ray_aabb, ray_triangle};
 pub use render::{BatchDesc, SceneBatch, SceneFilter, SceneLight, SceneUpload};
 pub use render::{paint_scene_with_id, prepare_scene_with_id};
-pub use skin::{Animation, JointPose, NodePose, SkinnedMesh, import_animations, import_skinned};
+pub use skin::{
+    Animation, Interp, JointPose, MorphSet, MorphTrack, NodePose, SkeletalAdvance, Skeleton,
+    SkeletonLoop, SkeletonPlayer, SkinnedMesh, import_animations, import_morphs, import_skeleton,
+    import_skinned,
+};
 pub use viewport::{CLICK_SLOP_PX, Frame3d, GeomHandle, View3dEvent, Viewport3d, ViewportGeom};

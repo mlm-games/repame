@@ -100,7 +100,7 @@ fn collect_node(
 }
 
 /// glTF primitive modes we draw (everything else is [`ImportSkip`]).
-fn triangles_only(mode: gltf::mesh::Mode) -> Result<(), ImportSkip> {
+pub(crate) fn triangles_only(mode: gltf::mesh::Mode) -> Result<(), ImportSkip> {
     match mode {
         gltf::mesh::Mode::Triangles
         | gltf::mesh::Mode::TriangleFan

@@ -220,7 +220,18 @@ fn import_primitive(
     let (transparent, alpha, alpha_cutoff) = alpha_mode(&prim.material());
 
     let unlit = is_unlit(&prim.material());
-    let normal_mat = Mat4::from_quat(Quat::from_mat4(&world));
+    // Inverse-transpose of the world 3x3: correct under non-uniform node
+    // scale, where `Quat::from_mat4` would bake the skew into the rotation.
+    // Falls back to no rotation on degenerate (zero-scale) matrices.
+    let normal_mat = {
+        let rot_scale = Mat4::from_mat3(glam::Mat3::from_mat4(world));
+        let inv_t = rot_scale.inverse().transpose();
+        if inv_t.is_finite() {
+            inv_t
+        } else {
+            Mat4::IDENTITY
+        }
+    };
     let lit = normals.as_ref().is_some_and(|ns| !ns.is_empty()) && !unlit;
     let textured = uvs.is_some();
 
@@ -608,5 +619,54 @@ mod tests {
         let mats: Vec<gltf::Material> = gltf.document.materials().collect();
         let m = material_of(&mats[0]);
         assert_eq!(m.emissive, [3.0, 1.5, 0.0], "strength scales: {m:?}");
+    }
+
+    #[test]
+    fn nonuniform_node_scale_keeps_normals_unit() {
+        // A node with scale [1, 2, 1]: positions stretch, but normals must
+        // come out unit-length and axis-correct (inverse-transpose, not
+        // `Quat::from_mat4`, which bakes the skew into the rotation).
+        let mut bin: Vec<u8> = Vec::new();
+        for p in [
+            [-1f32, 0.0, -1.0],
+            [-1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 0.0, -1.0],
+        ] {
+            bin.extend_from_slice(bytemuck::cast_slice(&p));
+        }
+        for _ in 0..4 {
+            bin.extend_from_slice(bytemuck::cast_slice(&[0f32, 1.0, 0.0]));
+        }
+        for i in [0u16, 1, 2, 0, 2, 3] {
+            bin.extend_from_slice(bytemuck::cast_slice(&[i]));
+        }
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0,"scale":[1.0,2.0,1.0]}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1}},"indices":2}}]}}],"buffers":[{{"byteLength":{}}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":48}},{{"buffer":0,"byteOffset":48,"byteLength":48}},{{"buffer":0,"byteOffset":96,"byteLength":12}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[-1.0,0.0,-1.0],"max":[1.0,0.0,1.0]}},{{"bufferView":1,"componentType":5126,"count":4,"type":"VEC3"}},{{"bufferView":2,"componentType":5123,"count":6,"type":"SCALAR"}}]}}"#,
+            bin.len()
+        );
+        let json_bytes = json.as_bytes();
+        let json_pad = (4 - json_bytes.len() % 4) % 4;
+        let bin_pad = (4 - bin.len() % 4) % 4;
+        let total = 12 + 8 + json_bytes.len() + json_pad + 8 + bin.len() + bin_pad;
+        let mut glb = Vec::with_capacity(total);
+        glb.extend_from_slice(&0x46546C67u32.to_le_bytes());
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&((json_bytes.len() + json_pad) as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        glb.extend_from_slice(json_bytes);
+        glb.extend_from_slice(&vec![0x20u8; json_pad]);
+        glb.extend_from_slice(&((bin.len() + bin_pad) as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E4942u32.to_le_bytes());
+        glb.extend_from_slice(&bin);
+        glb.extend_from_slice(&vec![0u8; bin_pad]);
+        let meshes = import_slice(&glb).expect("scaled node parses");
+        let g = &meshes[0].groups[0];
+        assert!(
+            g.normals.iter().all(|n| *n == [0.0, 1.0, 0.0]),
+            "{:?}",
+            g.normals
+        );
     }
 }

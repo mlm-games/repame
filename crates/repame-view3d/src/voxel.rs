@@ -252,6 +252,11 @@ fn chunk_origin(cpos: [i32; 3]) -> [i32; 3] {
 }
 
 /// Build one chunk's meshes from a [`VoxelSource`].
+///
+/// Appends into `output` (which the caller clears or recreates per build:
+/// reusing one output across builds accumulates geometry and stats).
+/// Per-kind groups split by material downstream; the water group rides
+/// separately as the transparent pass.
 pub fn build_chunk_mesh<S, F, G>(
     grid: &S,
     cpos: [i32; 3],

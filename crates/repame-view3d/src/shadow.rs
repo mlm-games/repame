@@ -289,7 +289,7 @@ impl CascadeDesc {
     ) -> CascadeSlice {
         let dir = norm_dir(light_dir);
         let size = self.clamped_size() as f32;
-        //
+        // Frustum corners in world space (NDC z 0..1 = wgpu depth range).
         let mut corners = Vec::with_capacity(8);
         for &x in &[-1.0f32, 1.0] {
             for &y in &[-1.0f32, 1.0] {

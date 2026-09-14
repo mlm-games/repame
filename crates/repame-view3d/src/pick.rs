@@ -60,6 +60,11 @@ pub fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> bool {
 }
 
 /// Backface-culled Moller-Trumbore. Degenerate and NaN tris miss.
+///
+/// The degeneracy test mirrors the batch's [`cull_degenerate`] (squared
+/// area `<= 1e-12`, explicit `is_finite`): NaN fails every ordering and
+/// also fails `is_finite`, so name both checks explicitly — a bare
+/// `area2 <= 1e-12` reads like it culls NaN but actually lets it through.
 pub fn ray_triangle(
     origin: Vec3,
     dir: Vec3,
@@ -70,11 +75,11 @@ pub fn ray_triangle(
     let e1 = b - a;
     let e2 = c - a;
     let cross = e1.cross(e2);
-    let area2 = cross.length();
-    if area2 <= 1e-12 {
-        return None; // degenerate (also rejects NaN: comparison is false)
+    let area2 = cross.length_squared();
+    if !area2.is_finite() || area2 <= 1e-12 {
+        return None; // degenerate (zero area) or NaN coords
     }
-    let normal = cross / area2;
+    let normal = cross / area2.sqrt();
     // CCW front, backfaces culled. Coplanar ray hits nothing.
     if normal.dot(dir) >= 0.0 {
         return None;

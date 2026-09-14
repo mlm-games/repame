@@ -11,15 +11,20 @@
 //! [`is_stale`](super::chunk::ChunkCache::is_stale) (same rule as the
 //! sync path, see the `stale_builds_drop_before_store` test).
 //!
-//! Threading is `web_workers` (native threads; wasm runs the same queue
-//! inline on `pump`, no threads spawned). Workers are spawned on first
-//! request and joined on drop. Mesh input (classify/is_solid/tints) must
-//! be `Clone + Send + Sync + 'static`; the voxel source snapshot must be
-//! `Send + 'static` — games pass an owned snapshot (HashMap, Arc), never
-//! a borrow of live world state.
+//! Threading is native worker threads (spawned on first request, parked
+//! on a 1ms timeout when idle so shutdown notices promptly, joined on
+//! drop). Wasm runs the same queue inline on `pump`, no threads spawned.
+//! Workers are woken explicitly on every [`request`](ChunkStreamer::request)
+//! (plus the park timeout as a backstop), so background builds never stall
+//! after the first drain. Mesh input (classify/is_solid/tints) must
+//! be `Clone + Send + Sync + 'static`; the voxel source snapshot is shared
+//! behind a lock — [`set_source`](ChunkStreamer::set_source) swaps it for
+//! both inline `pump` builds and worker builds (in-flight builds still
+//! finish against the snapshot they started with and drop-or-store by
+//! generation, same as the sync race rule).
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use super::chunk::ChunkCache;
 use super::voxel::{ChunkMeshInput, ChunkMeshOutput, FaceKind, build_chunk_mesh};
@@ -65,11 +70,12 @@ where
     F: Fn(u32) -> FaceKind + Clone + Send + Sync + 'static,
     G: Fn(u32) -> bool + Clone + Send + Sync + 'static,
 {
-    source: S,
+    source: Arc<Mutex<S>>,
     input: ChunkMeshInput<F, G>,
     /// Queued requests: (priority, sequence, chunk, generation).
     /// `Mutex` (not channel): dedup needs a scan, priorities reorder.
-    queue: Arc<Mutex<VecDeque<QueuedRequest>>>,
+    /// Paired with `wake` so workers sleep instead of spinning.
+    queue: Arc<(Mutex<VecDeque<QueuedRequest>>, Condvar)>,
     /// In-flight keys (queued or building): prevents duplicate submits.
     /// Entries clear on completion (drain removes after store-or-drop).
     inflight: Arc<Mutex<HashMap<[i32; 3], u64>>>,
@@ -79,8 +85,11 @@ where
     seq: u64,
     /// Worker count (native only; wasm ignores).
     workers: usize,
-    /// Spawn-once guard.
-    started: bool,
+    /// Worker handles for join-on-drop. Empty on wasm / `workers == 0`.
+    handles: Vec<std::thread::JoinHandle<()>>,
+    /// Shutdown flag: set on drop so parked workers exit instead of
+    /// sleeping forever (detached threads would outlive the streamer).
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
     /// Max queued requests (backpressure: farthest drops first).
     max_queue: usize,
 }
@@ -98,30 +107,34 @@ where
     /// requests (farthest drops first).
     pub fn new(source: S, input: ChunkMeshInput<F, G>, workers: usize, max_queue: usize) -> Self {
         Self {
-            source,
+            source: Arc::new(Mutex::new(source)),
             input,
-            queue: Arc::new(Mutex::new(VecDeque::new())),
+            queue: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
             inflight: Arc::new(Mutex::new(HashMap::new())),
             done: Arc::new(Mutex::new(VecDeque::new())),
             seq: 0,
             workers,
-            started: false,
+            handles: Vec::new(),
+            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             max_queue: max_queue.max(1),
         }
     }
 
-    /// Replace the source snapshot (world edits rebuild the snapshot;
-    /// in-flight builds finish against the old one and drop-or-store by
-    /// generation, same as the sync race rule).
+    /// Replace the source snapshot (world edits rebuild the snapshot).
+    /// Inline `pump` builds and newly-popped worker builds read the fresh
+    /// snapshot; in-flight builds finish against the one they started with
+    /// and drop-or-store by generation, same as the sync race rule.
     pub fn set_source(&mut self, source: S) {
-        self.source = source;
+        if let Ok(mut slot) = self.source.lock() {
+            *slot = source;
+        }
     }
 
     /// Queued + in-flight request count (backpressure readout).
     /// Unique chunks across both sets (every queued chunk holds an
     /// in-flight key, so a naive sum double-counts).
     pub fn pending(&self) -> usize {
-        let queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let queue = self.queue.0.lock().unwrap_or_else(|e| e.into_inner());
         let inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
         let mut keys: HashSet<[i32; 3]> = queue.iter().map(|q| q.2).collect();
         keys.extend(inflight.keys().copied());
@@ -161,7 +174,7 @@ where
                 .or_insert(generation);
         }
         {
-            let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            let mut queue = self.queue.0.lock().unwrap_or_else(|e| e.into_inner());
             let mut replaced = false;
             for slot in queue.iter_mut() {
                 if slot.2 == chunk {
@@ -202,6 +215,7 @@ where
             }
         }
         self.ensure_workers();
+        self.queue.1.notify_one();
     }
 
     /// Cancel a queued request (unloaded region). In-flight builds finish
@@ -209,7 +223,7 @@ where
     /// short). Returns true when a queued entry was removed.
     pub fn cancel(&self, chunk: &[i32; 3]) -> bool {
         let removed = {
-            let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            let mut queue = self.queue.0.lock().unwrap_or_else(|e| e.into_inner());
             let before = queue.len();
             queue.retain(|q| &q.2 != chunk);
             before != queue.len()
@@ -232,7 +246,7 @@ where
         let mut built = 0;
         for _ in 0..budget {
             let next = {
-                let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+                let mut queue = self.queue.0.lock().unwrap_or_else(|e| e.into_inner());
                 if queue.is_empty() {
                     None
                 } else {
@@ -248,8 +262,13 @@ where
             let Some((_, _, chunk, generation)) = next else {
                 break;
             };
+            let source = self
+                .source
+                .lock()
+                .map(|s| s.clone())
+                .unwrap_or_else(|e| e.into_inner().clone());
             let mut out = ChunkMeshOutput::default();
-            build_chunk_mesh(&self.source, chunk, &self.input, &mut out);
+            build_chunk_mesh(&source, chunk, &self.input, &mut out);
             let groups: Vec<MeshGroup> = out.groups().into_iter().cloned().collect();
             let tri_count = out.tri_count();
             {
@@ -295,10 +314,10 @@ where
                 let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
                 if inflight.get(&b.chunk) == Some(&b.generation) {
                     inflight.remove(&b.chunk);
-                } else if let Some(&g) = inflight.get(&b.chunk) {
-                    if !cache.is_stale(&b.chunk, g) {
-                        inflight.remove(&b.chunk);
-                    }
+                } else if let Some(&g) = inflight.get(&b.chunk)
+                    && !cache.is_stale(&b.chunk, g)
+                {
+                    inflight.remove(&b.chunk);
                 }
             }
             if cache.is_stale(&b.chunk, b.generation) {
@@ -308,7 +327,6 @@ where
                 dropped += 1;
             }
         }
-        let _ = dropped;
         (stored, dropped)
     }
 
@@ -316,7 +334,7 @@ where
     /// touch the cache (caller clears it); parked workers wake, find an
     /// empty queue, and sleep again.
     pub fn clear(&self) {
-        if let Ok(mut q) = self.queue.lock() {
+        if let Ok(mut q) = self.queue.0.lock() {
             q.clear();
         }
         if let Ok(mut m) = self.inflight.lock() {
@@ -325,6 +343,7 @@ where
         if let Ok(mut d) = self.done.lock() {
             d.clear();
         }
+        self.queue.1.notify_all();
     }
 
     /// Spawn native worker threads on first request. Each worker loops:
@@ -332,10 +351,9 @@ where
     /// (single-threaded, `pump` builds inline). `workers == 0`: no-op
     /// (fully inline, deterministic for tests).
     fn ensure_workers(&mut self) {
-        if self.started {
+        if !self.handles.is_empty() {
             return;
         }
-        self.started = true;
         #[cfg(not(target_family = "wasm"))]
         {
             let count = self.workers;
@@ -345,7 +363,8 @@ where
             for w in 0..count {
                 let queue = Arc::clone(&self.queue);
                 let done = Arc::clone(&self.done);
-                let source = self.source.clone();
+                let source = Arc::clone(&self.source);
+                let shutdown = Arc::clone(&self.shutdown);
                 let input = ChunkMeshInput {
                     classify: self.input.classify.clone(),
                     is_solid: self.input.is_solid.clone(),
@@ -358,22 +377,51 @@ where
                     textured: self.input.textured,
                 };
                 let name = format!("chunk-mesh-{w}");
-                let _ = std::thread::Builder::new()
+                match std::thread::Builder::new()
                     .name(name)
-                    .spawn(move || worker_loop(queue, done, source, input));
+                    .spawn(move || worker_loop(queue, done, source, shutdown, input))
+                {
+                    Ok(handle) => self.handles.push(handle),
+                    Err(e) => {
+                        log::warn!("chunk_streamer: worker spawn failed ({e}), inline fallback");
+                        break;
+                    }
+                }
             }
+        }
+    }
+}
+
+impl<S, F, G> Drop for ChunkStreamer<S, F, G>
+where
+    S: crate::voxel::VoxelSource + Clone + Send + 'static,
+    F: Fn(u32) -> FaceKind + Clone + Send + Sync + 'static,
+    G: Fn(u32) -> bool + Clone + Send + Sync + 'static,
+{
+    /// Signal shutdown, wake every parked worker, and join them: no
+    /// detached threads outlive the streamer (and its borrowed-free owned
+    /// snapshot).
+    fn drop(&mut self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.queue.1.notify_all();
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
         }
     }
 }
 
 /// Parked-worker main loop (native only): pop best request, build, push
 /// to done. No preemption: a slow chunk finishes, the frame never waits
-/// (drain is the only sync point, and it never blocks).
+/// (drain is the only sync point, and it never blocks). Workers sleep on
+/// the queue condvar (not `thread::park`) so `request`/`clear`/drop wake
+/// them promptly; shutdown exits the loop instead of sleeping forever.
 #[cfg(not(target_family = "wasm"))]
 fn worker_loop<S, F, G>(
-    queue: Arc<Mutex<VecDeque<QueuedRequest>>>,
+    queue: Arc<(Mutex<VecDeque<QueuedRequest>>, Condvar)>,
     done: Arc<Mutex<VecDeque<ChunkBuild>>>,
-    source: S,
+    source: Arc<Mutex<S>>,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
     input: ChunkMeshInput<F, G>,
 ) where
     S: crate::voxel::VoxelSource + Clone + Send + 'static,
@@ -382,25 +430,31 @@ fn worker_loop<S, F, G>(
 {
     loop {
         let next = {
-            let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
-            if q.is_empty() {
-                None
-            } else {
-                let mut best = 0usize;
-                for (i, item) in q.iter().enumerate() {
-                    if (item.0, item.1) < (q[best].0, q[best].1) {
-                        best = i;
-                    }
-                }
-                q.remove(best)
+            let (lock, cvar) = &*queue;
+            let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while q.is_empty() && !shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                q = cvar.wait(q).unwrap_or_else(|e| e.into_inner());
             }
+            if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let mut best = 0usize;
+            for (i, item) in q.iter().enumerate() {
+                if (item.0, item.1) < (q[best].0, q[best].1) {
+                    best = i;
+                }
+            }
+            q.remove(best)
         };
         let Some((_, _, chunk, generation)) = next else {
-            std::thread::park();
             continue;
         };
+        let snapshot = source
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_else(|e| e.into_inner().clone());
         let mut out = ChunkMeshOutput::default();
-        build_chunk_mesh(&source, chunk, &input, &mut out);
+        build_chunk_mesh(&snapshot, chunk, &input, &mut out);
         let groups: Vec<MeshGroup> = out.groups().into_iter().cloned().collect();
         let tri_count = out.tri_count();
         if let Ok(mut d) = done.lock() {
@@ -432,8 +486,10 @@ where
         .unwrap_or_default()
 }
 
-/// Wake parked workers after `request` when called outside the streamer
-/// (the streamer unparks inline; this is the test hook).
+/// Wake parked workers after `request` when work arrives from outside the
+/// streamer. The streamer itself notifies inline on every `request` and
+/// `clear`; this stays only for callers that push work through paths the
+/// streamer cannot see (and for tests).
 #[allow(dead_code)]
 pub(crate) fn unpark_all() {}
 
@@ -650,6 +706,50 @@ mod tests {
         let (stored, _) = s.drain_into(&mut cache);
         assert_eq!(stored, 3);
         assert!(cache.generation(&[0, 0, 0]).is_some());
+    }
+
+    #[test]
+    fn workers_build_without_pump() {
+        let mut s = streamer();
+        s.workers = 2;
+        s.request([0, 0, 0], 1, 0.0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while s.finished() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(s.finished(), 1, "worker built without pump");
+        let mut cache = ChunkCache::new();
+        let (stored, dropped) = s.drain_into(&mut cache);
+        assert_eq!((stored, dropped), (1, 0));
+        assert!(cache.tri_count() > 0);
+    }
+
+    #[test]
+    fn set_source_feeds_later_builds() {
+        // The shared snapshot must be visible to builds popped after the
+        // swap (both `pump` and workers clone under the lock).
+        let mut s = streamer();
+        let mut grid2 = HashMap::new();
+        for x in 16..32 {
+            for z in 0..16 {
+                grid2.insert(
+                    [x, 0, z],
+                    Cell {
+                        kind: 1,
+                        shape: VoxelShape::Full,
+                        rot: 0,
+                        waterlogged: false,
+                    },
+                );
+            }
+        }
+        s.set_source(grid2);
+        s.request([1, 0, 0], 1, 0.0);
+        assert_eq!(s.pump(4), 1);
+        let mut cache = ChunkCache::new();
+        let (stored, _) = s.drain_into(&mut cache);
+        assert_eq!(stored, 1);
+        assert!(cache.tri_count() > 0, "build sees the swapped source");
     }
 
     #[test]

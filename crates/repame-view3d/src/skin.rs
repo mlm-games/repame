@@ -1524,7 +1524,14 @@ pub fn import_morphs(bytes: &[u8]) -> Result<Vec<MorphSet>, gltf::Error> {
 /// one matrix.
 pub fn attach_to_joint(group: &mut MeshGroup, node: &Mat4, offset: &Mat4) {
     let m = *node * *offset;
-    let n = Mat4::from_quat(Quat::from_mat4(&m));
+    let inv_t = Mat4::from_mat3(glam::Mat3::from_mat4(m))
+        .inverse()
+        .transpose();
+    let n = if inv_t.is_finite() {
+        inv_t
+    } else {
+        Mat4::IDENTITY
+    };
     for p in &mut group.positions {
         *p = m.transform_point3(Vec3::from(*p)).into();
     }

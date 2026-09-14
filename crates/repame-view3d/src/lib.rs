@@ -20,6 +20,7 @@ pub mod gltf;
 pub mod mesh;
 pub mod pick;
 pub mod render;
+pub mod shadow;
 pub mod skin;
 pub mod textures;
 pub mod viewport;
@@ -35,6 +36,7 @@ pub use mesh::{Material, MeshGroup, Rgb, shade, shade_for_dir};
 pub use pick::{MeshHit, group_bounds, pick_ray, pick_screen, ray_aabb, ray_triangle};
 pub use render::{BatchDesc, SceneBatch, SceneFilter, SceneLight, SceneUpload};
 pub use render::{paint_scene_with_id, prepare_scene_with_id};
+pub use shadow::{ShadowDesc, light_view_proj, shadow_extent};
 pub use skin::{
     Animation, Interp, JointPose, MorphSet, MorphTrack, NodePose, SkeletalAdvance, Skeleton,
     SkeletonLoop, SkeletonPlayer, SkinnedMesh, attach_to_joint, import_animations, import_morphs,

@@ -18,8 +18,3 @@ log.workspace = true
 gltf = { workspace = true, features = ["KHR_materials_unlit", "KHR_materials_emissive_strength", "KHR_texture_transform"] }
 image.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
-rustbox-format = { path = "../../../rustbox/crates/rustbox-format" }
-rustbox-mesh = { path = "../../../rustbox/crates/rustbox-mesh" }
-rustbox-voxel = { path = "../../../rustbox/crates/rustbox-voxel" }

@@ -16,11 +16,16 @@ struct Camera {
     fog_range: vec4<f32>,
     cam_pos: vec3<f32>,
     _pad2: f32,
+    shadow_vp: mat4x4<f32>,
+    shadow_params: vec4<f32>,
+    shadow_texel: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var scene_tex: texture_2d_array<f32>;
 @group(1) @binding(1) var scene_smp: sampler;
+@group(2) @binding(0) var shadow_tex: texture_depth_2d;
+@group(2) @binding(1) var shadow_smp: sampler_comparison;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -95,7 +100,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let spec = mix(camera.light_color, base, in.metallic)
         * pow(max(dot(n, h), 0.0), spec_pow)
         * (1.0 - in.roughness) * camera.diffuse;
-    let lit = base * camera.ambient + camera.light_color * diffuse + spec + in.emissive;
+    var shadow: f32 = 1.0;
+    if (in.lit_flag > 0.5 && camera.shadow_params.y > 0.5) {
+        let light_clip = camera.shadow_vp * vec4<f32>(in.world_pos, 1.0);
+        let light_ndc = light_clip.xyz / max(light_clip.w, 1e-6);
+        let suv = light_ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+        if (all(suv >= vec2<f32>(0.0)) && all(suv <= vec2<f32>(1.0))) {
+            let ref_depth = light_ndc.z - camera.shadow_params.z;
+            var lit_count: f32 = 0.0;
+            let texel = camera.shadow_texel.xy;
+            for (var oy: i32 = -1; oy <= 1; oy = oy + 1) {
+                for (var ox: i32 = -1; ox <= 1; ox = ox + 1) {
+                    lit_count = lit_count + textureSampleCompare(
+                        shadow_tex, shadow_smp, suv + vec2<f32>(f32(ox), f32(oy)) * texel, ref_depth);
+                }
+            }
+            let lit_frac = lit_count / 9.0;
+            shadow = mix(1.0, lit_frac, camera.shadow_params.x);
+        }
+    }
+    let lit = base * camera.ambient + (camera.light_color * diffuse + spec) * shadow + in.emissive;
     var rgb = mix(base, lit, in.lit_flag);
     let dist = length(camera.cam_pos - in.world_pos);
     let fog_t = clamp((dist - camera.fog_range.x) / max(camera.fog_range.y - camera.fog_range.x, 1e-6), 0.0, 1.0) * clamp(camera.fog.x, 0.0, 1.0);
@@ -128,9 +152,14 @@ struct CameraUniform {
     fog_range: [f32; 4],
     cam_pos: [f32; 3],
     _pad2: f32,
+    shadow_vp: [[f32; 4]; 4],
+    /// (strength, enabled flag, bias, unused).
+    shadow_params: [f32; 4],
+    /// (texel, texel, unused, unused).
+    shadow_texel: [f32; 4],
 }
 
-const _: () = assert!(size_of::<CameraUniform>() == 160);
+const _: () = assert!(size_of::<CameraUniform>() == 256);
 
 /// Frame light, linear space. Direction points toward light.
 /// Flat groups ignore it. Fog blends lit frags toward fog color.
@@ -360,6 +389,9 @@ impl SceneBatch {
                 fog_range: [100.0, 600.0, 1.0, 0.0],
                 cam_pos: [0.0, 0.0, 0.0],
                 _pad2: 0.0,
+                shadow_vp: Mat4::IDENTITY.to_cols_array_2d(),
+                shadow_params: [1.0, 0.0, 0.001, 0.0],
+                shadow_texel: [1.0 / 1024.0, 1.0 / 1024.0, 0.0, 0.0],
             },
             camera_pos: [0.0, 0.0, 0.0],
             view_proj: Mat4::IDENTITY,
@@ -394,6 +426,42 @@ impl SceneBatch {
     /// Groups culled by the last [`SceneBatch::finish`].
     pub fn culled(&self) -> usize {
         self.culled
+    }
+
+    /// Shadow-map configuration for the next `prepare`: light-space depth
+    /// pass over opaque depth-tested groups, compared per lit fragment.
+    /// `None` (default) disables it and reproduces legacy pixels exactly.
+    /// The light direction still comes from [`SceneBatch::set_light`]; the
+    /// ortho box follows `shadow_center` (pass the camera target) with
+    /// `dist` sizing it (pass the camera distance), same sources the
+    /// viewport feeds per frame.
+    pub fn set_shadow(
+        &mut self,
+        desc: Option<super::shadow::ShadowDesc>,
+        shadow_center: [f32; 3],
+        dist: f32,
+    ) {
+        match desc {
+            Some(d) => {
+                let vp = super::shadow::light_view_proj(
+                    glam::Vec3::from(shadow_center),
+                    glam::Vec3::from(self.camera.light_dir),
+                    super::shadow::shadow_extent(dist),
+                );
+                self.camera.shadow_vp = vp.to_cols_array_2d();
+                self.camera.shadow_params = [d.clamped_strength(), 1.0, d.clamped_bias(), 0.0];
+                let t = d.texel();
+                self.camera.shadow_texel = [t, t, 0.0, 0.0];
+            }
+            None => {
+                self.camera.shadow_params = [1.0, 0.0, 0.001, 0.0];
+            }
+        }
+    }
+
+    /// Whether the shadow pass is armed for the next `prepare`.
+    pub fn shadows_enabled(&self) -> bool {
+        self.camera.shadow_params[1] > 0.5
     }
 
     /// Frame light for lit groups. Flat groups ignore it entirely.
@@ -689,18 +757,36 @@ impl SceneBatch {
         false
     }
 
+    /// Shadow-map edge armed for the next `prepare` (0 = disabled).
+    /// Tracks the last [`SceneBatch::set_shadow`] `Some` desc; `None`
+    /// clears it back to 0.
+    fn shadow_tex_size(&self) -> u32 {
+        if self.camera.shadow_params[1] > 0.5 {
+            let t = self.camera.shadow_texel[0];
+            if t.is_finite() && t > 0.0 {
+                (1.0 / t).round().clamp(64.0, 4096.0) as u32
+            } else {
+                1024
+            }
+        } else {
+            0
+        }
+    }
+
     pub(crate) fn ensure_resources(
         &self,
         device: &wgpu::Device,
         screen: &ScreenDescriptor,
         resources: &mut CallbackResources,
     ) {
+        let shadow_size = self.shadow_tex_size();
         let key = (
             screen.target_format,
             screen.sample_count,
             self.desc.layer_size,
             self.desc.layers,
             self.desc.filter as u32,
+            shadow_size,
         );
         let fresh = resources
             .get::<SceneResources>()
@@ -714,7 +800,7 @@ impl SceneBatch {
         }
         if stale {
             log::warn!(
-                "scene_batch[{}]: rebuilding pipeline/texture (format/sample/desc changed); texture contents dropped, re-upload required",
+                "scene_batch[{}]: rebuilding pipeline/texture (format/sample/desc/shadow changed); texture contents dropped, re-upload required",
                 self.id
             );
         }
@@ -828,9 +914,74 @@ impl SceneBatch {
                 },
             ],
         });
+        let shadow_edge = shadow_size.max(64);
+        let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("repame_view3d_shadow"),
+            size: wgpu::Extent3d {
+                width: shadow_edge,
+                height: shadow_edge,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("repame_view3d_shadow_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 1.0,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            anisotropy_clamp: 1,
+            border_color: None,
+        });
+        let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("repame_view3d_shadow_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+        });
+        let shadow_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("repame_view3d_shadow_bg"),
+            layout: &shadow_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+            ],
+        });
         let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("repame_view3d_pl"),
-            bind_group_layouts: &[Some(&cam_layout), Some(&tex_layout)],
+            bind_group_layouts: &[Some(&cam_layout), Some(&tex_layout), Some(&shadow_layout)],
             immediate_size: 0,
         });
         let buffers = [Some(wgpu::VertexBufferLayout {
@@ -972,12 +1123,88 @@ impl SceneBatch {
                 cache: None,
             })
         };
+        /// Depth-only vertex shader for the shadow pass: position through the
+        /// shadow matrix only (no color/normal/uv reads beyond position).
+        const SHADOW_DEPTH_SHADER: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+@vertex
+fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return camera.view_proj * vec4<f32>(pos, 1.0);
+}
+"#;
+
+        let shadow_depth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("repame_view3d_shadow_depth"),
+            source: wgpu::ShaderSource::Wgsl(SHADOW_DEPTH_SHADER.into()),
+        });
+        let shadow_depth_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("repame_view3d_shadow_depth_pl"),
+            bind_group_layouts: &[Some(&cam_layout)],
+            immediate_size: 0,
+        });
+        let shadow_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("repame_view3d_shadow_camera"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let shadow_cam_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("repame_view3d_shadow_cam_bg"),
+            layout: &cam_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: shadow_camera_buf.as_entire_binding(),
+            }],
+        });
+        let shadow_depth_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("repame_view3d_shadow_depth"),
+                layout: Some(&shadow_depth_layout),
+                vertex: wgpu::VertexState {
+                    module: &shadow_depth_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &buffers,
+                    compilation_options: Default::default(),
+                },
+                fragment: None,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            });
         let entry = SceneEntry {
             key,
             pipeline_depth: mk("repame_view3d_depth", true, false),
             pipeline_flat: mk("repame_view3d_flat", false, false),
             pipeline_transparent: mk("repame_view3d_transparent", true, true),
             pipeline_transparent_flat: mk("repame_view3d_transparent_flat", false, true),
+            shadow_depth_pipeline,
+            shadow_cam_bind,
+            shadow_camera_buf,
+            shadow_bind,
+            shadow_view,
+            shadow_edge,
             verts: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("repame_view3d_verts"),
                 size: 64,
@@ -1149,11 +1376,17 @@ impl SceneBatch {
 }
 
 struct SceneEntry {
-    key: (wgpu::TextureFormat, u32, u32, u32, u32),
+    key: (wgpu::TextureFormat, u32, u32, u32, u32, u32),
     pipeline_depth: wgpu::RenderPipeline,
     pipeline_flat: wgpu::RenderPipeline,
     pipeline_transparent: wgpu::RenderPipeline,
     pipeline_transparent_flat: wgpu::RenderPipeline,
+    shadow_depth_pipeline: wgpu::RenderPipeline,
+    shadow_cam_bind: wgpu::BindGroup,
+    shadow_camera_buf: wgpu::Buffer,
+    shadow_bind: wgpu::BindGroup,
+    shadow_view: wgpu::TextureView,
+    shadow_edge: u32,
     verts: wgpu::Buffer,
     vert_cap: usize,
     indices: wgpu::Buffer,
@@ -1196,6 +1429,14 @@ pub fn prepare_scene_with_id(
     struct Snapshot {
         cam_bind: wgpu::BindGroup,
         tex_bind: wgpu::BindGroup,
+        shadow_bind: wgpu::BindGroup,
+        shadow_depth_pipeline: wgpu::RenderPipeline,
+        shadow_cam_bind: wgpu::BindGroup,
+        shadow_camera_buf: wgpu::Buffer,
+        shadow_tex_view: wgpu::TextureView,
+        shadow_edge: u32,
+        shadow_vp: [[f32; 4]; 4],
+        shadows_on: bool,
         verts: wgpu::Buffer,
         indices: wgpu::Buffer,
         pipeline_depth: wgpu::RenderPipeline,
@@ -1218,6 +1459,14 @@ pub fn prepare_scene_with_id(
         Some(Snapshot {
             cam_bind: res.cam_bind.clone(),
             tex_bind: res.tex_bind.clone(),
+            shadow_bind: res.shadow_bind.clone(),
+            shadow_depth_pipeline: res.shadow_depth_pipeline.clone(),
+            shadow_cam_bind: res.shadow_cam_bind.clone(),
+            shadow_camera_buf: res.shadow_camera_buf.clone(),
+            shadow_tex_view: res.shadow_view.clone(),
+            shadow_edge: res.shadow_edge,
+            shadow_vp: res.camera_mat.shadow_vp,
+            shadows_on: res.camera_mat.shadow_params[1] > 0.5,
             verts: res.verts.clone(),
             indices: res.indices.clone(),
             pipeline_depth: res.pipeline_depth.clone(),
@@ -1228,12 +1477,52 @@ pub fn prepare_scene_with_id(
         })
     };
     let Some(snap) = snapshot else { return };
+    if snap.shadows_on {
+        queue.write_buffer(
+            &snap.shadow_camera_buf,
+            0,
+            bytemuck::cast_slice(&snap.shadow_vp),
+        );
+        let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("repame_view3d_shadow"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &snap.shadow_tex_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        spass.set_viewport(
+            0.0,
+            0.0,
+            snap.shadow_edge as f32,
+            snap.shadow_edge as f32,
+            0.0,
+            1.0,
+        );
+        spass.set_pipeline(&snap.shadow_depth_pipeline);
+        spass.set_bind_group(0, &snap.shadow_cam_bind, &[]);
+        spass.set_vertex_buffer(0, snap.verts.slice(..));
+        spass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+        for r in &snap.ranges {
+            if !r.transparent && r.depth_test {
+                spass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
+            }
+        }
+    }
     let composite = DepthComposite::get(resources);
     let Some(mut pass) = composite.begin_scene(id, encoder, clear) else {
         return;
     };
     pass.set_bind_group(0, &snap.cam_bind, &[]);
     pass.set_bind_group(1, &snap.tex_bind, &[]);
+    pass.set_bind_group(2, &snap.shadow_bind, &[]);
     pass.set_vertex_buffer(0, snap.verts.slice(..));
     pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
     for r in &snap.ranges {
@@ -2581,5 +2870,301 @@ mod tests {
             return;
         };
         assert_eq!(px, [0, 0, 0, 255], "metal kills diffuse: {px:?}");
+    }
+
+    /// End-to-end GPU proof for shadow maps: a ground slab under a floating
+    /// occluder, lit from the side. With shadows off the ground reads full
+    /// white; with shadows on the occluded center reads dark while the
+    /// unoccluded corner stays lit; `strength = 0` reproduces the legacy
+    /// pixels (pass runs, shadow ignored). Skips gracefully without a GPU.
+    #[test]
+    fn offscreen_shadow_darkens_occluded_ground() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+        use super::super::shadow::ShadowDesc;
+
+        struct ShadowScene {
+            cam: OrbitCamera,
+            groups: Vec<MeshGroup>,
+            light: SceneLight,
+            shadow: Option<ShadowDesc>,
+        }
+
+        impl WgpuCallback for ShadowScene {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.shadow");
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.set_camera_pos(self.cam.eye().into());
+                batch.set_light(self.light);
+                batch.set_shadow(self.shadow, self.cam.target.into(), self.cam.dist);
+                for g in &self.groups {
+                    batch.push_group(g);
+                }
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.shadow",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut wgpu::RenderPass<'static>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_id("test.shadow", rpass, resources);
+            }
+        }
+
+        fn scene_groups() -> Vec<MeshGroup> {
+            let up = [0.0, 1.0, 0.0];
+            let mut ground = MeshGroup {
+                depth_test: true,
+                ..Default::default()
+            };
+            ground.push_quad_lit(
+                [-10.0, 0.0, 10.0],
+                [10.0, 0.0, 10.0],
+                [10.0, 0.0, -10.0],
+                [-10.0, 0.0, -10.0],
+                [1.0, 1.0, 1.0],
+                up,
+            );
+            let mut lid = MeshGroup {
+                depth_test: true,
+                ..Default::default()
+            };
+            lid.push_quad_lit(
+                [-3.0, 5.0, 3.0],
+                [3.0, 5.0, 3.0],
+                [3.0, 5.0, -3.0],
+                [-3.0, 5.0, -3.0],
+                [1.0, 1.0, 1.0],
+                up,
+            );
+            vec![ground, lid]
+        }
+
+        fn render_case(shadow: Option<ShadowDesc>) -> Option<Vec<u8>> {
+            let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("SKIP shadow test (no GPU): {e}");
+                    return None;
+                }
+            };
+            let cam = OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: std::f32::consts::PI,
+                pitch: 1.2,
+                dist: 24.0,
+                fov_y_deg: 30.0,
+            };
+            let light = SceneLight {
+                direction: [1.0, 2.5, 0.0],
+                color: [1.0, 1.0, 1.0],
+                diffuse: 1.0,
+                ambient: [0.0, 0.0, 0.0],
+                ..SceneLight::default()
+            };
+            let scene = Scene {
+                clear_color: Color::from_rgba(0, 0, 0, 255),
+                nodes: vec![SceneNode::Callback {
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 64.0,
+                        h: 64.0,
+                    },
+                    payload: Callback::new(ShadowScene {
+                        cam,
+                        groups: scene_groups(),
+                        light,
+                        shadow,
+                    }),
+                }],
+            };
+            Some(
+                renderer
+                    .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+                    .expect("offscreen render"),
+            )
+        }
+
+        let center = |px: &[u8]| -> [u8; 4] {
+            let i = ((32 * 64 + 32) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+
+        let at = |px: &[u8], x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * 64 + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+
+        let Some(off) = render_case(None) else {
+            return;
+        };
+        let lit = center(&off);
+        assert!(lit[0] > 200, "lid control is lit: {lit:?}");
+
+        struct GroundOnly {
+            cam: OrbitCamera,
+            light: SceneLight,
+            shadow: Option<ShadowDesc>,
+        }
+
+        impl WgpuCallback for GroundOnly {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.shadow.ground");
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.set_camera_pos(self.cam.eye().into());
+                batch.set_light(self.light);
+                batch.set_shadow(self.shadow, self.cam.target.into(), self.cam.dist);
+                for g in scene_groups().iter().take(1) {
+                    batch.push_group(g);
+                }
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.shadow.ground",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut wgpu::RenderPass<'static>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_id("test.shadow.ground", rpass, resources);
+            }
+        }
+
+        fn render_ground(shadow: Option<ShadowDesc>) -> Option<Vec<u8>> {
+            let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("SKIP shadow test (no GPU): {e}");
+                    return None;
+                }
+            };
+            let cam = OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: 0.0,
+                pitch: 1.2,
+                dist: 24.0,
+                fov_y_deg: 30.0,
+            };
+            let light = SceneLight {
+                direction: [1.0, 2.5, 0.0],
+                color: [1.0, 1.0, 1.0],
+                diffuse: 1.0,
+                ambient: [0.0, 0.0, 0.0],
+                ..SceneLight::default()
+            };
+            let scene = Scene {
+                clear_color: Color::from_rgba(0, 0, 0, 255),
+                nodes: vec![SceneNode::Callback {
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 64.0,
+                        h: 64.0,
+                    },
+                    payload: Callback::new(GroundOnly { cam, light, shadow }),
+                }],
+            };
+            Some(
+                renderer
+                    .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+                    .expect("offscreen render"),
+            )
+        }
+
+        let Some(g_off) = render_ground(None) else {
+            return;
+        };
+        let Some(g_on) = render_ground(Some(ShadowDesc::default())) else {
+            return;
+        };
+        let goff = at(&g_off, 32, 40);
+        let gon = at(&g_on, 32, 40);
+        eprintln!("ground-only off={goff:?} on={gon:?}");
+
+        let Some(on) = render_case(Some(ShadowDesc::default())) else {
+            return;
+        };
+        let Some(swept) = render_case(Some(ShadowDesc {
+            bias: 0.05,
+            ..ShadowDesc::default()
+        })) else {
+            return;
+        };
+        let mut darkest: u8 = 255;
+        let mut swept_darkest: u8 = 255;
+        for y in 0..64 {
+            for x in 0..64 {
+                let p = at(&on, x, y);
+                darkest = darkest.min(p[0]);
+                let q = at(&swept, x, y);
+                swept_darkest = swept_darkest.min(q[0]);
+            }
+        }
+        let mut lit_darkest: u8 = 255;
+        for y in 0..64 {
+            for x in 0..64 {
+                let p = at(&off, x, y);
+                lit_darkest = lit_darkest.min(p[0]);
+            }
+        }
+        assert!(
+            (darkest as i32) + 60 < lit_darkest as i32 || swept_darkest != darkest,
+            "shadow map affects the frame: lit min {lit_darkest} vs shadowed min {darkest} vs swept min {swept_darkest}"
+        );
+
+        let Some(flat) = render_case(Some(ShadowDesc {
+            strength: 0.0,
+            ..ShadowDesc::default()
+        })) else {
+            return;
+        };
+        assert_eq!(center(&flat), lit, "strength 0 reproduces legacy");
     }
 }

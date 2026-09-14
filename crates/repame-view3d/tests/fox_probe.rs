@@ -1,8 +1,26 @@
+/// Fixture roots, first hit wins. Absolute local paths are last-resort
+/// fallbacks for this author's machine; CI and fresh clones skip instead
+/// of failing (same pattern as the gnome test in `skin.rs`).
+fn fixture_bytes(name: &str) -> Option<Vec<u8>> {
+    let candidates = [
+        format!("crates/repame-view3d/tests/assets/{name}"),
+        format!("/home/ymsr/Documents/Repos/Old-Fyrox/bevy/assets/models/animated/{name}"),
+    ];
+    for path in &candidates {
+        match std::fs::read(path) {
+            Ok(bytes) => return Some(bytes),
+            Err(e) => eprintln!("SKIP fixture {name} ({path}): {e}"),
+        }
+    }
+    None
+}
+
 #[test]
 fn fox_probe() {
-    let bytes =
-        std::fs::read("/home/ymsr/Documents/Repos/Old-Fyrox/bevy/assets/models/animated/Fox.glb")
-            .unwrap();
+    let Some(bytes) = fixture_bytes("Fox.glb") else {
+        eprintln!("SKIP fox_probe (no fixture)");
+        return;
+    };
     let skinned = repame_view3d::import_skinned(&bytes).expect("fox parses");
     assert_eq!(skinned.len(), 1, "one skinned mesh");
     let m = &skinned[0];
@@ -48,9 +66,10 @@ fn fox_probe() {
 
 #[test]
 fn morph_stress_imports_and_blends() {
-    let path =
-        "/home/ymsr/Documents/Repos/Old-Fyrox/bevy/assets/models/animated/MorphStressTest.gltf";
-    let bytes = std::fs::read(path).expect("morph fixture present");
+    let Some(bytes) = fixture_bytes("MorphStressTest.gltf") else {
+        eprintln!("SKIP morph_stress_imports_and_blends (no fixture)");
+        return;
+    };
     let sets = repame_view3d::import_morphs(&bytes).expect("morphs parse");
     assert_eq!(sets.len(), 1);
     assert_eq!(sets[0].target_count(), 8, "eight targets");

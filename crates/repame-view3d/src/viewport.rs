@@ -49,6 +49,12 @@ pub struct Frame3d {
     pub desc: BatchDesc,
     /// Frame light for groups carrying normals. Flat groups ignore it.
     pub light: SceneLight,
+    /// Shadow-map configuration. `None` (default) disables the depth pass
+    /// and reproduces legacy pixels exactly. `Some` renders opaque
+    /// depth-tested groups into a light-space depth texture during
+    /// `prepare` and scales diffuse + specular per lit fragment (3x3 PCF).
+    /// Blob shadows (`repame-fx` decals) keep covering contact grounding.
+    pub shadow: Option<crate::ShadowDesc>,
     /// Offscreen clear color (linear 0..1 RGBA). The shared UI pass this
     /// viewport paints into has its own clear; this selects the scene
     /// target clear inside the viewport-owned pass.
@@ -67,6 +73,7 @@ impl Default for Frame3d {
             uploads: Vec::new(),
             desc: BatchDesc::default(),
             light: SceneLight::default(),
+            shadow: None,
             background: None,
             viewport_px: [1600.0, 900.0],
         }
@@ -452,6 +459,11 @@ impl WgpuCallback for GpuViewport3d {
         batch.set_camera(self.input.cam.view_proj(aspect));
         batch.set_camera_pos(self.input.cam.eye().into());
         batch.set_light(self.input.light);
+        batch.set_shadow(
+            self.input.shadow,
+            self.input.cam.target.into(),
+            self.input.cam.dist,
+        );
         for g in &self.input.groups {
             batch.push_group(g);
         }

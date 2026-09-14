@@ -9,9 +9,8 @@
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use glam::Vec3;
-
 use glam::Vec2;
+use glam::Vec3;
 use repose_core::input::{PointerButton, PointerEventKind};
 use repose_core::{Modifier, View};
 use repose_render_wgpu::{Callback, CallbackResources, ScreenDescriptor, WgpuCallback};
@@ -93,12 +92,18 @@ impl Frame3d {
     /// validated groups copy into the snapshot alongside dynamic content.
     /// Deterministic when the caller passes [`ChunkCache::draws`] order
     /// (chunk-sorted) first.
+    ///
+    /// Malformed cached groups are dropped with a warning (same validators
+    /// as the batch): a stale or hand-built cache entry can't poison the
+    /// frame.
     pub fn extend_chunks<'a>(
         &mut self,
         draws: impl IntoIterator<Item = super::chunk::ChunkDraw<'a>>,
     ) {
         for draw in draws {
-            self.groups.push(draw.group.clone());
+            if super::chunk::validate_group(draw.group) {
+                self.groups.push(draw.group.clone());
+            }
         }
     }
 }
@@ -222,19 +227,28 @@ pub fn Viewport3d(
     on_event: impl Fn(View3dEvent) + 'static,
 ) -> View {
     let batch_id: String = batch_id.into();
-    let input = Rc::new(input);
+    // One shared snapshot: picks and the GPU payload read through the same
+    // `Arc`, so per-frame composition clones no geometry (chunked scenes
+    // stay free here; the payload upload is the only copy, on the GPU
+    // thread). `Rc` would do for the UI closures, but the payload needs
+    // `Send + Sync`, so `Arc` serves both.
+    let input = std::sync::Arc::new(input);
+    debug_assert_eq!(
+        (input.desc.layer_size, input.desc.layers),
+        (batch_desc.layer_size, batch_desc.layers),
+        "Viewport3d batch_desc must match input.desc (groups pack against input.desc)"
+    );
     let draw_input = input.clone();
     let draw_id = batch_id.clone();
-    // Camera + groups for picks: event-time snapshots through the same
-    // camera the GPU used, so content and picks stay glued. Ground picks
-    // invert through the latest painted geometry; mesh picks run the ray
-    // against the frame's groups and win over ground when closer.
-    let hover_cam = input.cam;
+    // Picks read through the shared snapshot — no per-frame group clones
+    // (chunked scenes stay free here). Camera + groups for picks are the
+    // same values the GPU payload uploads, so content and picks stay glued.
+    // Geometry still inverts through the latest painted publish at event
+    // time (see `ViewportGeom` timing below).
+    let hover_input = input.clone();
     let hover_geom = geom_out.clone();
-    let hover_groups = input.groups.clone();
-    let click_cam = input.cam;
+    let click_input = input.clone();
     let click_geom = geom_out.clone();
-    let click_groups = input.groups.clone();
     let size_geom = geom_out.clone();
     let on_event = Rc::new(on_event);
     let on_move = on_event.clone();
@@ -289,9 +303,9 @@ pub fn Viewport3d(
                     let a = Frame3d::aspect(g.viewport_px);
                     let vp = Vec2::new(vpx[0], vpx[1]);
                     let p = Vec2::new(p.x, p.y);
-                    let (origin, dir) = hover_cam.screen_ray(a, vp, p);
-                    let mesh: Option<MeshHit> = pick_ray(origin, dir, &hover_groups);
-                    let ground = hover_cam.ground_point(a, vp, p);
+                    let (origin, dir) = hover_input.cam.screen_ray(a, vp, p);
+                    let mesh: Option<MeshHit> = pick_ray(origin, dir, &hover_input.groups);
+                    let ground = hover_input.cam.ground_point(a, vp, p);
                     match (mesh, ground) {
                         (Some(hit), _) => on_hover(View3dEvent::HoverMesh {
                             pick_id: Some(hit.pick_id),
@@ -314,9 +328,12 @@ pub fn Viewport3d(
                 && click_within_slop(d.start, [p.x, p.y])
             {
                 let g = click_geom.get();
-                if let Some(event) =
-                    resolve_click(&click_cam, g.viewport_px, [p.x, p.y], &click_groups)
-                {
+                if let Some(event) = resolve_click(
+                    &click_input.cam,
+                    g.viewport_px,
+                    [p.x, p.y],
+                    &click_input.groups,
+                ) {
                     on_up_click(event);
                 }
             }
@@ -334,7 +351,7 @@ pub fn Viewport3d(
             }
         });
     let payload = GpuViewport3d {
-        input: Arc::new(draw_input.as_ref().clone()),
+        input: draw_input.clone(),
         geom: geom_out.arc(),
         batch_id: draw_id,
         batch_desc,
@@ -397,6 +414,22 @@ struct GpuViewport3d {
     batch_desc: BatchDesc,
 }
 
+impl GpuViewport3d {
+    /// Descriptor the batch is actually keyed on: explicit arg when it
+    /// matches the snapshot (the common path), snapshot fallback when a
+    /// caller passes a placeholder. Keeps old call sites drawing instead of
+    /// rebuilding pipelines + dropping textures every frame.
+    fn effective_desc(&self) -> BatchDesc {
+        if (self.batch_desc.layer_size, self.batch_desc.layers)
+            == (self.input.desc.layer_size, self.input.desc.layers)
+        {
+            self.batch_desc
+        } else {
+            self.input.desc
+        }
+    }
+}
+
 impl WgpuCallback for GpuViewport3d {
     fn prepare(
         &self,
@@ -414,7 +447,8 @@ impl WgpuCallback for GpuViewport3d {
         let w = vp[0].max(1.0) as u32;
         let h = vp[1].max(1.0) as u32;
         let aspect = Frame3d::aspect(vp);
-        let mut batch = SceneBatch::with_desc(self.batch_id.clone(), self.batch_desc);
+        let desc = self.effective_desc();
+        let mut batch = SceneBatch::with_desc(self.batch_id.clone(), desc);
         batch.set_camera(self.input.cam.view_proj(aspect));
         batch.set_light(self.input.light);
         for g in &self.input.groups {

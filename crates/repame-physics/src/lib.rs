@@ -52,23 +52,15 @@ pub struct PhysicsState {
     pub ground_vel: [f32; 3],
 }
 
-/// Collision shapes: boxes plus ramp wedges. Mesh colliders stay a rotated
-/// AABB (see [`rotated_box_aabb`]) — explicit instead of mover divergence.
-#[derive(Clone, Debug)]
-pub enum Collider {
-    Box {
-        half_extents: [f32; 3],
-    },
-    /// Ramp rising toward local +X (mirrors block `Slope` shapes).
-    Wedge {
-        half_extents: [f32; 3],
-        rot: u8,
-    },
-}
-
 /// World solidity query shared by every mover (the single truth that
 /// replaces per-system solid tables). Pulse/on-off already resolved by the
 /// caller: `is_solid` answers for movement *now*.
+///
+/// Ramps/wedges live behind `surface_top` (the query interpolates tops;
+/// rustbox shapes do this in its `LevelQuery`): there is no `Collider`
+/// enum here — collision geometry is always answered through the query,
+/// so the mover and the game can never diverge on shapes. Mesh colliders
+/// stay a rotated AABB (see [`rotated_box_aabb`]).
 pub trait VoxelQuery {
     /// Is `cell` solid for movement?
     fn is_solid(&self, cell: [i32; 3]) -> bool;
@@ -79,6 +71,11 @@ pub trait VoxelQuery {
     fn ground_velocity(&self, cell: [i32; 3]) -> [f32; 3] {
         let _ = cell;
         [0.0, 0.0, 0.0]
+    }
+    /// Is `cell` fluid (water, lava)? Drives [`PhysicsState::in_fluid`];
+    /// default is air everywhere, so existing queries compile untouched.
+    fn is_fluid(&self, _cell: [i32; 3]) -> bool {
+        false
     }
 }
 
@@ -131,8 +128,81 @@ pub fn move_and_collide<Q: VoxelQuery>(
         resolve_axis(query, body, 2, step.z, &mut result, state);
     }
 
+    // Standing-still support: with no downward motion no Y resolve runs, so
+    // a resting body would report airborne every other frame (grounded →
+    // gravity skipped → delta.y == 0 → not grounded → gravity resumes →
+    // jitter). When nothing landed this call, probe the cells underfoot:
+    // support within SKIN of the feet keeps grounded + ground_vel alive.
+    if !result.grounded {
+        probe_support(query, body, &mut result, state);
+    }
+    // Fluid is positional, not a contact: any overlapped fluid cell counts,
+    // even when standing still or moving without touching a wall.
+    state.in_fluid = overlaps_fluid(query, body);
+
     body.on_ground = result.grounded;
     result
+}
+
+/// Support probe for resting bodies: the feet cell row (one row below the
+/// AABB min, over the XZ footprint) is solid and its top is within `SKIN`
+/// of the feet → grounded, with that cell's ground velocity. Pure readout:
+/// moves nothing, zeroes no velocity.
+fn probe_support<Q: VoxelQuery>(
+    query: &Q,
+    body: &Body,
+    result: &mut MoveResult,
+    state: &mut PhysicsState,
+) {
+    let (min, max) = body.aabb();
+    // Support row: the cell layer the soles rest on. `2 * SKIN` below the
+    // feet — not one — because a landed body sits at exactly `top + SKIN`,
+    // so `feet - SKIN` is the integer boundary itself and floors into the
+    // air cell above the support.
+    let row = (min.y - SKIN * 2.0).floor() as i32;
+    let x0 = (min.x + SKIN).floor() as i32;
+    let x1 = (max.x - SKIN).floor() as i32;
+    let z0 = (min.z + SKIN).floor() as i32;
+    let z1 = (max.z - SKIN).floor() as i32;
+    let wx = body.pos.x + body.half_extents.x;
+    let wz = body.pos.z + body.half_extents.z;
+    for cx in x0..=x1 {
+        for cz in z0..=z1 {
+            let cell = [cx, row, cz];
+            if !query.is_solid(cell) {
+                continue;
+            }
+            let top = query.surface_top(cell, wx, wz).unwrap_or((row + 1) as f32);
+            if (body.pos.y - top).abs() <= SKIN * 2.0 {
+                result.grounded = true;
+                state.on_ground = true;
+                state.ground_vel = query.ground_velocity(cell);
+                result.ground_vel = state.ground_vel;
+                return;
+            }
+        }
+    }
+}
+
+/// True when any cell overlapped by the body AABB is fluid.
+fn overlaps_fluid<Q: VoxelQuery>(query: &Q, body: &Body) -> bool {
+    let (min, max) = body.aabb();
+    let x0 = (min.x + SKIN).floor() as i32;
+    let x1 = (max.x - SKIN).floor() as i32;
+    let y0 = (min.y + SKIN).floor() as i32;
+    let y1 = (max.y - SKIN).floor() as i32;
+    let z0 = (min.z + SKIN).floor() as i32;
+    let z1 = (max.z - SKIN).floor() as i32;
+    for cx in x0..=x1 {
+        for cy in y0..=y1 {
+            for cz in z0..=z1 {
+                if query.is_fluid([cx, cy, cz]) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn resolve_axis<Q: VoxelQuery>(
@@ -402,6 +472,52 @@ mod tests {
         }
         assert!(state.on_ground);
         assert!((body.pos.y - 1.0).abs() < 0.05, "y={}", body.pos.y);
+    }
+
+    #[test]
+    fn standing_still_stays_grounded() {
+        // The resting-body contract: once landed, zero-delta steps must
+        // keep reporting grounded (no gravity flicker). Regression for the
+        // land → vel.y = 0 → delta.y = 0 → airborne → gravity → jitter loop.
+        let q = floor();
+        let mut body = Body::new(Vec3::new(0.0, 1.0 + SKIN, 0.0), Vec3::new(0.3, 0.9, 0.3));
+        let mut state = PhysicsState::default();
+        for _ in 0..10 {
+            let r = move_and_collide(&q, &mut body, Vec3::ZERO, &mut state);
+            assert!(r.grounded && state.on_ground, "resting stays grounded");
+            assert!(
+                (body.pos.y - 1.0 - SKIN).abs() < 1e-6,
+                "feet unmoved: {}",
+                body.pos.y
+            );
+        }
+    }
+
+    #[test]
+    fn fluid_flag_follows_overlap() {
+        struct Water(Floor);
+        impl VoxelQuery for Water {
+            fn is_solid(&self, cell: [i32; 3]) -> bool {
+                self.0.is_solid(cell)
+            }
+            fn surface_top(&self, cell: [i32; 3], wx: f32, wz: f32) -> Option<f32> {
+                self.0.surface_top(cell, wx, wz)
+            }
+            fn is_fluid(&self, cell: [i32; 3]) -> bool {
+                (1..=2).contains(&cell[1])
+            }
+        }
+        let q = Water(floor());
+        let mut body = Body::new(Vec3::new(0.0, 1.0 + SKIN, 0.0), Vec3::new(0.3, 0.9, 0.3));
+        let mut state = PhysicsState::default();
+        move_and_collide(&q, &mut body, Vec3::ZERO, &mut state);
+        assert!(state.in_fluid, "body volume sits in the water band");
+        assert!(state.on_ground, "support probe still grounds");
+        // Airborne above the band: dry.
+        body.pos.y = 9.0;
+        move_and_collide(&q, &mut body, Vec3::ZERO, &mut state);
+        assert!(!state.in_fluid, "high air is dry");
+        assert!(!state.on_ground, "no support up here");
     }
 
     #[test]

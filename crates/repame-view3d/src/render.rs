@@ -25,9 +25,11 @@ const SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
     light_dir: vec3<f32>,
-    ambient: f32,
+    _pad0: f32,
     light_color: vec3<f32>,
     diffuse: f32,
+    ambient: vec3<f32>,
+    _pad1: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -95,12 +97,14 @@ use super::mesh::MeshGroup;
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
     light_dir: [f32; 3],
-    ambient: f32,
+    _pad0: f32,
     light_color: [f32; 3],
     diffuse: f32,
+    ambient: [f32; 3],
+    _pad1: f32,
 }
 
-const _: () = assert!(size_of::<CameraUniform>() == 96);
+const _: () = assert!(size_of::<CameraUniform>() == 112);
 
 /// One directional light + ambient for the frame, linear space.
 ///
@@ -191,6 +195,42 @@ pub struct SceneUpload {
     pub rgba: Vec<u8>,
 }
 
+/// Drop zero-area (and NaN) triangles from an index list, preserving the
+/// survivors in submission order. Mirrors the picker's
+/// [`ray_triangle`](super::pick::ray_triangle) degeneracy test (area² ≤
+/// 1e-12 misses there, so it must not draw here either — content and picks
+/// stay glued). Returns an empty vec when fewer than 3 indices remain.
+/// Non-multiple-of-3 tails are ignored, matching `pick_ray`'s chunking.
+///
+/// `is_finite` rides alongside the area test (not folded into one
+/// comparison): NaN poisons every ordering, so the check must name it —
+/// a bare `area2 <= 1e-12` reads like it culls NaN but actually lets it
+/// through.
+fn cull_degenerate(positions: &[[f32; 3]], indices: &[u32]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(indices.len());
+    let (chunks, _) = indices.as_chunks::<3>();
+    for tri in chunks {
+        let (ia, ib, ic) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+        let (Some(a), Some(b), Some(c)) = (positions.get(ia), positions.get(ib), positions.get(ic))
+        else {
+            continue; // validated in-range by the caller; belt and braces
+        };
+        let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let cross = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let area2 = cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2];
+        if !area2.is_finite() || area2 <= 1e-12 {
+            continue;
+        }
+        out.extend_from_slice(tri);
+    }
+    out
+}
+
 /// One validated group awaiting [`SceneBatch::finish`].
 struct Pending {
     positions: Vec<[f32; 3]>,
@@ -243,9 +283,11 @@ impl SceneBatch {
             camera: CameraUniform {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 light_dir: [0.0, 1.0, 0.0],
-                ambient: 0.35,
+                _pad0: 0.0,
                 light_color: [1.0, 1.0, 1.0],
                 diffuse: 0.9,
+                ambient: [0.35, 0.35, 0.38],
+                _pad1: 0.0,
             },
             pending: Vec::new(),
             uploads: Vec::new(),
@@ -272,10 +314,7 @@ impl SceneBatch {
             glam::Vec3::Y
         };
         self.camera.light_dir = d.into();
-        // Ambient is a single scalar in the uniform: use luminance so the
-        // producer's tint keeps working without a per-channel path.
-        self.camera.ambient =
-            0.2126 * light.ambient[0] + 0.7152 * light.ambient[1] + 0.0722 * light.ambient[2];
+        self.camera.ambient = light.ambient;
         self.camera.light_color = light.color;
         self.camera.diffuse = light.diffuse.max(0.0);
     }
@@ -298,48 +337,46 @@ impl SceneBatch {
 
     /// Queue texture uploads, applied in the next `prepare`.
     pub fn upload(&mut self, upload: SceneUpload) {
+        // Guard the same contract `push_group` enforces for pages: an
+        // out-of-range upload is dropped at queue time (with a warning) so
+        // a caller packing against a smaller desc can't poison the texture.
+        if upload.page >= self.desc.layers
+            || upload.x + upload.w > self.desc.layer_size
+            || upload.y + upload.h > self.desc.layer_size
+            || upload.rgba.len() != upload.w as usize * upload.h as usize * 4
+        {
+            log::warn!(
+                "scene_batch[{}]: dropping out-of-range upload page={} {}x{}+{}+{} ({} bytes)",
+                self.id,
+                upload.page,
+                upload.w,
+                upload.h,
+                upload.x,
+                upload.y,
+                upload.rgba.len()
+            );
+            return;
+        }
         self.uploads.push(upload);
     }
 
     /// Queue several uploads at once (per-frame texture drains).
     pub fn extend_uploads(&mut self, uploads: impl IntoIterator<Item = SceneUpload>) {
-        self.uploads.extend(uploads);
+        for upload in uploads {
+            self.upload(upload);
+        }
     }
 
     /// Append one group. Malformed groups (index out of range, or
-    /// position/color length mismatch, or partial normals/uvs) are
-    /// dropped with a warning — never a panic, never partial draws.
-    /// Normals and uvs are all-or-nothing per group: a group with some
-    /// normals (or some uvs) but not one per vertex is malformed.
+    /// position/color length mismatch, partial normals/uvs, page past the
+    /// batch layers) are dropped with a warning — never a panic, never
+    /// partial draws. Degenerate triangles (zero area, NaN) are culled
+    /// tri-by-tri so one bad triangle can't sink its group: the group draws
+    /// with the surviving triangles. Normals and uvs stay all-or-nothing
+    /// per group. Shares [`validate_group`](super::chunk::validate_group)
+    /// with the chunk cache so both paths agree on malformed.
     pub fn push_group(&mut self, group: &MeshGroup) {
-        if group.is_empty() {
-            return;
-        }
-        if group.positions.len() != group.colors.len() {
-            log::warn!(
-                "scene_batch[{}]: dropping group ({} positions vs {} colors)",
-                self.id,
-                group.positions.len(),
-                group.colors.len()
-            );
-            return;
-        }
-        if !group.normals.is_empty() && group.normals.len() != group.positions.len() {
-            log::warn!(
-                "scene_batch[{}]: dropping group ({} positions vs {} normals)",
-                self.id,
-                group.positions.len(),
-                group.normals.len()
-            );
-            return;
-        }
-        if !group.uvs.is_empty() && group.uvs.len() != group.positions.len() {
-            log::warn!(
-                "scene_batch[{}]: dropping group ({} positions vs {} uvs)",
-                self.id,
-                group.positions.len(),
-                group.uvs.len()
-            );
+        if !super::chunk::validate_group(group) {
             return;
         }
         if !group.uvs.is_empty() && group.texture_page >= self.desc.layers {
@@ -351,24 +388,13 @@ impl SceneBatch {
             );
             return;
         }
-        if group
-            .indices
-            .iter()
-            .any(|i| (*i as usize) >= group.positions.len())
-        {
-            log::warn!(
-                "scene_batch[{}]: dropping group (index out of range)",
-                self.id
-            );
-            return;
-        }
         self.pending.push(Pending {
             positions: group.positions.clone(),
             colors: group.colors.clone(),
             normals: group.normals.clone(),
             uvs: group.uvs.clone(),
             texture_page: group.texture_page,
-            indices: group.indices.clone(),
+            indices: cull_degenerate(&group.positions, &group.indices),
             depth_test: group.depth_test,
         });
     }
@@ -388,6 +414,9 @@ impl SceneBatch {
         self.ranges.clear();
         self.pending.sort_by_key(|g| !g.depth_test);
         for g in self.pending.drain(..) {
+            if g.indices.len() < 3 {
+                continue; // all triangles culled as degenerate: draw nothing
+            }
             let base = self.verts.len() as u32;
             let lit = !g.normals.is_empty();
             let textured = !g.uvs.is_empty();
@@ -1067,11 +1096,88 @@ mod tests {
         batch.set_light(SceneLight {
             direction: [0.0, 0.0, 0.0],
             diffuse: -2.0,
+            ambient: [0.5, 0.25, 0.0],
             ..SceneLight::default()
         });
         let d = glam::Vec3::from(batch.camera.light_dir);
         assert!((d.length() - 1.0).abs() < 1e-6, "degenerate dir falls back");
         assert_eq!(batch.camera.diffuse, 0.0, "negative diffuse clamps");
+        assert_eq!(
+            batch.camera.ambient,
+            [0.5, 0.25, 0.0],
+            "ambient passes per-channel"
+        );
+    }
+
+    #[test]
+    fn out_of_range_uploads_drop_at_queue_time() {
+        let mut batch = SceneBatch::with_desc(
+            "test.uploads",
+            BatchDesc {
+                layer_size: 4,
+                layers: 1,
+                ..BatchDesc::default()
+            },
+        );
+        // Valid: queued.
+        batch.upload(SceneUpload {
+            page: 0,
+            x: 0,
+            y: 0,
+            w: 2,
+            h: 2,
+            rgba: vec![255; 2 * 2 * 4],
+        });
+        // Page past layers, rect past the layer edge, wrong byte count.
+        batch.upload(SceneUpload {
+            page: 3,
+            x: 0,
+            y: 0,
+            w: 2,
+            h: 2,
+            rgba: vec![255; 2 * 2 * 4],
+        });
+        batch.upload(SceneUpload {
+            page: 0,
+            x: 3,
+            y: 0,
+            w: 2,
+            h: 2,
+            rgba: vec![255; 2 * 2 * 4],
+        });
+        batch.upload(SceneUpload {
+            page: 0,
+            x: 0,
+            y: 0,
+            w: 2,
+            h: 2,
+            rgba: vec![255; 3],
+        });
+        assert_eq!(batch.uploads.len(), 1, "only the valid upload queues");
+    }
+
+    #[test]
+    fn degenerate_tris_cull_but_keep_the_group() {
+        let mut batch = SceneBatch::with_id("test.degen");
+        batch.set_camera(Mat4::IDENTITY);
+        let mut g = solid_box();
+        // Append a zero-area triangle (two shared verts) plus a NaN one:
+        // both must vanish while the original triangle still draws.
+        let base = g.positions.len() as u32;
+        g.positions.extend_from_slice(&[
+            [9.0, 9.0, 9.0],
+            [9.0, 9.0, 9.0],
+            [9.0, 9.0, 9.0],
+            [f32::NAN, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ]);
+        g.colors.extend_from_slice(&[[1.0, 0.0, 0.0]; 6]);
+        g.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base + 3, base + 4, base + 5]);
+        batch.push_group(&g);
+        batch.finish();
+        assert_eq!(batch.len_tris(), 1, "only the valid triangle draws");
     }
 
     #[test]

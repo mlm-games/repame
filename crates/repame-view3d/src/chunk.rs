@@ -10,6 +10,10 @@
 //! to its snapshot. Same GPU path, same validators — persistence lives
 //! entirely on the CPU side, in front of the batch.
 //!
+//! Validation lives here ([`validate_group`]) so the cache, the viewport's
+//! [`Frame3d::extend_chunks`](super::viewport::Frame3d::extend_chunks), and
+//! the batch share one implementation instead of three copies drifting.
+//!
 //! Generations mirror the rustbox `MeshGenerations` contract: the game owns a
 //! `u64` per chunk key, bumps it on edit, and the cache rebuilds entries
 //! whose generation moved. Stale background builds (older generation than
@@ -44,39 +48,7 @@ impl ChunkEntry {
         self.groups.clear();
         self.tri_count = 0;
         for group in groups {
-            if group.is_empty() {
-                continue;
-            }
-            if group.positions.len() != group.colors.len() {
-                log::warn!(
-                    "chunk_cache: dropping group ({} positions vs {} colors)",
-                    group.positions.len(),
-                    group.colors.len()
-                );
-                continue;
-            }
-            if !group.normals.is_empty() && group.normals.len() != group.positions.len() {
-                log::warn!(
-                    "chunk_cache: dropping group ({} positions vs {} normals)",
-                    group.positions.len(),
-                    group.normals.len()
-                );
-                continue;
-            }
-            if !group.uvs.is_empty() && group.uvs.len() != group.positions.len() {
-                log::warn!(
-                    "chunk_cache: dropping group ({} positions vs {} uvs)",
-                    group.positions.len(),
-                    group.uvs.len()
-                );
-                continue;
-            }
-            if group
-                .indices
-                .iter()
-                .any(|i| (*i as usize) >= group.positions.len())
-            {
-                log::warn!("chunk_cache: dropping group (index out of range)");
+            if !validate_group(group) {
                 continue;
             }
             self.tri_count += group.tri_count();
@@ -88,6 +60,55 @@ impl ChunkEntry {
     pub fn is_empty(&self) -> bool {
         self.groups.is_empty()
     }
+}
+
+/// Shared group validator: the single implementation behind
+/// [`ChunkEntry::insert`], [`Frame3d::extend_chunks`](super::viewport::Frame3d::extend_chunks),
+/// and [`SceneBatch::push_group`](super::render::SceneBatch::push_group).
+/// Matching attribute lengths, in-range indices; degenerate triangles are
+/// culled at batch time (not here — the cache stores source geometry, and
+/// picking runs its own per-triangle degeneracy test).
+/// Returns `false` for malformed groups (logged with a warning), never panics.
+///
+/// Page bounds (`texture_page < layers`) stay batch-side: the cache is
+/// desc-agnostic and the viewport resolves the effective desc per frame.
+pub fn validate_group(group: &MeshGroup) -> bool {
+    if group.is_empty() {
+        return false;
+    }
+    if group.positions.len() != group.colors.len() {
+        log::warn!(
+            "chunk_cache: dropping group ({} positions vs {} colors)",
+            group.positions.len(),
+            group.colors.len()
+        );
+        return false;
+    }
+    if !group.normals.is_empty() && group.normals.len() != group.positions.len() {
+        log::warn!(
+            "chunk_cache: dropping group ({} positions vs {} normals)",
+            group.positions.len(),
+            group.normals.len()
+        );
+        return false;
+    }
+    if !group.uvs.is_empty() && group.uvs.len() != group.positions.len() {
+        log::warn!(
+            "chunk_cache: dropping group ({} positions vs {} uvs)",
+            group.positions.len(),
+            group.uvs.len()
+        );
+        return false;
+    }
+    if group
+        .indices
+        .iter()
+        .any(|i| (*i as usize) >= group.positions.len())
+    {
+        log::warn!("chunk_cache: dropping group (index out of range)");
+        return false;
+    }
+    true
 }
 
 /// A validated group plus the chunk key that owns it, ready to append to a

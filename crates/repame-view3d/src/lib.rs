@@ -41,7 +41,7 @@ pub mod skin;
 pub mod viewport;
 
 pub use camera::{FAR, NEAR, OPENGL_TO_WGPU, OrbitCamera};
-pub use chunk::{ChunkCache, ChunkDraw, ChunkEntry};
+pub use chunk::{ChunkCache, ChunkDraw, ChunkEntry, validate_group};
 pub use gltf::{
     ImportSkip, ImportedMesh, fan_to_list, flatten_imported, import_slice, strip_to_list,
 };

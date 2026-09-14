@@ -27,8 +27,9 @@
 //! groups before flattening (`groups_culled` reports the count). glTF
 //! static import ([`gltf`]) and CPU skinning + animation tracks ([`skin`])
 //! emit the same groups, so imported scenes compose with procedural ones;
-//! the chunk mesher plugs in behind [`ChunkCache`] / [`Frame3d`]. The
-//! renderer only ever sees vertex/index/tint/normal/uv lists, so the GPU
+//! the chunk mesher ([`voxel`]: greedy Full faces, rotation-aware occlusion,
+//! exact shaped fallback, water pass) plugs in behind [`ChunkCache`] /
+//! [`Frame3d`]. The renderer only ever sees vertex/index/tint/normal/uv lists, so the GPU
 //! path stays stable while the asset side grows. The resims
 //! `resims-view3d` starter scene (CPU painter sort, no depth) is the
 //! reference producer, not a dependency.
@@ -52,6 +53,7 @@ pub mod render;
 pub mod skin;
 pub mod textures;
 pub mod viewport;
+pub mod voxel;
 
 pub use camera::{FAR, NEAR, OPENGL_TO_WGPU, OrbitCamera};
 pub use chunk::{ChunkCache, ChunkDraw, ChunkEntry, validate_group};
@@ -73,3 +75,7 @@ pub use textures::{
     decode_image_bytes, decode_slice_images, import_slice_textured,
 };
 pub use viewport::{CLICK_SLOP_PX, Frame3d, GeomHandle, View3dEvent, Viewport3d, ViewportGeom};
+pub use voxel::{
+    CHUNK_SIZE, Cell, ChunkMeshInput, ChunkMeshOutput, DIRS, FaceKind, THIN_HEIGHT, VoxelShape,
+    VoxelSource, build_chunk_mesh, neighbor_occludes, world_dir_to_local,
+};

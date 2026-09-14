@@ -21,6 +21,37 @@ use glam::Vec3;
 /// Linear-space RGB triplets (authored flat, output raw).
 pub type Rgb = [f32; 3];
 
+/// Surface material for lit groups (PBR-lite: metallic/roughness/emissive —
+/// the three params rustbox sets on every material).
+///
+/// Flat groups ignore it; the defaults preserve the legacy look exactly
+/// (dielectric, fully rough so the specular term is zero, no emission).
+/// Backwards compatibility is by construction, pinned by
+/// `default_material_renders_legacy` in `render::tests`.
+#[derive(Clone, Copy, Debug)]
+pub struct Material {
+    /// 0 = dielectric (specular is white), 1 = metal (specular tinted by
+    /// the albedo). Also kills the diffuse term at 1 (metals have none).
+    pub metallic: f32,
+    /// 0 = mirror, 1 = matte. The specular lobe is
+    /// `pow(max(dot(N, H), 0), mix(256, 8, roughness)) * (1 - roughness)`,
+    /// so 1.0 contributes nothing.
+    pub roughness: f32,
+    /// Added unlit on top of the lit result (linear RGB, may exceed 1.0
+    /// for glow-ish pops — rustbox drives link colors at 2-4x).
+    pub emissive: Rgb,
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            metallic: 0.0,
+            roughness: 1.0,
+            emissive: [0.0, 0.0, 0.0],
+        }
+    }
+}
+
 /// One draw group: indexed triangles in world space with a per-vertex
 /// tint. Games rebuild these per frame from their sim state (see
 /// [`Frame3d::push`](crate::Frame3d::push)); chunked/voxel worlds submit
@@ -41,6 +72,10 @@ pub type Rgb = [f32; 3];
 /// ghost previews); `alpha_cutoff` discards below a threshold (glTF
 /// `MASK`). All three default to opaque, so existing groups compile and
 /// draw untouched.
+///
+/// `material` (metallic/roughness/emissive) only affects lit groups; flat
+/// groups ignore it. One material per group: scenes with one material per
+/// primitive (the glTF norm) already submit that way.
 #[derive(Clone, Debug)]
 pub struct MeshGroup {
     /// World-space positions, Y-up right-handed.
@@ -74,6 +109,8 @@ pub struct MeshGroup {
     /// Alpha cutoff (default 0.0 = keep everything). Fragments whose
     /// final alpha falls below this discard, in both passes.
     pub alpha_cutoff: f32,
+    /// Surface material (lit groups only; flat groups ignore it).
+    pub material: Material,
     /// Triangle indices into `positions` / `colors` / `normals` / `uvs`.
     pub indices: Vec<u32>,
     /// Opaque geometry occludes (`true`) or always draws (`false`, e.g.
@@ -94,6 +131,7 @@ impl Default for MeshGroup {
             transparent: false,
             alpha: 1.0,
             alpha_cutoff: 0.0,
+            material: Material::default(),
             indices: Vec::new(),
             depth_test: false,
         }

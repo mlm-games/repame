@@ -757,6 +757,8 @@ pub struct SkinnedMesh {
     pub alpha: f32,
     /// Alpha cutoff (glTF `MASK` threshold; 0.0 = keep everything).
     pub alpha_cutoff: f32,
+    /// Surface material (glTF metallic/roughness/emissive factors).
+    pub material: super::mesh::Material,
     pub depth_test: bool,
 }
 
@@ -785,6 +787,7 @@ impl SkinnedMesh {
             transparent: self.transparent,
             alpha: self.alpha,
             alpha_cutoff: self.alpha_cutoff,
+            material: self.material,
             ..Default::default()
         };
         if self.is_empty() {
@@ -962,6 +965,7 @@ pub fn import_skinned(bytes: &[u8]) -> Result<Vec<SkinnedMesh>, gltf::Error> {
                 transparent,
                 alpha,
                 alpha_cutoff,
+                material: super::gltf::material_of(&prim.material()),
                 depth_test: true,
             });
         }
@@ -1372,6 +1376,31 @@ pub fn import_morphs(bytes: &[u8]) -> Result<Vec<MorphSet>, gltf::Error> {
     Ok(out)
 }
 
+/// Bone attachment (Godot `BoneAttachment3D`): fix a prop group to a joint.
+///
+/// `group` is baked in mesh-local space (an unskinned prop: a hat, a held
+/// gun, a pickup marker). `node` is the joint-space world matrix of the
+/// attach joint (from [`Skeleton::world_matrices`] — usually animated, so
+/// call this per frame after sampling the player), and `offset` is the
+/// prop's local transform relative to the bone (identity = prop origin on
+/// the joint). Returns the group moved into world space, in place.
+///
+/// Attributes (normals rotate, uvs untouched), material, pick id, and
+/// transparency ride along: the prop keeps its look and stays clickable.
+/// The prop must be rigid (no per-vertex skinning) — the whole group takes
+/// one matrix.
+pub fn attach_to_joint(group: &mut MeshGroup, node: &Mat4, offset: &Mat4) {
+    let m = *node * *offset;
+    let n = Mat4::from_quat(Quat::from_mat4(&m));
+    for p in &mut group.positions {
+        *p = m.transform_point3(Vec3::from(*p)).into();
+    }
+    for normal in &mut group.normals {
+        let v = n.transform_vector3(Vec3::from(*normal));
+        *normal = v.try_normalize().unwrap_or(Vec3::Y).into();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1632,6 +1661,60 @@ mod tests {
         p.set_speed_scale(f32::NAN);
         assert!(!p.advance(1.0).pose_changed);
         assert!(!p.advance(-1.0).pose_changed);
+    }
+
+    #[test]
+    fn attached_prop_follows_the_joint() {
+        let mut prop = MeshGroup {
+            pick_id: 5,
+            depth_test: true,
+            ..Default::default()
+        };
+        let v = [
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+        ];
+        for (a, b, c, d) in [
+            (0, 1, 2, 3),
+            (4, 6, 5, 7),
+            (0, 4, 5, 1),
+            (2, 6, 7, 3),
+            (0, 3, 7, 4),
+            (1, 5, 6, 2),
+        ] {
+            prop.push_quad_lit(v[a], v[b], v[c], v[d], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        }
+        prop.material = super::super::mesh::Material {
+            metallic: 0.5,
+            ..Default::default()
+        };
+        let node = Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0))
+            * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let offset = Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0));
+        attach_to_joint(&mut prop, &node, &offset);
+        let c = prop
+            .positions
+            .iter()
+            .fold(Vec3::ZERO, |a, p| a + Vec3::from(*p))
+            / prop.positions.len() as f32;
+        assert!(
+            (c.x - 0.0).abs() < 1e-4 && (c.z + 1.0).abs() < 1e-4,
+            "centroid carried by the joint: {c:?}"
+        );
+        assert!(
+            (c.y - 3.0).abs() <= 1.0,
+            "centroid inside the moved cube: {c:?}"
+        );
+        assert!(prop.normals.iter().all(|n| *n == [0.0, 1.0, 0.0]));
+        assert_eq!(prop.pick_id, 5);
+        assert_eq!(prop.material.metallic, 0.5);
+        assert_eq!(prop.tri_count(), 12);
     }
 
     #[test]

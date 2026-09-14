@@ -39,6 +39,20 @@ pub fn alpha_mode(material: &gltf::Material<'_>) -> (bool, f32, f32) {
     }
 }
 
+/// A primitive's surface material: glTF metallic/roughness factors plus
+/// the emissive factor, in [`MeshGroup`](super::mesh::MeshGroup) terms.
+/// Factors are file-authored (may exceed 1.0 for emissive pops); the batch
+/// clamps metallic/roughness into range at flatten time.
+pub fn material_of(material: &gltf::Material<'_>) -> super::mesh::Material {
+    let pbr = material.pbr_metallic_roughness();
+    let emissive = material.emissive_factor();
+    super::mesh::Material {
+        metallic: pbr.metallic_factor(),
+        roughness: pbr.roughness_factor(),
+        emissive: [emissive[0], emissive[1], emissive[2]],
+    }
+}
+
 impl ImportedMesh {
     pub fn tri_count(&self) -> usize {
         self.groups.iter().map(|g| g.tri_count()).sum()
@@ -166,6 +180,7 @@ fn import_primitive(
         transparent,
         alpha,
         alpha_cutoff,
+        material: material_of(&prim.material()),
         ..Default::default()
     };
     group.positions.reserve_exact(positions.len());
@@ -356,6 +371,23 @@ mod tests {
         assert_eq!(mats.len(), 2);
         assert_eq!(alpha_mode(&mats[0]), (true, 1.0, 0.0));
         assert_eq!(alpha_mode(&mats[1]), (false, 1.0, 0.5));
+    }
+
+    #[test]
+    fn material_factors_import_verbatim() {
+        let glb = quad_gltf();
+        let meshes = import_slice(&glb).expect("fixture parses");
+        let g = &meshes[0].groups[0];
+        assert_eq!((g.material.metallic, g.material.roughness), (1.0, 1.0));
+        assert_eq!(g.material.emissive, [0.0, 0.0, 0.0]);
+        let doc_json = r#"{"asset":{"version":"2.0"},"materials":[{"pbrMetallicRoughness":{"metallicFactor":0.2,"roughnessFactor":0.6},"emissiveFactor":[2.0,0.5,0.0]}],"scenes":[{"nodes":[]}]}"#;
+        let (doc, _, _) = gltf::import_slice(wrap_json(doc_json)).expect("material fixture parses");
+        let mats: Vec<gltf::Material> = doc.materials().collect();
+        assert_eq!(mats.len(), 1);
+        let m = material_of(&mats[0]);
+        assert!((m.metallic - 0.2).abs() < 1e-6, "{m:?}");
+        assert!((m.roughness - 0.6).abs() < 1e-6, "{m:?}");
+        assert_eq!(m.emissive, [2.0, 0.5, 0.0]);
     }
 
     #[test]

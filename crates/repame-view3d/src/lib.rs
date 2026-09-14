@@ -7,10 +7,14 @@
 //! back. Camera state lives in game signals, never in the renderer.
 //!
 //! Scope (full 3D, deeply — lands behind [`MeshGroup`] / [`Frame3d`]):
-//! flat-shaded and single-light lit indexed meshes with a real GPU depth
-//! buffer, an orbit camera, ground-plane picking, and CPU mesh picking
-//! (ray vs groups through the same camera; groups opt in with
-//! [`MeshGroup::pick_id`]). Textures plug into
+//! flat-shaded and lit indexed meshes (single directional + ambient, with
+//! per-group PBR-lite [`Material`](crate::Material): metallic/roughness/
+//! emissive) with a real GPU depth buffer, linear distance fog + Reinhard
+//! exposure tonemap on the frame light, an orbit camera, ground-plane
+//! picking, and CPU mesh picking (ray vs groups through the same camera;
+//! groups opt in with [`MeshGroup::pick_id`]). Bone attachments ride
+//! [`attach_to_joint`](crate::attach_to_joint) (Godot `BoneAttachment3D`:
+//! rigid props fixed to animated joints). Textures plug into
 //! the same path: mesh groups carry uvs + one array page, and the batch
 //! owns the texture array (fed from per-frame uploads) — tint, texture,
 //! and light compose in that order. Transparency is a second pass
@@ -48,16 +52,16 @@ pub mod viewport;
 pub use camera::{FAR, NEAR, OPENGL_TO_WGPU, OrbitCamera};
 pub use chunk::{ChunkCache, ChunkDraw, ChunkEntry, validate_group};
 pub use gltf::{
-    ImportSkip, ImportedMesh, alpha_mode, fan_to_list, flatten_imported, import_slice,
+    ImportSkip, ImportedMesh, alpha_mode, fan_to_list, flatten_imported, import_slice, material_of,
     strip_to_list,
 };
-pub use mesh::{MeshGroup, Rgb, shade, shade_for_dir};
+pub use mesh::{Material, MeshGroup, Rgb, shade, shade_for_dir};
 pub use pick::{MeshHit, group_bounds, pick_ray, pick_screen, ray_aabb, ray_triangle};
 pub use render::{BatchDesc, SceneBatch, SceneFilter, SceneLight, SceneUpload};
 pub use render::{paint_scene_with_id, prepare_scene_with_id};
 pub use skin::{
     Animation, Interp, JointPose, MorphSet, MorphTrack, NodePose, SkeletalAdvance, Skeleton,
-    SkeletonLoop, SkeletonPlayer, SkinnedMesh, import_animations, import_morphs, import_skeleton,
-    import_skinned,
+    SkeletonLoop, SkeletonPlayer, SkinnedMesh, attach_to_joint, import_animations, import_morphs,
+    import_skeleton, import_skinned,
 };
 pub use viewport::{CLICK_SLOP_PX, Frame3d, GeomHandle, View3dEvent, Viewport3d, ViewportGeom};

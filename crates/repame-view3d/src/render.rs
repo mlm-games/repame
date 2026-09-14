@@ -36,6 +36,10 @@ struct Camera {
     diffuse: f32,
     ambient: vec3<f32>,
     _pad1: f32,
+    fog: vec4<f32>,
+    fog_range: vec4<f32>,
+    cam_pos: vec3<f32>,
+    _pad2: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -52,6 +56,10 @@ struct VsOut {
     @location(5) page: f32,
     @location(6) alpha: f32,
     @location(7) cutoff: f32,
+    @location(8) world_pos: vec3<f32>,
+    @location(9) metallic: f32,
+    @location(10) roughness: f32,
+    @location(11) emissive: vec3<f32>,
 };
 
 @vertex
@@ -65,6 +73,10 @@ fn vs_main(
     @location(6) page: f32,
     @location(7) alpha: f32,
     @location(8) cutoff: f32,
+    @location(9) world: vec3<f32>,
+    @location(10) metallic: f32,
+    @location(11) roughness: f32,
+    @location(12) emissive: vec3<f32>,
 ) -> VsOut {
     var out: VsOut;
     out.pos = camera.view_proj * vec4<f32>(pos, 1.0);
@@ -76,6 +88,10 @@ fn vs_main(
     out.page = page;
     out.alpha = alpha;
     out.cutoff = cutoff;
+    out.world_pos = pos;
+    out.metallic = metallic;
+    out.roughness = roughness;
+    out.emissive = emissive;
     return out;
 }
 
@@ -95,9 +111,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
     let n = normalize(in.normal);
+    let v = normalize(camera.cam_pos - in.world_pos);
     let ndl = max(dot(n, camera.light_dir), 0.0);
-    let lit = base * (camera.ambient + camera.light_color * (camera.diffuse * ndl));
-    let rgb = mix(base, lit, in.lit_flag);
+    let diffuse = base * (1.0 - in.metallic) * ndl * camera.diffuse;
+    let h = normalize(camera.light_dir + v);
+    let spec_pow = mix(256.0, 8.0, clamp(in.roughness, 0.0, 1.0));
+    let spec = mix(camera.light_color, base, in.metallic)
+        * pow(max(dot(n, h), 0.0), spec_pow)
+        * (1.0 - in.roughness) * camera.diffuse;
+    let lit = base * camera.ambient + camera.light_color * diffuse + spec + in.emissive;
+    var rgb = mix(base, lit, in.lit_flag);
+    let dist = length(camera.cam_pos - in.world_pos);
+    let fog_t = clamp((dist - camera.fog_range.x) / max(camera.fog_range.y - camera.fog_range.x, 1e-6), 0.0, 1.0) * clamp(camera.fog.x, 0.0, 1.0);
+    rgb = mix(rgb, camera.fog.yzw, fog_t * in.lit_flag);
+    let e = camera.fog_range.z;
+    rgb = (rgb * e) / (rgb * (e - 1.0) + vec3<f32>(1.0));
     return vec4<f32>(rgb, alpha);
 }
 "#;
@@ -120,15 +148,24 @@ struct CameraUniform {
     diffuse: f32,
     ambient: [f32; 3],
     _pad1: f32,
+    fog: [f32; 4],
+    fog_range: [f32; 4],
+    cam_pos: [f32; 3],
+    _pad2: f32,
 }
 
-const _: () = assert!(size_of::<CameraUniform>() == 112);
+const _: () = assert!(size_of::<CameraUniform>() == 160);
 
 /// One directional light + ambient for the frame, linear space.
 ///
 /// The direction points from the surface toward the light (Godot
 /// `DirectionalLight3D` convention). `shade_for_dir` producers keep
 /// working: their baked colors ride the unlit path untouched.
+///
+/// `fog`/`fog_end`/`exposure` ride the same uniform block: fog blends lit
+/// fragments toward `fog_color` between `fog_start` and `fog_end` camera
+/// distances (density 0 disables); `exposure` 1.0 is the identity. Flat
+/// groups ignore both.
 #[derive(Clone, Copy, Debug)]
 pub struct SceneLight {
     /// Unit vector from the surface toward the light (normalized on use).
@@ -139,6 +176,16 @@ pub struct SceneLight {
     pub diffuse: f32,
     /// Ambient floor (linear RGB added to every lit fragment).
     pub ambient: [f32; 3],
+    /// Fog density 0..1 (0 = off).
+    pub fog: f32,
+    /// Fog color (linear RGB).
+    pub fog_color: [f32; 3],
+    /// Fog starts here (world units from the camera).
+    pub fog_start: f32,
+    /// Fog is full past here (world units from the camera).
+    pub fog_end: f32,
+    /// Reinhard exposure (1.0 = off, identity).
+    pub exposure: f32,
 }
 
 impl Default for SceneLight {
@@ -148,6 +195,11 @@ impl Default for SceneLight {
             color: [1.0, 1.0, 1.0],
             diffuse: 0.9,
             ambient: [0.35, 0.35, 0.38],
+            fog: 0.0,
+            fog_color: [0.5, 0.55, 0.6],
+            fog_start: 100.0,
+            fog_end: 600.0,
+            exposure: 1.0,
         }
     }
 }
@@ -159,6 +211,8 @@ impl Default for SceneLight {
 /// carry a dummy uv and `tex_mix = 0.0` (no sampling, tint only).
 /// `alpha` is the group multiplier and `cutoff` the discard threshold
 /// (both per-vertex so one buffer serves all three alpha behaviors).
+/// `world` is the raw position for the camera-distance fog/specular math;
+/// `metallic`/`roughness`/`emissive` are the group [`Material`](super::mesh::Material).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vert {
@@ -171,6 +225,10 @@ struct Vert {
     page: f32,
     alpha: f32,
     cutoff: f32,
+    world: [f32; 3],
+    metallic: f32,
+    roughness: f32,
+    emissive: [f32; 3],
 }
 
 /// Texture sampling for batch layers (same shape as `repame-sprite`).
@@ -260,6 +318,7 @@ struct Pending {
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     texture_page: u32,
+    material: super::mesh::Material,
     /// World-space AABB center (computed at push time) for back-to-front
     /// transparent sorting. Opaque groups ignore it; `None` (degenerate
     /// bounds — never happens post-validation, belt and braces) sorts
@@ -335,6 +394,10 @@ impl SceneBatch {
                 diffuse: 0.9,
                 ambient: [0.35, 0.35, 0.38],
                 _pad1: 0.0,
+                fog: [0.0, 0.5, 0.55, 0.6],
+                fog_range: [100.0, 600.0, 1.0, 0.0],
+                cam_pos: [0.0, 0.0, 0.0],
+                _pad2: 0.0,
             },
             camera_pos: [0.0, 0.0, 0.0],
             view_proj: Mat4::IDENTITY,
@@ -357,11 +420,13 @@ impl SceneBatch {
     }
 
     /// Camera world position for transparent back-to-front sorting (see
-    /// [`SceneBatch::finish`]). The viewport feeds `cam.eye()` from the
-    /// same snapshot as the view-projection matrix, so sort order and
-    /// pixels share one camera.
+    /// [`SceneBatch::finish`]) and the specular/fog view vector. The
+    /// viewport feeds `cam.eye()` from the same snapshot as the
+    /// view-projection matrix, so sort order, speculars, fog, and pixels
+    /// share one camera.
     pub fn set_camera_pos(&mut self, pos: [f32; 3]) {
         self.camera_pos = pos;
+        self.camera.cam_pos = pos;
     }
 
     /// Groups culled by the last [`SceneBatch::finish`].
@@ -381,6 +446,22 @@ impl SceneBatch {
         self.camera.ambient = light.ambient;
         self.camera.light_color = light.color;
         self.camera.diffuse = light.diffuse.max(0.0);
+        self.camera.fog = [
+            light.fog.clamp(0.0, 1.0),
+            light.fog_color[0],
+            light.fog_color[1],
+            light.fog_color[2],
+        ];
+        self.camera.fog_range = [
+            light.fog_start.max(0.0),
+            light.fog_end.max(light.fog_start.max(0.0) + 1e-3),
+            if light.exposure.is_finite() && light.exposure > 0.0 {
+                light.exposure
+            } else {
+                1.0
+            },
+            0.0,
+        ];
     }
 
     pub fn clear(&mut self) {
@@ -475,6 +556,7 @@ impl SceneBatch {
             normals: group.normals.clone(),
             uvs: group.uvs.clone(),
             texture_page: group.texture_page,
+            material: group.material,
             center,
             indices: cull_degenerate(&group.positions, &group.indices),
             transparent: group.transparent,
@@ -534,7 +616,8 @@ impl SceneBatch {
     /// Flat vertices (no normals) carry a dummy up-normal and `lit = 0.0`
     /// so the shader passes their baked color through untouched.
     /// Untextured vertices carry a dummy uv and `tex_mix = 0.0` so the
-    /// shader skips the sample.
+    /// shader skips the sample. Material rides every vertex but only lit
+    /// fragments read it.
     pub fn finish(&mut self) {
         self.verts.clear();
         self.indices.clear();
@@ -581,6 +664,7 @@ impl SceneBatch {
             let lit = !g.normals.is_empty();
             let textured = !g.uvs.is_empty();
             let page = g.texture_page as f32;
+            let mat = g.material;
             self.verts
                 .extend(
                     g.positions
@@ -597,6 +681,14 @@ impl SceneBatch {
                             page,
                             alpha: g.alpha,
                             cutoff: g.alpha_cutoff,
+                            world: *p,
+                            metallic: mat.metallic.clamp(0.0, 1.0),
+                            roughness: if mat.roughness.is_finite() {
+                                mat.roughness.clamp(0.0, 1.0)
+                            } else {
+                                1.0
+                            },
+                            emissive: mat.emissive,
                         }),
                 );
             let start = self.indices.len() as u32;
@@ -828,6 +920,26 @@ impl SceneBatch {
                     offset: 60,
                     shader_location: 8,
                 },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 64,
+                    shader_location: 9,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 76,
+                    shader_location: 10,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 80,
+                    shader_location: 11,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 84,
+                    shader_location: 12,
+                },
             ],
         })];
         let mk = |label: &'static str, depth_test: bool, transparent: bool| {
@@ -1047,6 +1159,15 @@ impl SceneBatch {
     #[cfg(test)]
     pub(crate) fn test_vert_lighting(&self) -> Vec<([f32; 3], f32)> {
         self.verts.iter().map(|v| (v.normal, v.lit)).collect()
+    }
+
+    /// Test-only vertex readout after [`finish`]: (metallic, roughness, emissive).
+    #[cfg(test)]
+    pub(crate) fn test_vert_material(&self) -> Vec<(f32, f32, [f32; 3])> {
+        self.verts
+            .iter()
+            .map(|v| (v.metallic, v.roughness, v.emissive))
+            .collect()
     }
 
     /// Test-only vertex readout after [`finish`]: (uv, tex_mix, page).
@@ -1471,6 +1592,85 @@ mod tests {
         );
     }
 
+    /// The default material reproduces the legacy path exactly: dielectric,
+    /// fully rough (specular contributes nothing), no emission. Any drift
+    /// here breaks every existing lit scene's look.
+    #[test]
+    fn default_material_renders_legacy() {
+        let m = super::super::mesh::Material::default();
+        assert_eq!((m.metallic, m.roughness), (0.0, 1.0));
+        assert_eq!(m.emissive, [0.0, 0.0, 0.0]);
+        let mut batch = SceneBatch::with_id("test.legacy");
+        batch.set_camera(Mat4::IDENTITY);
+        batch.set_light(SceneLight::default());
+        let mut g = MeshGroup {
+            depth_test: true,
+            ..Default::default()
+        };
+        g.push_quad_lit(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.4, 0.5, 0.6],
+            [0.0, 1.0, 0.0],
+        );
+        batch.push_group(&g);
+        batch.finish();
+        assert_eq!(
+            batch.test_vert_material(),
+            vec![(0.0, 1.0, [0.0, 0.0, 0.0]); 6]
+        );
+        assert_eq!(batch.camera.fog[0], 0.0);
+        assert_eq!(batch.camera.fog_range[2], 1.0);
+    }
+
+    /// Materials ride the vertices (clamped), and bad light extras fall
+    /// back instead of poisoning the uniform.
+    #[test]
+    fn material_and_light_extras_plumb_and_clamp() {
+        let mut batch = SceneBatch::with_id("test.material");
+        batch.set_camera(Mat4::IDENTITY);
+        batch.set_light(SceneLight {
+            fog: 2.5,
+            fog_color: [0.1, 0.2, 0.3],
+            fog_start: 10.0,
+            fog_end: 5.0, // inverted: clamped above start
+            exposure: f32::NAN,
+            ..SceneLight::default()
+        });
+        assert_eq!(batch.camera.fog, [1.0, 0.1, 0.2, 0.3]);
+        assert!(
+            batch.camera.fog_range[1] > batch.camera.fog_range[0],
+            "end clamped above start: {:?}",
+            batch.camera.fog_range
+        );
+        assert_eq!(batch.camera.fog_range[2], 1.0, "NaN exposure falls back");
+        let mut g = MeshGroup {
+            depth_test: true,
+            ..Default::default()
+        };
+        g.material = super::super::mesh::Material {
+            metallic: 9.0,
+            roughness: -1.0,
+            emissive: [2.0, 0.0, 0.0],
+        };
+        g.push_quad_lit(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 0.0],
+        );
+        batch.push_group(&g);
+        batch.finish();
+        assert_eq!(
+            batch.test_vert_material(),
+            vec![(1.0, 0.0, [2.0, 0.0, 0.0]); 6]
+        );
+    }
+
     #[test]
     fn out_of_range_uploads_drop_at_queue_time() {
         let mut batch = SceneBatch::with_desc(
@@ -1866,6 +2066,7 @@ mod tests {
             color: [1.0, 1.0, 1.0],
             diffuse: 1.0,
             ambient: [0.0, 0.0, 0.0],
+            ..SceneLight::default()
         };
         let Some(full) = render_case(up_quad(true), face_light) else {
             return;
@@ -2065,6 +2266,7 @@ mod tests {
             color: [1.0, 1.0, 1.0],
             diffuse: 0.0,
             ambient: [1.0, 1.0, 1.0],
+            ..SceneLight::default()
         };
         let Some(px) = render_case(full_quad(0, false, [1.0, 1.0, 1.0]), neutral) else {
             return;
@@ -2107,6 +2309,7 @@ mod tests {
             color: [1.0, 1.0, 1.0],
             diffuse: 1.0,
             ambient: [0.0, 0.0, 0.0],
+            ..SceneLight::default()
         };
         let Some(px) = render_case(full_quad(0, true, [1.0, 1.0, 1.0]), face_light) else {
             return;
@@ -2266,5 +2469,155 @@ mod tests {
             return;
         };
         assert_eq!(px, [255, 0, 0, 255], "cutoff discards the ghost: {px:?}");
+    }
+
+    /// End-to-end GPU proof for fog + emissive + metallic: an unlit-white
+    /// quad under full fog reads back the fog color; a black quad with a
+    /// red emissive reads back red in the dark; a full-metal quad under a
+    /// back light (no diffuse possible) reads back black. Skips gracefully
+    /// where no GPU exists.
+    #[test]
+    fn offscreen_fog_emissive_metal() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+        use super::super::mesh::Material;
+
+        struct Fog {
+            cam: OrbitCamera,
+            group: MeshGroup,
+            light: SceneLight,
+        }
+
+        impl WgpuCallback for Fog {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.fog");
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.set_camera_pos(self.cam.eye().into());
+                batch.set_light(self.light);
+                batch.push_group(&self.group);
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.fog",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut wgpu::RenderPass<'static>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_id("test.fog", rpass, resources);
+            }
+        }
+
+        fn render_case(group: MeshGroup, light: SceneLight) -> Option<[u8; 4]> {
+            let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("SKIP fog test (no GPU): {e}");
+                    return None;
+                }
+            };
+            let cam = OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: 0.0,
+                pitch: 0.9,
+                dist: 30.0,
+                fov_y_deg: 30.0,
+            };
+            let scene = Scene {
+                clear_color: Color::from_rgba(0, 0, 0, 255),
+                nodes: vec![SceneNode::Callback {
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 64.0,
+                        h: 64.0,
+                    },
+                    payload: Callback::new(Fog { cam, group, light }),
+                }],
+            };
+            let px = renderer
+                .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+                .expect("offscreen render");
+            let i = ((32 * 64 + 32) * 4) as usize;
+            Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+        }
+
+        fn sheet(material: Material) -> MeshGroup {
+            let mut g = MeshGroup {
+                depth_test: true,
+                material,
+                ..Default::default()
+            };
+            g.push_quad_lit(
+                [-5.0, 5.0, 5.0],
+                [5.0, 5.0, 5.0],
+                [5.0, 5.0, -5.0],
+                [-5.0, 5.0, -5.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 0.0],
+            );
+            g
+        }
+
+        let fogged = SceneLight {
+            fog: 1.0,
+            fog_color: [0.25, 0.25, 0.25],
+            fog_start: 0.0,
+            fog_end: 1.0,
+            ..SceneLight::default()
+        };
+        let Some(px) = render_case(sheet(Material::default()), fogged) else {
+            return;
+        };
+        assert_eq!(px, [137, 137, 137, 255], "full fog wins: {px:?}");
+
+        let dark = SceneLight {
+            direction: [0.0, -1.0, 0.0],
+            ambient: [0.0, 0.0, 0.0],
+            diffuse: 1.0,
+            ..SceneLight::default()
+        };
+        let mut glow = sheet(Material {
+            emissive: [1.0, 0.0, 0.0],
+            ..Material::default()
+        });
+        glow.colors = vec![[0.0, 0.0, 0.0]; glow.colors.len()];
+        let Some(px) = render_case(glow, dark) else {
+            return;
+        };
+        assert_eq!(px, [255, 0, 0, 255], "emissive survives darkness: {px:?}");
+
+        let metal = sheet(Material {
+            metallic: 1.0,
+            roughness: 1.0,
+            ..Material::default()
+        });
+        let Some(px) = render_case(metal, dark) else {
+            return;
+        };
+        assert_eq!(px, [0, 0, 0, 255], "metal kills diffuse: {px:?}");
     }
 }

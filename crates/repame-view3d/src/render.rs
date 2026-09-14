@@ -1084,6 +1084,7 @@ mod tests {
             normals: vec![],
             uvs: vec![],
             texture_page: 0,
+            pick_id: 0,
             indices: vec![0, 0, 0],
             depth_test: true,
         });
@@ -1094,6 +1095,7 @@ mod tests {
             normals: vec![],
             uvs: vec![],
             texture_page: 0,
+            pick_id: 0,
             indices: vec![0, 1, 9],
             depth_test: true,
         });
@@ -1104,6 +1106,7 @@ mod tests {
             normals: vec![[0.0, 1.0, 0.0]],
             uvs: vec![],
             texture_page: 0,
+            pick_id: 0,
             indices: vec![0, 1, 2],
             depth_test: true,
         });
@@ -1114,6 +1117,7 @@ mod tests {
             normals: vec![],
             uvs: vec![[0.0, 0.0]],
             texture_page: 0,
+            pick_id: 0,
             indices: vec![0, 1, 2],
             depth_test: true,
         });

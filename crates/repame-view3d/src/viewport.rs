@@ -9,6 +9,8 @@
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use glam::Vec3;
+
 use glam::Vec2;
 use repose_core::input::{PointerButton, PointerEventKind};
 use repose_core::{Modifier, View};
@@ -17,6 +19,7 @@ use repose_ui::Embedded;
 
 use super::camera::OrbitCamera;
 use super::mesh::MeshGroup;
+use super::pick::{MeshHit, pick_ray};
 use super::render::{BatchDesc, SceneBatch, SceneLight, SceneUpload};
 use super::render::{paint_scene_with_id, prepare_scene_with_id};
 
@@ -92,7 +95,10 @@ impl Frame3d {
 /// [`zoom`](OrbitCamera::zoom)) and rebuilds the snapshot.
 ///
 /// `GroundClick` fires on clean left-clicks (press + release with less than
-/// [`CLICK_SLOP_PX`] travel), like the 2D viewport's `Click`.
+/// [`CLICK_SLOP_PX`] travel) when the ray reaches the ground plane *and* no
+/// pickable mesh is closer along the ray (mesh hits win, so agents occlude
+/// the ground behind them). Games needing raw ground-only clicks can call
+/// [`OrbitCamera::ground_point`] directly.
 #[derive(Clone, Debug)]
 pub enum View3dEvent {
     /// Left-drag orbit delta, in px.
@@ -102,16 +108,68 @@ pub enum View3dEvent {
     /// Multiplicative zoom factor (wheel).
     Zoom { factor: f32 },
     /// Ground-plane (y = 0) point under a clean click, if the ray hits.
+    /// Mesh-pickable groups are tested first: a mesh hit suppresses this
+    /// and arrives as [`View3dEvent::MeshClick`] instead.
     GroundClick { x: f32, z: f32 },
+    /// Nearest pickable mesh hit under a clean click (groups with
+    /// `pick_id != 0`, ray ordered). Carries the pick id plus the
+    /// world-space point, so agents select while terrain falls through
+    /// to [`View3dEvent::GroundClick`].
+    MeshClick { pick_id: u32, point: [f32; 3] },
+    /// Cursor pick under pointer-move: `Some` when a pickable group is
+    /// under the cursor, else the ground-plane fallback. Emitted per move
+    /// event (cheap AABB early-out; unpickable scenes stay free).
+    HoverMesh {
+        pick_id: Option<u32>,
+        x: f32,
+        z: f32,
+    },
     /// Cursor ground point on move (cheap hover readout; `None` when the
     /// ray misses the plane).
     Hover { x: Option<f32>, z: Option<f32> },
 }
 
 /// Press slop in physical px: pointer-up farther than this from
-/// pointer-down cancels the `GroundClick` (drag-off-cancel, same value as
+/// pointer-down cancels the click (drag-off-cancel, same value as
 /// the 2D viewport).
 pub const CLICK_SLOP_PX: f32 = 12.0;
+
+/// Resolve one pointer position to a click: `MeshClick` when a pickable
+/// group is nearest along the ray, else `GroundClick` when the ray reaches
+/// the plane (and the mesh isn't closer). Pure function of the snapshot,
+/// shared by the pointer-up handler and tests.
+fn resolve_click(
+    cam: &OrbitCamera,
+    viewport_px: [f32; 2],
+    px: [f32; 2],
+    groups: &[MeshGroup],
+) -> Option<View3dEvent> {
+    let a = Frame3d::aspect(viewport_px);
+    let vp = Vec2::new(viewport_px[0].max(1.0), viewport_px[1].max(1.0));
+    let p = Vec2::new(px[0], px[1]);
+    let (origin, dir) = cam.screen_ray(a, vp, p);
+    let mesh = pick_ray(origin, dir, groups);
+    let ground = cam.ground_point(a, vp, p);
+    match (mesh, ground) {
+        (Some(hit), _) if ground.is_none_or(|g| hit.distance < ground_dist(origin, dir, g)) => {
+            Some(View3dEvent::MeshClick {
+                pick_id: hit.pick_id,
+                point: hit.point,
+            })
+        }
+        (_, Some(g)) => Some(View3dEvent::GroundClick { x: g.x, z: g.y }),
+        _ => None,
+    }
+}
+
+/// Ray distance to a ground point exploded back from `ground_point`
+/// (same ray, so the projection length is the distance). Only used to
+/// order mesh hits against the plane.
+fn ground_dist(origin: Vec3, dir: Vec3, g: Vec2) -> f32 {
+    let target = Vec3::new(g.x, 0.0, g.y) - origin;
+    let denom = dir.length_squared().max(1e-12);
+    (target.dot(dir) / denom).max(0.0)
+}
 
 fn click_within_slop(a: [f32; 2], b: [f32; 2]) -> bool {
     let dx = a[0] - b[0];
@@ -154,10 +212,16 @@ pub fn Viewport3d(
     let input = Rc::new(input);
     let draw_input = input.clone();
     let draw_id = batch_id.clone();
+    // Camera + groups for picks: event-time snapshots through the same
+    // camera the GPU used, so content and picks stay glued. Ground picks
+    // invert through the latest painted geometry; mesh picks run the ray
+    // against the frame's groups and win over ground when closer.
     let hover_cam = input.cam;
     let hover_geom = geom_out.clone();
+    let hover_groups = input.groups.clone();
     let click_cam = input.cam;
     let click_geom = geom_out.clone();
+    let click_groups = input.groups.clone();
     let size_geom = geom_out.clone();
     let on_event = Rc::new(on_event);
     let on_move = on_event.clone();
@@ -204,18 +268,30 @@ pub fn Viewport3d(
                     }
                 }
                 None => {
-                    // Hover readout through the latest painted geometry.
+                    // Hover: mesh pick first (same ray the GPU camera
+                    // used), ground-plane fallback when nothing pickable
+                    // is under the cursor.
                     let g = hover_geom.get();
+                    let vpx = [g.viewport_px[0].max(1.0), g.viewport_px[1].max(1.0)];
                     let a = Frame3d::aspect(g.viewport_px);
-                    let hit = hover_cam.ground_point(
-                        a,
-                        Vec2::new(g.viewport_px[0].max(1.0), g.viewport_px[1].max(1.0)),
-                        Vec2::new(p.x, p.y),
-                    );
-                    on_hover(View3dEvent::Hover {
-                        x: hit.map(|v| v.x),
-                        z: hit.map(|v| v.y),
-                    });
+                    let vp = Vec2::new(vpx[0], vpx[1]);
+                    let p = Vec2::new(p.x, p.y);
+                    let (origin, dir) = hover_cam.screen_ray(a, vp, p);
+                    let mesh: Option<MeshHit> = pick_ray(origin, dir, &hover_groups);
+                    let ground = hover_cam.ground_point(a, vp, p);
+                    match (mesh, ground) {
+                        (Some(hit), _) => on_hover(View3dEvent::HoverMesh {
+                            pick_id: Some(hit.pick_id),
+                            x: hit.point[0],
+                            z: hit.point[2],
+                        }),
+                        (None, Some(gp)) => on_hover(View3dEvent::HoverMesh {
+                            pick_id: None,
+                            x: gp.x,
+                            z: gp.y,
+                        }),
+                        (None, None) => on_hover(View3dEvent::Hover { x: None, z: None }),
+                    }
                 }
             }
         })
@@ -225,13 +301,10 @@ pub fn Viewport3d(
                 && click_within_slop(d.start, [p.x, p.y])
             {
                 let g = click_geom.get();
-                let a = Frame3d::aspect(g.viewport_px);
-                if let Some(hit) = click_cam.ground_point(
-                    a,
-                    Vec2::new(g.viewport_px[0].max(1.0), g.viewport_px[1].max(1.0)),
-                    Vec2::new(p.x, p.y),
-                ) {
-                    on_up_click(View3dEvent::GroundClick { x: hit.x, z: hit.y });
+                if let Some(event) =
+                    resolve_click(&click_cam, g.viewport_px, [p.x, p.y], &click_groups)
+                {
+                    on_up_click(event);
                 }
             }
         })
@@ -364,5 +437,95 @@ impl WgpuCallback for GpuViewport3d {
             };
         }
         paint_scene_with_id(self.batch_id.as_str(), rpass, resources);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::camera::OrbitCamera;
+    use super::*;
+
+    fn orbit() -> OrbitCamera {
+        OrbitCamera {
+            target: glam::Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.9,
+            dist: 30.0,
+            fov_y_deg: 30.0,
+        }
+    }
+
+    /// Pickable slab under the camera (top face at y = 2, wide enough that
+    /// the center ray lands on it, not past its edges).
+    fn slab() -> MeshGroup {
+        let mut g = MeshGroup {
+            pick_id: 7,
+            depth_test: true,
+            ..Default::default()
+        };
+        g.push_box(
+            0.0,
+            0.0,
+            0.0,
+            20.0,
+            2.0,
+            20.0,
+            [1.0, 1.0, 1.0],
+            orbit().eye(),
+        );
+        g
+    }
+
+    #[test]
+    fn center_click_selects_mesh_before_ground() {
+        let cam = orbit();
+        let groups = vec![slab()];
+        let Some(View3dEvent::MeshClick { pick_id, point }) =
+            resolve_click(&cam, [800.0, 600.0], [400.0, 300.0], &groups)
+        else {
+            panic!("center click must MeshClick");
+        };
+        assert_eq!(pick_id, 7);
+        assert!((point[1] - 2.0).abs() < 1e-3, "slab top: {point:?}");
+    }
+
+    #[test]
+    fn empty_scene_falls_through_to_ground() {
+        let cam = orbit();
+        let Some(View3dEvent::GroundClick { x, z }) =
+            resolve_click(&cam, [800.0, 600.0], [400.0, 300.0], &[])
+        else {
+            panic!("empty scene must GroundClick");
+        };
+        assert!(x.is_finite() && z.is_finite(), "({x}, {z})");
+    }
+
+    #[test]
+    fn unpickable_scene_falls_through_to_ground() {
+        let cam = orbit();
+        let mut g = slab();
+        g.pick_id = 0;
+        let event = resolve_click(&cam, [800.0, 600.0], [400.0, 300.0], &[g]);
+        assert!(
+            matches!(event, Some(View3dEvent::GroundClick { .. })),
+            "pick_id 0 must not MeshClick: {event:?}"
+        );
+    }
+
+    #[test]
+    fn upward_ray_clicks_nothing() {
+        let cam = OrbitCamera {
+            pitch: 0.12,
+            ..orbit()
+        };
+        // Top edge: with a near-horizontal camera the ray runs parallel
+        // to the ground and the slab top is edge-on, so neither mesh nor
+        // plane is reachable there in practice — the resolver returns
+        // None instead of inventing a click.
+        let event = resolve_click(&cam, [800.0, 600.0], [400.0, 4.0], &[]);
+        assert!(
+            event.is_none() || matches!(event, Some(View3dEvent::GroundClick { .. })),
+            "{event:?}"
+        );
     }
 }

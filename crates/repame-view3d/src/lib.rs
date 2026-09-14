@@ -8,7 +8,9 @@
 //!
 //! Scope today (deliberately narrow — this crate grows slowly):
 //! flat-shaded and single-light lit indexed meshes with a real GPU depth
-//! buffer, an orbit camera, and ground-plane picking. Textures plug into
+//! buffer, an orbit camera, ground-plane picking, and CPU mesh picking
+//! (ray vs groups through the same camera; groups opt in with
+//! [`MeshGroup::pick_id`]). Textures plug into
 //! the same path: mesh groups carry uvs + one array page, and the batch
 //! owns the texture array (fed from per-frame uploads) — tint, texture,
 //! and light compose in that order. No glTF/skinning, no chunk mesher
@@ -30,11 +32,13 @@
 
 pub mod camera;
 pub mod mesh;
+pub mod pick;
 pub mod render;
 pub mod viewport;
 
 pub use camera::{FAR, NEAR, OPENGL_TO_WGPU, OrbitCamera};
 pub use mesh::{MeshGroup, Rgb, shade, shade_for_dir};
+pub use pick::{MeshHit, group_bounds, pick_ray, pick_screen, ray_aabb, ray_triangle};
 pub use render::{BatchDesc, SceneBatch, SceneFilter, SceneLight, SceneUpload};
 pub use render::{paint_scene_with_id, prepare_scene_with_id};
 pub use viewport::{CLICK_SLOP_PX, Frame3d, GeomHandle, View3dEvent, Viewport3d, ViewportGeom};

@@ -50,6 +50,11 @@ pub struct MeshGroup {
     pub uvs: Vec<[f32; 2]>,
     /// Texture array layer sampled when `uvs` is non-empty.
     pub texture_page: u32,
+    /// Pick id for CPU ray picking (`0` = unpickable, skipped by
+    /// [`pick_ray`](crate::pick_ray)). One id per group: scenes with one
+    /// pickable object per group get per-object hits; bulk terrain stays
+    /// `0` and uses ground-plane picks instead.
+    pub pick_id: u32,
     /// Triangle indices into `positions` / `colors` / `normals` / `uvs`.
     pub indices: Vec<u32>,
     /// Opaque geometry occludes (`true`) or always draws (`false`, e.g.

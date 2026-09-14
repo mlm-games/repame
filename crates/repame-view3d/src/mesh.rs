@@ -2,8 +2,13 @@
 //!
 //! Long-term containers (glTF import, skinning, chunk meshing with dirty
 //! tracking) plug in behind these types; the renderer only ever sees
-//! vertex/index/tint lists, so the GPU path stays stable while the asset
-//! side grows.
+//! vertex/index/tint/normal lists, so the GPU path stays stable while the
+//! asset side grows.
+//!
+//! Lighting is opt-in per group: groups without normals draw flat
+//! (backwards-compatible with the original flat path); groups with normals
+//! are shaded by the frame's [`SceneLight`](crate::SceneLight) as
+//! `base * (ambient + diffuse * max(dot(N, L), 0))`.
 
 use glam::Vec3;
 
@@ -14,14 +19,22 @@ pub type Rgb = [f32; 3];
 /// tint. Games rebuild these per frame from their sim state (see
 /// [`Frame3d::push`](crate::Frame3d::push)); chunked/voxel worlds submit
 /// one group per material and keep the lists across frames.
+///
+/// Normals are optional: when `normals` is empty the group draws flat
+/// (legacy path). When present it must match `positions` in length, and
+/// the frame's [`SceneLight`](crate::SceneLight) shades the group.
 #[derive(Clone, Debug, Default)]
 pub struct MeshGroup {
     /// World-space positions, Y-up right-handed.
     pub positions: Vec<[f32; 3]>,
-    /// Per-vertex tint (linear RGB). Shading is already baked per face
-    /// by the producer (see [`shade_for_dir`]).
+    /// Per-vertex tint (linear RGB). Without normals this is the final
+    /// color (shading already baked per face by the producer, see
+    /// [`shade_for_dir`]); with normals it is the albedo the light
+    /// modulates.
     pub colors: Vec<[f32; 3]>,
-    /// Triangle indices into `positions` / `colors`.
+    /// Per-vertex normals (unit length, world space). Empty = unlit.
+    pub normals: Vec<[f32; 3]>,
+    /// Triangle indices into `positions` / `colors` / `normals`.
     pub indices: Vec<u32>,
     /// Opaque geometry occludes (`true`) or always draws (`false`, e.g.
     /// flat ground overlays and editor gizmo quads that must stay visible
@@ -46,10 +59,42 @@ impl MeshGroup {
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
+    /// Push one triangle with an explicit face normal (unit length, world
+    /// space). Groups mixing `push_tri` and `push_tri_lit` are dropped at
+    /// batch time (all-or-nothing normals), so pick one per group.
+    pub fn push_tri_lit(
+        &mut self,
+        a: [f32; 3],
+        b: [f32; 3],
+        c: [f32; 3],
+        color: Rgb,
+        normal: [f32; 3],
+    ) {
+        let base = self.positions.len() as u32;
+        self.positions.extend_from_slice(&[a, b, c]);
+        self.colors.extend_from_slice(&[color, color, color]);
+        self.normals.extend_from_slice(&[normal, normal, normal]);
+        self.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
     /// Push one quad as two triangles (a, b, c) + (a, c, d).
     pub fn push_quad(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3], color: Rgb) {
         self.push_tri(a, b, c, color);
         self.push_tri(a, c, d, color);
+    }
+
+    /// Push one lit quad as two `push_tri_lit` triangles.
+    pub fn push_quad_lit(
+        &mut self,
+        a: [f32; 3],
+        b: [f32; 3],
+        c: [f32; 3],
+        d: [f32; 3],
+        color: Rgb,
+        normal: [f32; 3],
+    ) {
+        self.push_tri_lit(a, b, c, color, normal);
+        self.push_tri_lit(a, c, d, color, normal);
     }
 
     /// Push an axis-aligned shaded box centered at (`cx`, base `y0`, `cz`),
@@ -165,5 +210,24 @@ mod tests {
         assert_eq!(shade_for_dir([0, 1, 0]), 1.0);
         assert!(shade_for_dir([1, 0, 0]) > shade_for_dir([0, 0, 1]));
         assert!(shade_for_dir([0, -1, 0]) < 0.6);
+    }
+
+    #[test]
+    fn lit_tris_carry_matching_normals() {
+        let mut g = MeshGroup {
+            depth_test: true,
+            ..Default::default()
+        };
+        g.push_quad_lit(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        );
+        assert_eq!(g.tri_count(), 2);
+        assert_eq!(g.normals.len(), g.positions.len());
+        assert!(g.normals.iter().all(|n| *n == [0.0, 1.0, 0.0]));
     }
 }

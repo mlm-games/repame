@@ -7,13 +7,13 @@
 //! Camera state lives in game signals, never in the renderer.
 //!
 //! Scope today (deliberately narrow — this crate grows slowly):
-//! flat-shaded indexed meshes with a real GPU depth buffer, an orbit
-//! camera, and ground-plane picking. No lighting model, no textures, no
+//! flat-shaded and single-light lit indexed meshes with a real GPU depth
+//! buffer, an orbit camera, and ground-plane picking. No textures, no
 //! glTF/skinning, no chunk mesher yet: those plug in behind [`MeshGroup`]
 //! / [`Frame3d`], which the renderer only ever sees as vertex/index/tint
-//! lists, so the GPU path stays stable while the asset side grows. The
-//! resims `resims-view3d` starter scene (CPU painter sort, no depth) is the
-//! reference producer, not a dependency.
+//! (/normal) lists, so the GPU path stays stable while the asset side
+//! grows. The resims `resims-view3d` starter scene (CPU painter sort, no
+//! depth) is the reference producer, not a dependency.
 //!
 //! ```ignore
 //! let mut frame = Frame3d::default();
@@ -32,5 +32,5 @@ pub mod viewport;
 
 pub use camera::{FAR, NEAR, OPENGL_TO_WGPU, OrbitCamera};
 pub use mesh::{MeshGroup, Rgb, shade, shade_for_dir};
-pub use render::{SceneBatch, paint_scene_with_id, prepare_scene_with_id};
+pub use render::{SceneBatch, SceneLight, paint_scene_with_id, prepare_scene_with_id};
 pub use viewport::{CLICK_SLOP_PX, Frame3d, GeomHandle, View3dEvent, Viewport3d, ViewportGeom};

@@ -1,4 +1,4 @@
-//! Flat-shaded 3D scene batch: snapshot in, depth-tested pixels out.
+//! Flat-shaded + single-light 3D scene batch: snapshot in, depth-tested pixels out.
 //!
 //! [`SceneBatch`] owns the per-frame mesh snapshot (validate → flatten →
 //! upload) plus its depth-tested/flat pipelines.
@@ -9,9 +9,15 @@
 //! viewport-owned target during `prepare` and composites back in `paint`.
 
 //! Flat-shaded 3D pass: world-space pos+color through a view-projection uniform.
+//! Lit groups add per-vertex normals and sample the frame light from the
+//! same uniform block (ambient + one directional, linear space).
 const SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
+    light_dir: vec3<f32>,
+    ambient: f32,
+    light_color: vec3<f32>,
+    diffuse: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -19,19 +25,34 @@ struct Camera {
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) lit_flag: f32,
 };
 
 @vertex
-fn vs_main(@location(0) pos: vec3<f32>, @location(1) color: vec3<f32>) -> VsOut {
+fn vs_main(
+    @location(0) pos: vec3<f32>,
+    @location(1) color: vec3<f32>,
+    @location(2) normal: vec3<f32>,
+    @location(3) lit: f32,
+) -> VsOut {
     var out: VsOut;
     out.pos = camera.view_proj * vec4<f32>(pos, 1.0);
     out.color = color;
+    out.normal = normal;
+    out.lit_flag = lit;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
+    // `light_dir` points from the surface toward the light (Godot
+    // DirectionalLight3D convention). Flat groups carry lit_flag 0 and
+    // pass their baked color through untouched.
+    let n = normalize(in.normal);
+    let ndl = max(dot(n, camera.light_dir), 0.0);
+    let lit = in.color * (camera.ambient + camera.light_color * (camera.diffuse * ndl));
+    return vec4<f32>(mix(in.color, lit, in.lit_flag), 1.0);
 }
 "#;
 
@@ -47,19 +68,61 @@ use super::mesh::MeshGroup;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    light_dir: [f32; 3],
+    ambient: f32,
+    light_color: [f32; 3],
+    diffuse: f32,
 }
 
+const _: () = assert!(size_of::<CameraUniform>() == 96);
+
+/// One directional light + ambient for the frame, linear space.
+///
+/// The direction points from the surface toward the light (Godot
+/// `DirectionalLight3D` convention). `shade_for_dir` producers keep
+/// working: their baked colors ride the unlit path untouched.
+#[derive(Clone, Copy, Debug)]
+pub struct SceneLight {
+    /// Unit vector from the surface toward the light (normalized on use).
+    pub direction: [f32; 3],
+    /// Light color (linear RGB).
+    pub color: [f32; 3],
+    /// Diffuse strength.
+    pub diffuse: f32,
+    /// Ambient floor (linear RGB added to every lit fragment).
+    pub ambient: [f32; 3],
+}
+
+impl Default for SceneLight {
+    fn default() -> Self {
+        Self {
+            direction: [0.3, 1.0, 0.4],
+            color: [1.0, 1.0, 1.0],
+            diffuse: 0.9,
+            ambient: [0.35, 0.35, 0.38],
+        }
+    }
+}
+
+/// One vertex: position + albedo + normal + lit flag in a single
+/// layout, so flat and lit groups share one buffer and one pipeline.
+/// Flat vertices carry a dummy up-normal and `lit = 0.0` (their baked
+/// color passes through untouched); lit vertices carry the true normal
+/// and `lit = 1.0`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vert {
     pos: [f32; 3],
     color: [f32; 3],
+    normal: [f32; 3],
+    lit: f32,
 }
 
 /// One validated group awaiting [`SceneBatch::finish`].
 struct Pending {
     positions: Vec<[f32; 3]>,
     colors: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
     depth_test: bool,
 }
@@ -83,7 +146,7 @@ struct DrawRange {
 /// the buffers from the next frame's groups anyway.
 pub struct SceneBatch {
     id: String,
-    camera: [[f32; 4]; 4],
+    camera: CameraUniform,
     pending: Vec<Pending>,
     verts: Vec<Vert>,
     indices: Vec<u32>,
@@ -94,7 +157,13 @@ impl SceneBatch {
     pub fn with_id(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            camera: Mat4::IDENTITY.to_cols_array_2d(),
+            camera: CameraUniform {
+                view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                light_dir: [0.0, 1.0, 0.0],
+                ambient: 0.35,
+                light_color: [1.0, 1.0, 1.0],
+                diffuse: 0.9,
+            },
             pending: Vec::new(),
             verts: Vec::new(),
             indices: Vec::new(),
@@ -107,7 +176,24 @@ impl SceneBatch {
     }
 
     pub fn set_camera(&mut self, view_proj: Mat4) {
-        self.camera = view_proj.to_cols_array_2d();
+        self.camera.view_proj = view_proj.to_cols_array_2d();
+    }
+
+    /// Frame light for lit groups. Flat groups ignore it entirely.
+    pub fn set_light(&mut self, light: SceneLight) {
+        let d = glam::Vec3::from(light.direction);
+        let d = if d.length_squared() > 1e-8 {
+            d.normalize()
+        } else {
+            glam::Vec3::Y
+        };
+        self.camera.light_dir = d.into();
+        // Ambient is a single scalar in the uniform: use luminance so the
+        // producer's tint keeps working without a per-channel path.
+        self.camera.ambient =
+            0.2126 * light.ambient[0] + 0.7152 * light.ambient[1] + 0.0722 * light.ambient[2];
+        self.camera.light_color = light.color;
+        self.camera.diffuse = light.diffuse.max(0.0);
     }
 
     pub fn clear(&mut self) {
@@ -126,8 +212,8 @@ impl SceneBatch {
     }
 
     /// Append one group. Malformed groups (index out of range, or
-    /// position/color length mismatch) are dropped with a warning — never
-    /// a panic, never partial draws.
+    /// position/color length mismatch, or partial normals) are dropped
+    /// with a warning — never a panic, never partial draws.
     pub fn push_group(&mut self, group: &MeshGroup) {
         if group.is_empty() {
             return;
@@ -138,6 +224,15 @@ impl SceneBatch {
                 self.id,
                 group.positions.len(),
                 group.colors.len()
+            );
+            return;
+        }
+        if !group.normals.is_empty() && group.normals.len() != group.positions.len() {
+            log::warn!(
+                "scene_batch[{}]: dropping group ({} positions vs {} normals)",
+                self.id,
+                group.positions.len(),
+                group.normals.len()
             );
             return;
         }
@@ -155,6 +250,7 @@ impl SceneBatch {
         self.pending.push(Pending {
             positions: group.positions.clone(),
             colors: group.colors.clone(),
+            normals: group.normals.clone(),
             indices: group.indices.clone(),
             depth_test: group.depth_test,
         });
@@ -164,6 +260,9 @@ impl SceneBatch {
     /// Stable: submission order decides ties, so overlay order stays
     /// deterministic. Split from [`push_group`] so the viewport payload,
     /// which rebuilds the batch per frame, shares the path.
+    ///
+    /// Flat vertices (no normals) carry a dummy up-normal and `lit = 0.0`
+    /// so the shader passes their baked color through untouched.
     pub fn finish(&mut self) {
         self.verts.clear();
         self.indices.clear();
@@ -171,12 +270,29 @@ impl SceneBatch {
         self.pending.sort_by_key(|g| !g.depth_test);
         for g in self.pending.drain(..) {
             let base = self.verts.len() as u32;
-            self.verts.extend(
-                g.positions
-                    .iter()
-                    .zip(g.colors.iter())
-                    .map(|(p, c)| Vert { pos: *p, color: *c }),
-            );
+            let lit = !g.normals.is_empty();
+            if lit {
+                self.verts.extend(
+                    g.positions
+                        .iter()
+                        .zip(g.colors.iter())
+                        .zip(g.normals.iter())
+                        .map(|((p, c), n)| Vert {
+                            pos: *p,
+                            color: *c,
+                            normal: *n,
+                            lit: 1.0,
+                        }),
+                );
+            } else {
+                self.verts
+                    .extend(g.positions.iter().zip(g.colors.iter()).map(|(p, c)| Vert {
+                        pos: *p,
+                        color: *c,
+                        normal: [0.0, 1.0, 0.0],
+                        lit: 0.0,
+                    }));
+            }
             let start = self.indices.len() as u32;
             self.indices.extend(g.indices.iter().map(|i| i + base));
             self.ranges.push(DrawRange {
@@ -216,7 +332,7 @@ impl SceneBatch {
         });
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("repame_view3d_camera"),
-            size: 64,
+            size: size_of::<CameraUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -224,7 +340,7 @@ impl SceneBatch {
             label: Some("repame_view3d_cam_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -259,6 +375,16 @@ impl SceneBatch {
                     format: wgpu::VertexFormat::Float32x3,
                     offset: 12,
                     shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 24,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 36,
+                    shader_location: 3,
                 },
             ],
         })];
@@ -393,13 +519,7 @@ impl SceneBatch {
             });
             res.index_cap = cap;
         }
-        queue.write_buffer(
-            &res.camera,
-            0,
-            bytemuck::cast_slice(&[CameraUniform {
-                view_proj: self.camera,
-            }]),
-        );
+        queue.write_buffer(&res.camera, 0, bytemuck::cast_slice(&[self.camera]));
         res.camera_mat = self.camera;
         if !self.verts.is_empty() {
             queue.write_buffer(&res.verts, 0, bytemuck::cast_slice(&self.verts));
@@ -418,6 +538,12 @@ impl SceneBatch {
             .map(|r| (r.index_start, r.index_end, r.depth_test))
             .collect()
     }
+
+    /// Test-only vertex readout after [`finish`]: (normal, lit flag).
+    #[cfg(test)]
+    pub(crate) fn test_vert_lighting(&self) -> Vec<([f32; 3], f32)> {
+        self.verts.iter().map(|v| (v.normal, v.lit)).collect()
+    }
 }
 
 struct SceneEntry {
@@ -430,7 +556,7 @@ struct SceneEntry {
     index_cap: usize,
     camera: wgpu::Buffer,
     cam_bind: wgpu::BindGroup,
-    camera_mat: [[f32; 4]; 4],
+    camera_mat: CameraUniform,
     last_ranges: Vec<DrawRange>,
 }
 
@@ -476,13 +602,7 @@ pub fn prepare_scene_with_id(
         let Some(res) = all.batches.get_mut(id) else {
             return;
         };
-        queue.write_buffer(
-            &res.camera,
-            0,
-            bytemuck::cast_slice(&[CameraUniform {
-                view_proj: res.camera_mat,
-            }]),
-        );
+        queue.write_buffer(&res.camera, 0, bytemuck::cast_slice(&[res.camera_mat]));
         if res.last_ranges.is_empty() {
             return;
         }
@@ -555,6 +675,45 @@ mod tests {
         assert_eq!(batch.len_tris(), 1);
         assert!(!batch.is_empty());
         assert_eq!(batch.entry_ranges(), vec![(0, 3, true)]);
+        // Flat vertices pass through: dummy up-normal, lit 0.
+        assert_eq!(batch.test_vert_lighting(), vec![([0.0, 1.0, 0.0], 0.0); 3]);
+    }
+
+    #[test]
+    fn lit_group_flattens_with_normals() {
+        let mut batch = SceneBatch::with_id("test.lit");
+        batch.set_camera(Mat4::IDENTITY);
+        let mut g = MeshGroup {
+            depth_test: true,
+            ..Default::default()
+        };
+        g.push_quad_lit(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 0.0],
+        );
+        batch.push_group(&g);
+        batch.finish();
+        assert_eq!(batch.len_tris(), 2);
+        let got = batch.test_vert_lighting();
+        assert_eq!(got.len(), 6);
+        assert!(got.iter().all(|(n, l)| *n == [0.0, 1.0, 0.0] && *l == 1.0));
+    }
+
+    #[test]
+    fn set_light_normalizes_and_clamps() {
+        let mut batch = SceneBatch::with_id("test.light");
+        batch.set_light(SceneLight {
+            direction: [0.0, 0.0, 0.0],
+            diffuse: -2.0,
+            ..SceneLight::default()
+        });
+        let d = glam::Vec3::from(batch.camera.light_dir);
+        assert!((d.length() - 1.0).abs() < 1e-6, "degenerate dir falls back");
+        assert_eq!(batch.camera.diffuse, 0.0, "negative diffuse clamps");
     }
 
     #[test]
@@ -564,6 +723,7 @@ mod tests {
         batch.push_group(&MeshGroup {
             positions: vec![[0.0, 0.0, 0.0]],
             colors: vec![],
+            normals: vec![],
             indices: vec![0, 0, 0],
             depth_test: true,
         });
@@ -571,7 +731,16 @@ mod tests {
         batch.push_group(&MeshGroup {
             positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
             colors: vec![[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            normals: vec![],
             indices: vec![0, 1, 9],
+            depth_test: true,
+        });
+        // Partial normals.
+        batch.push_group(&MeshGroup {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            colors: vec![[1.0, 0.0, 0.0]; 3],
+            normals: vec![[0.0, 1.0, 0.0]],
+            indices: vec![0, 1, 2],
             depth_test: true,
         });
         batch.push_group(&solid_box());
@@ -716,5 +885,152 @@ mod tests {
         };
         // Pure primaries are sRGB fixed points: exact asserts.
         assert_eq!(at(32, 32), [0, 255, 0, 255], "near quad wins by depth");
+    }
+
+    /// End-to-end GPU proof for the lit path: one up-facing white quad
+    /// under a straight-down light reads back full white; the same quad
+    /// facing away from the light reads back ambient only. Flat quads are
+    /// unaffected by the light (baked color passes through). Skips
+    /// gracefully where no GPU exists.
+    #[test]
+    fn offscreen_lit_shades_by_normal() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+
+        struct Lit {
+            cam: OrbitCamera,
+            group: MeshGroup,
+            light: SceneLight,
+        }
+
+        impl WgpuCallback for Lit {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.lit");
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.set_light(self.light);
+                batch.push_group(&self.group);
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.lit",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut wgpu::RenderPass<'static>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_id("test.lit", rpass, resources);
+            }
+        }
+
+        fn render_case(group: MeshGroup, light: SceneLight) -> Option<[u8; 4]> {
+            let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("SKIP lit test (no GPU): {e}");
+                    return None;
+                }
+            };
+            let cam = OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: 0.0,
+                pitch: 0.9,
+                dist: 30.0,
+                fov_y_deg: 30.0,
+            };
+            let scene = Scene {
+                clear_color: Color::from_rgba(0, 0, 0, 255),
+                nodes: vec![SceneNode::Callback {
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 64.0,
+                        h: 64.0,
+                    },
+                    payload: Callback::new(Lit { cam, group, light }),
+                }],
+            };
+            let px = renderer
+                .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+                .expect("offscreen render");
+            let i = ((32 * 64 + 32) * 4) as usize;
+            Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+        }
+
+        // Screen-filling up-facing quad (CCW-from-above, like the depth test).
+        fn up_quad(lit: bool) -> MeshGroup {
+            let mut g = MeshGroup {
+                depth_test: true,
+                ..Default::default()
+            };
+            if lit {
+                g.push_quad_lit(
+                    [-5.0, 5.0, 5.0],
+                    [5.0, 5.0, 5.0],
+                    [5.0, 5.0, -5.0],
+                    [-5.0, 5.0, -5.0],
+                    [1.0, 1.0, 1.0],
+                    [0.0, 1.0, 0.0],
+                );
+            } else {
+                g.push_quad(
+                    [-5.0, 5.0, 5.0],
+                    [5.0, 5.0, 5.0],
+                    [5.0, 5.0, -5.0],
+                    [-5.0, 5.0, -5.0],
+                    [0.5, 0.5, 0.5],
+                );
+            }
+            g
+        }
+
+        let face_light = SceneLight {
+            direction: [0.0, 1.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            diffuse: 1.0,
+            ambient: [0.0, 0.0, 0.0],
+        };
+        let Some(full) = render_case(up_quad(true), face_light) else {
+            return;
+        };
+        assert_eq!(full, [255, 255, 255, 255], "face-on light = full white");
+
+        let back_light = SceneLight {
+            direction: [0.0, -1.0, 0.0],
+            ..face_light
+        };
+        let Some(dark) = render_case(up_quad(true), back_light) else {
+            return;
+        };
+        assert_eq!(dark, [0, 0, 0, 255], "back light + no ambient = black");
+
+        // Flat path ignores the light: baked gray passes through. The
+        // offscreen target is sRGB, so linear 0.5 reads back as 188.
+        let Some(flat) = render_case(up_quad(false), back_light) else {
+            return;
+        };
+        assert_eq!(flat, [188, 188, 188, 255], "flat ignores light");
     }
 }

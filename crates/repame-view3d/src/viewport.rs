@@ -17,7 +17,7 @@ use repose_ui::Embedded;
 
 use super::camera::OrbitCamera;
 use super::mesh::MeshGroup;
-use super::render::{SceneBatch, paint_scene_with_id, prepare_scene_with_id};
+use super::render::{SceneBatch, SceneLight, paint_scene_with_id, prepare_scene_with_id};
 
 /// Everything the viewport draws this frame. Plain data, snapshot per frame.
 ///
@@ -32,6 +32,8 @@ pub struct Frame3d {
     /// World-space mesh groups. Depth-tested groups occlude; groups with
     /// `depth_test = false` always draw (ground decals, editor gizmos).
     pub groups: Vec<MeshGroup>,
+    /// Frame light for groups carrying normals. Flat groups ignore it.
+    pub light: SceneLight,
     /// Offscreen clear color (linear 0..1 RGBA). The shared UI pass this
     /// viewport paints into has its own clear; this selects the scene
     /// target clear inside the viewport-owned pass.
@@ -47,6 +49,7 @@ impl Default for Frame3d {
         Self {
             cam: OrbitCamera::default(),
             groups: Vec::new(),
+            light: SceneLight::default(),
             background: None,
             viewport_px: [1600.0, 900.0],
         }
@@ -305,6 +308,7 @@ impl WgpuCallback for GpuViewport3d {
         let aspect = Frame3d::aspect(vp);
         let mut batch = SceneBatch::with_id(self.batch_id.clone());
         batch.set_camera(self.input.cam.view_proj(aspect));
+        batch.set_light(self.input.light);
         for g in &self.input.groups {
             batch.push_group(g);
         }

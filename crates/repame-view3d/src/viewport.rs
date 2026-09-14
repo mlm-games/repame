@@ -309,7 +309,7 @@ impl WgpuCallback for GpuViewport3d {
             batch.push_group(g);
         }
         batch.finish();
-        batch.ensure_resources(device, screen, resources, w, h);
+        batch.ensure_resources(device, screen, resources);
         batch.upload(device, queue, resources);
         prepare_scene_with_id(
             self.batch_id.as_str(),

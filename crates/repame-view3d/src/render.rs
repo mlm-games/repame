@@ -1,35 +1,14 @@
-/// Viewport-owned offscreen scene + own depth buffer. The shared UI pass
-/// this viewport paints into carries no depth ops (`depth_ops: None`), so
-/// real depth writes are rejected there by validation. Like the 2D
-/// `post::prepare_composite` path, the scene renders into a viewport-owned
-/// target (with its own depth texture) during `prepare`, then a graded
-/// fullscreen triangle composites back in `paint`.
-///
-/// Stencil stays `Always` + `LessEqual` (the UI contract) everywhere, so
-/// clips keep working while depth stays viewport-local.
-const BLIT_WGSL: &str = r#"
-@group(0) @binding(0) var scene_tex: texture_2d<f32>;
-@group(0) @binding(1) var scene_smp: sampler;
-struct VsOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-@vertex
-fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
-    let x = f32(i / 2u) * 4.0 - 1.0;
-    let y = f32(i % 2u) * 4.0 - 1.0;
-    var out: VsOut;
-    out.pos = vec4<f32>(x, y, 0.0, 1.0);
-    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
-    return out;
-}
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return textureSample(scene_tex, scene_smp, in.uv);
-}
-"#;
+//! Flat-shaded 3D scene batch: snapshot in, depth-tested pixels out.
+//!
+//! [`SceneBatch`] owns the per-frame mesh snapshot (validate → flatten →
+//! upload) plus its depth-tested/flat pipelines.
+//!
+//! The offscreen scene target + depth buffer + blit live in
+//! [`DepthComposite`](repose_render_wgpu::DepthComposite): the shared UI
+//! pass carries no depth ops, so depth-tested content renders into a
+//! viewport-owned target during `prepare` and composites back in `paint`.
 
-// Flat-shaded 3D pass: world-space pos+color through a view-projection uniform.
+//! Flat-shaded 3D pass: world-space pos+color through a view-projection uniform.
 const SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -60,7 +39,7 @@ use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
-use repose_render_wgpu::{CallbackResources, ScreenDescriptor};
+use repose_render_wgpu::{CallbackResources, DepthComposite, ScreenDescriptor};
 
 use super::mesh::MeshGroup;
 
@@ -213,12 +192,8 @@ impl SceneBatch {
         device: &wgpu::Device,
         screen: &ScreenDescriptor,
         resources: &mut CallbackResources,
-        w: u32,
-        h: u32,
     ) {
-        let w = w.max(1);
-        let h = h.max(1);
-        let key = (screen.target_format, screen.sample_count, w, h);
+        let key = (screen.target_format, screen.sample_count);
         let fresh = resources
             .get::<SceneResources>()
             .is_none_or(|all| !all.batches.contains_key(self.id.as_str()));
@@ -346,12 +321,6 @@ impl SceneBatch {
                 cache: None,
             })
         };
-        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_blit"),
-            source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
-        });
-        let (scene_tex, scene_view, depth_tex, depth_view, blit_pipeline, blit_bind) =
-            make_target(device, screen, &blit_shader, w, h);
         let entry = SceneEntry {
             key,
             pipeline_depth: mk("repame_view3d_depth", true),
@@ -372,13 +341,6 @@ impl SceneBatch {
             index_cap: 0,
             camera,
             cam_bind,
-            scene: scene_tex,
-            scene_view,
-            depth: depth_tex,
-            depth_view,
-            blit_pipeline,
-            blit_bind,
-            clear: [0.0, 0.0, 0.0, 1.0],
             camera_mat: self.camera,
             last_ranges: Vec::new(),
         };
@@ -458,163 +420,8 @@ impl SceneBatch {
     }
 }
 
-/// Viewport-owned offscreen scene + own depth buffer. MSAA is off here
-/// (sample count 1): the shared UI pass resolves its own MSAA around the
-/// callback, while the scene target stays a plain sampled texture.
-#[allow(clippy::too_many_arguments)]
-fn make_target(
-    device: &wgpu::Device,
-    screen: &ScreenDescriptor,
-    blit_shader: &wgpu::ShaderModule,
-    w: u32,
-    h: u32,
-) -> (
-    wgpu::Texture,
-    wgpu::TextureView,
-    wgpu::Texture,
-    wgpu::TextureView,
-    wgpu::RenderPipeline,
-    wgpu::BindGroup,
-) {
-    let scene = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("repame_view3d_scene"),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: screen.target_format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let scene_view = scene.create_view(&wgpu::TextureViewDescriptor::default());
-    let depth = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("repame_view3d_depth_tex"),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth24PlusStencil8,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("repame_view3d_blit_bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
-    });
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("repame_view3d_blit_sampler"),
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-        lod_min_clamp: 0.0,
-        lod_max_clamp: 1.0,
-        compare: None,
-        anisotropy_clamp: 1,
-        border_color: None,
-    });
-    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("repame_view3d_blit_bg"),
-        layout: &layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&scene_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            },
-        ],
-    });
-    let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("repame_view3d_blit_pl"),
-        bind_group_layouts: &[Some(&layout)],
-        immediate_size: 0,
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("repame_view3d_blit"),
-        layout: Some(&pipe_layout),
-        vertex: wgpu::VertexState {
-            module: blit_shader,
-            entry_point: Some("vs_main"),
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: blit_shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: screen.target_format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
-        // Matches the main UI pass (which always carries depth): depth ops
-        // disabled, so the blit never disturbs UI depth/stencil.
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24PlusStencil8,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::Always),
-            stencil: wgpu::StencilState {
-                front: wgpu::StencilFaceState {
-                    compare: wgpu::CompareFunction::LessEqual,
-                    ..Default::default()
-                },
-                back: wgpu::StencilFaceState {
-                    compare: wgpu::CompareFunction::LessEqual,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState {
-            count: screen.sample_count,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
-        multiview_mask: None,
-        cache: None,
-    });
-    (scene, scene_view, depth, depth_view, pipeline, bind)
-}
-
 struct SceneEntry {
-    key: (wgpu::TextureFormat, u32, u32, u32),
+    key: (wgpu::TextureFormat, u32),
     pipeline_depth: wgpu::RenderPipeline,
     pipeline_flat: wgpu::RenderPipeline,
     verts: wgpu::Buffer,
@@ -623,44 +430,25 @@ struct SceneEntry {
     index_cap: usize,
     camera: wgpu::Buffer,
     cam_bind: wgpu::BindGroup,
-    // Owned offscreen target: the shared UI pass this paints into has no
-    // depth ops, so the scene renders here (own depth) during `prepare`
-    // and composites back in `paint`. Views borrow the textures below.
-    #[allow(dead_code)]
-    scene: wgpu::Texture,
-    scene_view: wgpu::TextureView,
-    #[allow(dead_code)]
-    depth: wgpu::Texture,
-    depth_view: wgpu::TextureView,
-    blit_pipeline: wgpu::RenderPipeline,
-    blit_bind: wgpu::BindGroup,
-    clear: [f32; 4],
     camera_mat: [[f32; 4]; 4],
     last_ranges: Vec<DrawRange>,
-}
-
-impl SceneEntry {
-    fn clear_camera(&self) -> [CameraUniform; 1] {
-        [CameraUniform {
-            view_proj: self.camera_mat,
-        }]
-    }
 }
 
 struct SceneResources {
     batches: HashMap<String, SceneEntry>,
 }
 
-/// Render the prepared batch for one id into its own offscreen target
-/// (with real depth), then composite the target into the main pass.
-/// Shared by the viewport payload and the offscreen proof test.
+/// Draw the prepared batch for one id: scene into the shared
+/// [`DepthComposite`] offscreen target (real depth), composited back in
+/// `paint`. Shared by the viewport payload and the offscreen proof test.
 ///
-/// `w`/`h` size the viewport-owned target; call from `prepare` (owns the
-/// encoder) with the matching [`paint_scene_with_id`] in `paint`.
+/// Call from `prepare` (owns the encoder) with the matching
+/// [`paint_scene_with_id`] in `paint`. `w`/`h` size the viewport-owned
+/// target; `clear` is the scene clear color (linear 0..1 RGBA).
 #[allow(clippy::too_many_arguments)] // extends `WgpuCallback::prepare` by (id, w, h, clear)
 pub fn prepare_scene_with_id(
     id: &str,
-    _device: &wgpu::Device,
+    device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
     screen: &ScreenDescriptor,
@@ -669,84 +457,75 @@ pub fn prepare_scene_with_id(
     h: u32,
     clear: [f32; 4],
 ) {
-    let Some(all) = resources.get_mut::<SceneResources>() else {
-        return;
-    };
-    let Some(res) = all.batches.get_mut(id) else {
-        return;
-    };
-    res.clear = clear;
-    queue.write_buffer(&res.camera, 0, bytemuck::cast_slice(&res.clear_camera()));
-    // Copy the small range list out so the mutable scene pass can coexist
-    // with the borrow (a handful of entries; no per-tri cost).
-    let ranges = res.last_ranges.clone();
-    let has_content = !ranges.is_empty();
-    if has_content {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("repame_view3d_scene"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &res.scene_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: clear[0] as f64,
-                        g: clear[1] as f64,
-                        b: clear[2] as f64,
-                        a: clear[3] as f64,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &res.depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(0),
-                    store: wgpu::StoreOp::Store,
-                }),
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_viewport(0.0, 0.0, w.max(1) as f32, h.max(1) as f32, 0.0, 1.0);
-        pass.set_bind_group(0, &res.cam_bind, &[]);
-        pass.set_vertex_buffer(0, res.verts.slice(..));
-        pass.set_index_buffer(res.indices.slice(..), wgpu::IndexFormat::Uint32);
-        for r in &ranges {
-            pass.set_pipeline(if r.depth_test {
-                &res.pipeline_depth
-            } else {
-                &res.pipeline_flat
-            });
-            pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
-        }
+    DepthComposite::get(resources).ensure(device, screen, id, w, h);
+    // Snapshot the draw state into owned bind groups: pipelines and buffers
+    // are shared resources, so clone the (cheap) handles and end the borrow
+    // before beginning the mutable scene pass.
+    struct Snapshot {
+        cam_bind: wgpu::BindGroup,
+        verts: wgpu::Buffer,
+        indices: wgpu::Buffer,
+        pipeline_depth: wgpu::RenderPipeline,
+        pipeline_flat: wgpu::RenderPipeline,
+        ranges: Vec<DrawRange>,
     }
-    let _ = queue;
-    let _ = screen;
+    let snapshot: Option<Snapshot> = {
+        let Some(all) = resources.get_mut::<SceneResources>() else {
+            return;
+        };
+        let Some(res) = all.batches.get_mut(id) else {
+            return;
+        };
+        queue.write_buffer(
+            &res.camera,
+            0,
+            bytemuck::cast_slice(&[CameraUniform {
+                view_proj: res.camera_mat,
+            }]),
+        );
+        if res.last_ranges.is_empty() {
+            return;
+        }
+        Some(Snapshot {
+            cam_bind: res.cam_bind.clone(),
+            verts: res.verts.clone(),
+            indices: res.indices.clone(),
+            pipeline_depth: res.pipeline_depth.clone(),
+            pipeline_flat: res.pipeline_flat.clone(),
+            ranges: res.last_ranges.clone(),
+        })
+    };
+    let Some(snap) = snapshot else { return };
+    let composite = DepthComposite::get(resources);
+    let Some(mut pass) = composite.begin_scene(id, encoder, clear) else {
+        return;
+    };
+    pass.set_bind_group(0, &snap.cam_bind, &[]);
+    pass.set_vertex_buffer(0, snap.verts.slice(..));
+    pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+    for r in &snap.ranges {
+        pass.set_pipeline(if r.depth_test {
+            &snap.pipeline_depth
+        } else {
+            &snap.pipeline_flat
+        });
+        pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
+    }
 }
 
-/// Draw the offscreen scene target into the main pass. The renderer has
-/// already set the viewport to the callback rect, which matches the
+/// Composite the offscreen scene for `id` into the main pass. The renderer
+/// has already set the viewport to the callback rect, which matches the
 /// offscreen texture 1:1 (both come from the painted frame geometry).
+/// No-op when `id` has no target (call [`prepare_scene_with_id`] first).
 pub fn paint_scene_with_id(
     id: &str,
     rpass: &mut wgpu::RenderPass<'_>,
     resources: &CallbackResources,
 ) {
-    let Some(all) = resources.get::<SceneResources>() else {
+    let Some(composite) = resources.get::<DepthComposite>() else {
         return;
     };
-    let Some(res) = all.batches.get(id) else {
-        return;
-    };
-    rpass.set_pipeline(&res.blit_pipeline);
-    rpass.set_bind_group(0, &res.blit_bind, &[]);
-    rpass.draw(0..3, 0..1);
+    composite.blit(id, rpass);
 }
 
 #[cfg(test)]
@@ -848,7 +627,7 @@ mod tests {
                 batch.push_group(&self.far);
                 batch.push_group(&self.near);
                 batch.finish();
-                batch.ensure_resources(device, screen, resources, 64, 64);
+                batch.ensure_resources(device, screen, resources);
                 batch.upload(device, queue, resources);
                 prepare_scene_with_id(
                     "test.depth",

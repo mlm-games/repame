@@ -19,13 +19,45 @@ struct Camera {
     shadow_vp: mat4x4<f32>,
     shadow_params: vec4<f32>,
     shadow_texel: vec4<f32>,
+    cascade_vp0: mat4x4<f32>,
+    cascade_vp1: mat4x4<f32>,
+    cascade_vp2: mat4x4<f32>,
+    cascade_vp3: mat4x4<f32>,
+    cascade_splits: vec4<f32>,
+    cascade_params: vec4<f32>,
+    point_pos0: vec4<f32>,
+    point_pos1: vec4<f32>,
+    point_col0: vec4<f32>,
+    point_col1: vec4<f32>,
+    point_pos2: vec4<f32>,
+    point_pos3: vec4<f32>,
+    point_col2: vec4<f32>,
+    point_col3: vec4<f32>,
+    point_pos4: vec4<f32>,
+    point_pos5: vec4<f32>,
+    point_col4: vec4<f32>,
+    point_col5: vec4<f32>,
+    point_pos6: vec4<f32>,
+    point_pos7: vec4<f32>,
+    point_col6: vec4<f32>,
+    point_col7: vec4<f32>,
+    point_params: vec4<f32>,
+};
+
+struct SkinPalette {
+    joints: array<mat4x4<f32>, 128>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var<uniform> skin_palette: SkinPalette;
 @group(1) @binding(0) var scene_tex: texture_2d_array<f32>;
 @group(1) @binding(1) var scene_smp: sampler;
 @group(2) @binding(0) var shadow_tex: texture_depth_2d;
 @group(2) @binding(1) var shadow_smp: sampler_comparison;
+@group(2) @binding(2) var cascade_tex: texture_depth_2d_array;
+@group(2) @binding(3) var cascade_smp: sampler_comparison;
+@group(2) @binding(4) var point_tex: texture_depth_cube;
+@group(2) @binding(5) var point_smp: sampler_comparison;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -54,22 +86,51 @@ fn vs_main(
     @location(6) page: f32,
     @location(7) alpha: f32,
     @location(8) cutoff: f32,
-    @location(9) world: vec3<f32>,
-    @location(10) metallic: f32,
-    @location(11) roughness: f32,
-    @location(12) emissive: vec3<f32>,
+    @location(9) metallic: f32,
+    @location(10) roughness: f32,
+    @location(11) emissive: vec3<f32>,
+    @location(12) joints: vec4<u32>,
+    @location(13) weights: vec4<f32>,
+    @location(14) skin_mix: f32,
+    @location(15) skin_base: f32,
 ) -> VsOut {
     var out: VsOut;
-    out.pos = camera.view_proj * vec4<f32>(pos, 1.0);
+    var skinned_pos = pos;
+    var skinned_nrm = normal;
+    if (skin_mix > 0.5) {
+        let wsum = weights.x + weights.y + weights.z + weights.w;
+        if (wsum > 1e-8) {
+            let base = i32(skin_base + 0.5);
+            var acc_pos = vec3<f32>(0.0);
+            var acc_nrm = vec3<f32>(0.0);
+            for (var k: i32 = 0; k < 4; k = k + 1) {
+                var w: f32 = 0.0;
+                var slot: i32 = 0;
+                if (k == 0) { w = weights.x; slot = i32(joints.x); }
+                else if (k == 1) { w = weights.y; slot = i32(joints.y); }
+                else if (k == 2) { w = weights.z; slot = i32(joints.z); }
+                else { w = weights.w; slot = i32(joints.w); }
+                w = w / wsum;
+                if (w > 0.0) {
+                    let m = skin_palette.joints[base + slot];
+                    acc_pos = acc_pos + (m * vec4<f32>(pos, 1.0)).xyz * w;
+                    acc_nrm = acc_nrm + (m * vec4<f32>(normal, 0.0)).xyz * w;
+                }
+            }
+            skinned_pos = acc_pos;
+            skinned_nrm = acc_nrm;
+        }
+    }
+    out.pos = camera.view_proj * vec4<f32>(skinned_pos, 1.0);
     out.color = color;
-    out.normal = normal;
+    out.normal = skinned_nrm;
     out.lit_flag = lit;
     out.uv = uv;
     out.tex_mix = tex_mix;
     out.page = page;
     out.alpha = alpha;
     out.cutoff = cutoff;
-    out.world_pos = pos;
+    out.world_pos = skinned_pos;
     out.metallic = metallic;
     out.roughness = roughness;
     out.emissive = emissive;
@@ -119,7 +180,85 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             shadow = mix(1.0, lit_frac, camera.shadow_params.x);
         }
     }
-    let lit = base * camera.ambient + (camera.light_color * diffuse + spec) * shadow + in.emissive;
+    if (in.lit_flag > 0.5 && camera.cascade_params.y > 0.5) {
+        let view_depth = length(camera.cam_pos - in.world_pos);
+        var slice: i32 = 0;
+        if (view_depth > camera.cascade_splits.x) { slice = 1; }
+        if (view_depth > camera.cascade_splits.y) { slice = 2; }
+        if (view_depth > camera.cascade_splits.z) { slice = 3; }
+        if (f32(slice) < camera.cascade_params.z) {
+            var cvp: mat4x4<f32>;
+            if (slice == 0) { cvp = camera.cascade_vp0; }
+            else if (slice == 1) { cvp = camera.cascade_vp1; }
+            else if (slice == 2) { cvp = camera.cascade_vp2; }
+            else { cvp = camera.cascade_vp3; }
+            let biased_pos = in.world_pos + n * camera.cascade_params.w;
+            let light_clip = cvp * vec4<f32>(biased_pos, 1.0);
+            let light_ndc = light_clip.xyz / max(light_clip.w, 1e-6);
+            let suv = light_ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+            if (all(suv >= vec2<f32>(0.0)) && all(suv <= vec2<f32>(1.0))) {
+                let ref_depth = light_ndc.z - camera.shadow_params.z;
+                var lit_count: f32 = 0.0;
+                let texel = camera.shadow_texel.xy;
+                for (var oy: i32 = -1; oy <= 1; oy = oy + 1) {
+                    for (var ox: i32 = -1; ox <= 1; ox = ox + 1) {
+                        lit_count = lit_count + textureSampleCompare(
+                            cascade_tex, cascade_smp, suv + vec2<f32>(f32(ox), f32(oy)) * texel, slice, ref_depth);
+                    }
+                }
+                let lit_frac = lit_count / 9.0;
+                shadow = shadow * mix(1.0, lit_frac, camera.cascade_params.x);
+            }
+        }
+    }
+    var point_accum = vec3<f32>(0.0);
+    let point_count = i32(camera.point_params.x + 0.5);
+    for (var pi: i32 = 0; pi < 8; pi = pi + 1) {
+        if (pi >= point_count) { break; }
+        var lpos: vec3<f32>;
+        var lcol: vec3<f32>;
+        if (pi == 0) { lpos = camera.point_pos0.xyz; lcol = camera.point_col0.xyz; }
+        else if (pi == 1) { lpos = camera.point_pos1.xyz; lcol = camera.point_col1.xyz; }
+        else if (pi == 2) { lpos = camera.point_pos2.xyz; lcol = camera.point_col2.xyz; }
+        else if (pi == 3) { lpos = camera.point_pos3.xyz; lcol = camera.point_col3.xyz; }
+        else if (pi == 4) { lpos = camera.point_pos4.xyz; lcol = camera.point_col4.xyz; }
+        else if (pi == 5) { lpos = camera.point_pos5.xyz; lcol = camera.point_col5.xyz; }
+        else if (pi == 6) { lpos = camera.point_pos6.xyz; lcol = camera.point_col6.xyz; }
+        else { lpos = camera.point_pos7.xyz; lcol = camera.point_col7.xyz; }
+        var lrange: f32;
+        var linten: f32;
+        if (pi == 0) { lrange = camera.point_pos0.w; linten = camera.point_col0.w; }
+        else if (pi == 1) { lrange = camera.point_pos1.w; linten = camera.point_col1.w; }
+        else if (pi == 2) { lrange = camera.point_pos2.w; linten = camera.point_col2.w; }
+        else if (pi == 3) { lrange = camera.point_pos3.w; linten = camera.point_col3.w; }
+        else if (pi == 4) { lrange = camera.point_pos4.w; linten = camera.point_col4.w; }
+        else if (pi == 5) { lrange = camera.point_pos5.w; linten = camera.point_col5.w; }
+        else if (pi == 6) { lrange = camera.point_pos6.w; linten = camera.point_col6.w; }
+        else { lrange = camera.point_pos7.w; linten = camera.point_col7.w; }
+        let to_light = lpos - in.world_pos;
+        let dist = length(to_light);
+        if (dist < lrange && dist > 1e-4) {
+            let ldir = to_light / dist;
+            let atten = linten / (dist * dist + 1.0);
+            let pndl = max(dot(n, ldir), 0.0);
+            var pshadow: f32 = 1.0;
+            if (camera.point_params.y > 0.5 && in.lit_flag > 0.5) {
+                let cube_uv = normalize(-to_light);
+                let ref_depth = dist / max(lrange, 1e-6) - camera.point_params.z;
+                let lit_s = textureSampleCompare(
+                    point_tex, point_smp, cube_uv, ref_depth);
+                pshadow = mix(1.0, lit_s, camera.point_params.w);
+            }
+            let pdiff = base * (1.0 - in.metallic) * pndl * atten;
+            let ph = normalize(ldir + v);
+            let pspec_pow = mix(256.0, 8.0, clamp(in.roughness, 0.0, 1.0));
+            let pspec = mix(lcol, base, in.metallic)
+                * pow(max(dot(n, ph), 0.0), pspec_pow)
+                * (1.0 - in.roughness) * atten;
+            point_accum = point_accum + (pdiff * lcol + pspec) * pshadow * in.lit_flag;
+        }
+    }
+    let lit = base * camera.ambient + (camera.light_color * diffuse + spec) * shadow + point_accum + in.emissive;
     var rgb = mix(base, lit, in.lit_flag);
     let dist = length(camera.cam_pos - in.world_pos);
     let fog_t = clamp((dist - camera.fog_range.x) / max(camera.fog_range.y - camera.fog_range.x, 1e-6), 0.0, 1.0) * clamp(camera.fog.x, 0.0, 1.0);
@@ -137,6 +276,7 @@ use glam::Mat4;
 use repose_render_wgpu::{CallbackResources, DepthComposite, ScreenDescriptor};
 
 use super::mesh::MeshGroup;
+use super::skin::SkinnedDraw;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -157,9 +297,76 @@ struct CameraUniform {
     shadow_params: [f32; 4],
     /// (texel, texel, unused, unused).
     shadow_texel: [f32; 4],
+    cascade_vp0: [[f32; 4]; 4],
+    cascade_vp1: [[f32; 4]; 4],
+    cascade_vp2: [[f32; 4]; 4],
+    cascade_vp3: [[f32; 4]; 4],
+    /// Split depths (x/y/z = slice 1/2/3 far planes in camera distance;
+    /// slice 0 starts at the camera near). w unused.
+    cascade_splits: [f32; 4],
+    /// (strength, enabled flag, armed count, normal bias).
+    cascade_params: [f32; 4],
+    point_pos0: [f32; 4],
+    point_pos1: [f32; 4],
+    point_col0: [f32; 4],
+    point_col1: [f32; 4],
+    point_pos2: [f32; 4],
+    point_pos3: [f32; 4],
+    point_col2: [f32; 4],
+    point_col3: [f32; 4],
+    point_pos4: [f32; 4],
+    point_pos5: [f32; 4],
+    point_col4: [f32; 4],
+    point_col5: [f32; 4],
+    point_pos6: [f32; 4],
+    point_pos7: [f32; 4],
+    point_col6: [f32; 4],
+    point_col7: [f32; 4],
+    /// (count, shadow enabled, bias, strength).
+    point_params: [f32; 4],
 }
 
-const _: () = assert!(size_of::<CameraUniform>() == 256);
+const _: () = assert!(size_of::<CameraUniform>() == 816);
+
+/// Frame light rig: one directional sun plus up to
+/// [`MAX_POINTS`](crate::MAX_POINTS) point lights. The directional light
+/// keeps its legacy role (diffuse + specular + single shadow map); point
+/// lights add inverse-square diffuse + specular without shadows unless
+/// [`LightRig::point_shadows`] arms the cube pass. Everything is linear
+/// space; flat groups ignore the whole rig.
+#[derive(Clone, Debug)]
+pub struct LightRig {
+    /// Directional sun (same semantics as the old `SceneLight`).
+    pub sun: SceneLight,
+    /// Point lights in submission order. Past `MAX_POINTS` the batch
+    /// keeps the brightest (color luminance times intensity) and warns.
+    pub points: Vec<super::shadow::PointLight>,
+    /// Cascade rig for the sun. `Some` replaces the legacy single map
+    /// with fitted slices (same strength/bias semantics, per-slice fit).
+    /// `None` (default) keeps the legacy `ShadowDesc` path exactly.
+    pub cascades: Option<super::shadow::CascadeDesc>,
+    /// Shadow-casting point light index into `points` (`None` = no cube
+    /// pass; all points shade unshadowed). Out-of-range disables with a
+    /// warning, never a panic.
+    pub point_shadows: Option<usize>,
+    /// Cube-map bias override (default 0.005). Clamped `0..=0.05`.
+    pub point_bias: f32,
+    /// Cube shadow strength override (default 1.0). Clamped `0..=1`.
+    pub point_strength: f32,
+}
+
+impl Default for LightRig {
+    fn default() -> Self {
+        Self {
+            sun: SceneLight::default(),
+            points: Vec::new(),
+            cascades: None,
+            point_shadows: None,
+            point_bias: 0.005,
+            point_strength: 1.0,
+        }
+    }
+}
 
 /// Frame light, linear space. Direction points toward light.
 /// Flat groups ignore it. Fog blends lit frags toward fog color.
@@ -204,6 +411,8 @@ impl Default for SceneLight {
 
 /// One vertex layout for flat, lit, and textured groups.
 /// Flat verts carry dummy up-normal and lit 0. Untextured carry dummy uv and mix 0.
+/// Skinned verts carry joints/weights + skin 1 (GPU blends from bind pose);
+/// static verts carry zeros + skin 0 (shader skips the palette).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vert {
@@ -216,10 +425,13 @@ struct Vert {
     page: f32,
     alpha: f32,
     cutoff: f32,
-    world: [f32; 3],
     metallic: f32,
     roughness: f32,
     emissive: [f32; 3],
+    joints: [u32; 4],
+    weights: [f32; 4],
+    skin_mix: f32,
+    skin_base: f32,
 }
 
 /// Texture sampling for batch layers (same shape as `repame-sprite`).
@@ -302,6 +514,32 @@ fn cull_degenerate(positions: &[[f32; 3]], indices: &[u32]) -> Vec<u32> {
     out
 }
 
+/// One GPU-skinned draw awaiting [`SceneBatch::finish`]: bind-pose
+/// attributes plus the sampled palette. Flattened into the same vertex
+/// buffers as static groups (bind positions/normals, joints/weights per
+/// vertex) with the palette appended to the batch palette store; the
+/// range records the palette offset so the shader indexes the right
+/// joints.
+struct SkinnedPending {
+    positions: Vec<[f32; 3]>,
+    colors: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    joints: Vec<[u16; 4]>,
+    weights: Vec<[f32; 4]>,
+    palette: Vec<[[f32; 4]; 4]>,
+    texture_page: u32,
+    material: super::mesh::Material,
+    /// World-space AABB center of the bind pose (transparent back-to-front
+    /// sort; opaque draws ignore it).
+    center: Option<[f32; 3]>,
+    indices: Vec<u32>,
+    transparent: bool,
+    alpha: f32,
+    alpha_cutoff: f32,
+    depth_test: bool,
+}
+
 /// One validated group awaiting [`SceneBatch::finish`].
 struct Pending {
     positions: Vec<[f32; 3]>,
@@ -366,6 +604,26 @@ pub struct SceneBatch {
     verts: Vec<Vert>,
     indices: Vec<u32>,
     ranges: Vec<DrawRange>,
+    /// GPU-skinned draws submitted this frame (bind geometry + palette).
+    /// Flattened after static groups in `finish`: one extra vertex block
+    /// plus one `DrawRange` each (skinned ranges sort with the opaque
+    /// pass; transparency on skinned draws follows the same back-to-front
+    /// path by AABB center of the *bind* pose).
+    skinned: Vec<SkinnedPending>,
+    /// Joint palette store for the frame: every skinned draw appends its
+    /// (padded) palette here; ranges record the base offset. One uniform
+    /// upload per frame, sized to the frame's joint count.
+    palette: Vec<[[f32; 4]; 4]>,
+    /// Cascade desc staged by [`set_rig`](SceneBatch::set_rig) (`None` =
+    /// legacy single map). Sizes the cascade array texture in
+    /// `ensure_resources` and drives the per-slice depth passes.
+    cascade_desc: Option<super::shadow::CascadeDesc>,
+    /// Point-light index (into the staged rig order) casting cube
+    /// shadows. `None` = no cube pass.
+    point_caster: Option<usize>,
+    /// Staged point lights in rig order (uniform mirrors this; the cube
+    /// pass reads the caster entry for position/range/size).
+    staged_points: Vec<super::shadow::PointLight>,
 }
 
 impl SceneBatch {
@@ -392,6 +650,29 @@ impl SceneBatch {
                 shadow_vp: Mat4::IDENTITY.to_cols_array_2d(),
                 shadow_params: [1.0, 0.0, 0.001, 0.0],
                 shadow_texel: [1.0 / 1024.0, 1.0 / 1024.0, 0.0, 0.0],
+                cascade_vp0: Mat4::IDENTITY.to_cols_array_2d(),
+                cascade_vp1: Mat4::IDENTITY.to_cols_array_2d(),
+                cascade_vp2: Mat4::IDENTITY.to_cols_array_2d(),
+                cascade_vp3: Mat4::IDENTITY.to_cols_array_2d(),
+                cascade_splits: [1e30, 1e30, 1e30, 0.0],
+                cascade_params: [1.0, 0.0, 0.0, 0.0],
+                point_pos0: [0.0, 0.0, 0.0, 1.0],
+                point_pos1: [0.0, 0.0, 0.0, 1.0],
+                point_col0: [0.0, 0.0, 0.0, 0.0],
+                point_col1: [0.0, 0.0, 0.0, 0.0],
+                point_pos2: [0.0, 0.0, 0.0, 1.0],
+                point_pos3: [0.0, 0.0, 0.0, 1.0],
+                point_col2: [0.0, 0.0, 0.0, 0.0],
+                point_col3: [0.0, 0.0, 0.0, 0.0],
+                point_pos4: [0.0, 0.0, 0.0, 1.0],
+                point_pos5: [0.0, 0.0, 0.0, 1.0],
+                point_col4: [0.0, 0.0, 0.0, 0.0],
+                point_col5: [0.0, 0.0, 0.0, 0.0],
+                point_pos6: [0.0, 0.0, 0.0, 1.0],
+                point_pos7: [0.0, 0.0, 0.0, 1.0],
+                point_col6: [0.0, 0.0, 0.0, 0.0],
+                point_col7: [0.0, 0.0, 0.0, 0.0],
+                point_params: [0.0, 0.0, 0.005, 1.0],
             },
             camera_pos: [0.0, 0.0, 0.0],
             view_proj: Mat4::IDENTITY,
@@ -401,6 +682,11 @@ impl SceneBatch {
             verts: Vec::new(),
             indices: Vec::new(),
             ranges: Vec::new(),
+            skinned: Vec::new(),
+            palette: Vec::new(),
+            cascade_desc: None,
+            point_caster: None,
+            staged_points: Vec::new(),
         }
     }
 
@@ -465,6 +751,9 @@ impl SceneBatch {
     }
 
     /// Frame light for lit groups. Flat groups ignore it entirely.
+    /// Legacy path: prefer [`set_rig`](SceneBatch::set_rig) with a
+    /// [`LightRig`] (same sun, plus points/cascades). Calling both
+    /// applies in order (last wins for the sun fields).
     pub fn set_light(&mut self, light: SceneLight) {
         let d = glam::Vec3::from(light.direction);
         let d = if d.length_squared() > 1e-8 {
@@ -494,12 +783,198 @@ impl SceneBatch {
         ];
     }
 
+    /// Full frame light rig: sun (same fields as [`set_light`](SceneBatch::set_light))
+    /// plus point lights and the cascade selector. `set_light` stays the
+    /// legacy shorthand; this is the deliberate path for cascades and
+    /// points. Points past [`MAX_POINTS`](crate::MAX_POINTS) keep the
+    /// brightest (score = max color channel times clamped intensity) with
+    /// a warning; NaN colors score zero so corrupt lights drop first.
+    /// `point_shadows` out of range disables the cube pass with a warning.
+    /// Cascade matrices fit here from the camera (pass `cam.eye()`,
+    /// `cam.view_matrix()`, and the inverse view-proj): the same sources
+    /// the viewport feeds per frame, so the fit and the pixels agree.
+    pub fn set_rig(
+        &mut self,
+        rig: &LightRig,
+        cam_eye: [f32; 3],
+        cam_view: glam::Mat4,
+        cam_inv_view_proj: glam::Mat4,
+    ) {
+        self.set_light(rig.sun);
+        let mut points: Vec<super::shadow::PointLight> = rig.points.clone();
+        if points.len() > crate::MAX_POINTS {
+            points.sort_by(|a, b| {
+                b.score()
+                    .partial_cmp(&a.score())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            points.truncate(crate::MAX_POINTS);
+            log::warn!(
+                "scene_batch[{}]: keeping brightest {} of {} point lights",
+                self.id,
+                crate::MAX_POINTS,
+                rig.points.len()
+            );
+        }
+        let eye = glam::Vec3::from(cam_eye);
+        let mut set = |slot: usize, pos: [f32; 4], col: [f32; 4]| match slot {
+            0 => {
+                self.camera.point_pos0 = pos;
+                self.camera.point_col0 = col;
+            }
+            1 => {
+                self.camera.point_pos1 = pos;
+                self.camera.point_col1 = col;
+            }
+            2 => {
+                self.camera.point_pos2 = pos;
+                self.camera.point_col2 = col;
+            }
+            3 => {
+                self.camera.point_pos3 = pos;
+                self.camera.point_col3 = col;
+            }
+            4 => {
+                self.camera.point_pos4 = pos;
+                self.camera.point_col4 = col;
+            }
+            5 => {
+                self.camera.point_pos5 = pos;
+                self.camera.point_col5 = col;
+            }
+            6 => {
+                self.camera.point_pos6 = pos;
+                self.camera.point_col6 = col;
+            }
+            _ => {
+                self.camera.point_pos7 = pos;
+                self.camera.point_col7 = col;
+            }
+        };
+        for slot in 0..crate::MAX_POINTS {
+            match points.get(slot) {
+                Some(p) => {
+                    let inten = if p.intensity.is_finite() {
+                        p.intensity.max(0.0)
+                    } else {
+                        0.0
+                    };
+                    set(
+                        slot,
+                        [
+                            p.position[0],
+                            p.position[1],
+                            p.position[2],
+                            p.clamped_range(),
+                        ],
+                        [p.color[0], p.color[1], p.color[2], inten],
+                    );
+                }
+                None => set(slot, [0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]),
+            }
+        }
+        let caster_ok = rig.point_shadows.is_some_and(|i| {
+            points.get(i).is_some_and(|p| {
+                glam::Vec3::from(p.position).is_finite()
+                    && p.intensity.is_finite()
+                    && p.intensity > 0.0
+            })
+        });
+        if rig.point_shadows.is_some() && !caster_ok {
+            log::warn!(
+                "scene_batch[{}]: point_shadows {:?} invalid, cube pass off",
+                self.id,
+                rig.point_shadows
+            );
+        }
+        let bias = if rig.point_bias.is_finite() {
+            rig.point_bias.clamp(0.0, 0.05)
+        } else {
+            0.005
+        };
+        let strength = if rig.point_strength.is_finite() {
+            rig.point_strength.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.camera.point_params = [points.len() as f32, caster_ok as u8 as f32, bias, strength];
+        self.point_caster = if caster_ok { rig.point_shadows } else { None };
+        self.staged_points = points;
+        match rig.cascades {
+            Some(desc) => {
+                let count = desc.clamped_count();
+                let dir = glam::Vec3::from(self.camera.light_dir);
+                let slices = desc.fit_all(
+                    eye,
+                    cam_view,
+                    cam_inv_view_proj,
+                    dir,
+                    super::camera::NEAR,
+                    super::camera::FAR,
+                );
+                let mut vps = [
+                    &mut self.camera.cascade_vp0,
+                    &mut self.camera.cascade_vp1,
+                    &mut self.camera.cascade_vp2,
+                    &mut self.camera.cascade_vp3,
+                ];
+                let mut splits = [1e30f32, 1e30, 1e30, 0.0];
+                for (i, vp) in vps.iter_mut().enumerate() {
+                    if i < count {
+                        **vp = slices[i].view_proj.to_cols_array_2d();
+                        if i < 3 {
+                            splits[i] = slices[i].far;
+                        }
+                    } else {
+                        **vp = glam::Mat4::IDENTITY.to_cols_array_2d();
+                    }
+                }
+                self.camera.cascade_splits = splits;
+                self.camera.cascade_params = [
+                    desc.clamped_strength(),
+                    1.0,
+                    count as f32,
+                    desc.clamped_normal_bias(),
+                ];
+                let t = desc.texel();
+                self.camera.shadow_texel = [t, t, 0.0, 0.0];
+                self.cascade_desc = Some(desc);
+            }
+            None => {
+                self.camera.cascade_params = [1.0, 0.0, 0.0, 0.0];
+                self.camera.cascade_splits = [1e30, 1e30, 1e30, 0.0];
+                self.cascade_desc = None;
+            }
+        }
+    }
+
+    /// Armed cascade count for the next `prepare` (0 = legacy path).
+    pub fn cascades_enabled(&self) -> usize {
+        if self.camera.cascade_params[1] > 0.5 {
+            self.camera.cascade_params[2] as usize
+        } else {
+            0
+        }
+    }
+
+    /// Point-light count staged for the next `prepare`.
+    pub fn point_count(&self) -> usize {
+        self.camera.point_params[0] as usize
+    }
+
+    /// Whether the cube shadow pass is armed for the next `prepare`.
+    pub fn point_shadows_enabled(&self) -> bool {
+        self.camera.point_params[1] > 0.5
+    }
+
     pub fn clear(&mut self) {
         self.pending.clear();
         self.uploads.clear();
         self.verts.clear();
         self.indices.clear();
         self.ranges.clear();
+        self.skinned.clear();
+        self.palette.clear();
     }
 
     pub fn len_tris(&self) -> usize {
@@ -594,6 +1069,145 @@ impl SceneBatch {
             alpha_cutoff: group.alpha_cutoff.clamp(0.0, 1.0),
             depth_test: group.depth_test,
         });
+    }
+
+    /// Append one GPU-skinned draw: bind-pose geometry plus the sampled
+    /// palette. The batch uploads bind verts once and the palette into
+    /// the per-frame uniform; the vertex shader blends in hardware.
+    /// Validation mirrors [`push_group`](SceneBatch::push_group) (lengths,
+    /// index range, page, alpha) plus skin-specific checks: joints/weights
+    /// must match positions when present, joint slots past the mesh's
+    /// joint count clamp per vertex (warned once per draw, never a panic),
+    /// and meshes past [`MAX_SKIN_JOINTS`](crate::MAX_SKIN_JOINTS) drop
+    /// (caller falls back to CPU [`pose`](crate::SkinnedMesh::pose)).
+    /// Degenerate triangles cull tri-by-tri like static groups.
+    pub fn push_skinned(&mut self, draw: &SkinnedDraw) {
+        let mesh = &draw.mesh;
+        let n = mesh.positions.len();
+        if mesh.is_empty() {
+            return;
+        }
+        if mesh.positions.len() != mesh.colors.len() {
+            log::warn!(
+                "scene_batch[{}]: dropping skinned draw ({} positions vs {} colors)",
+                self.id,
+                mesh.positions.len(),
+                mesh.colors.len()
+            );
+            return;
+        }
+        if !mesh.normals.is_empty() && mesh.normals.len() != n {
+            log::warn!(
+                "scene_batch[{}]: dropping skinned draw (normals mismatch)",
+                self.id
+            );
+            return;
+        }
+        if !mesh.uvs.is_empty() && mesh.uvs.len() != n {
+            log::warn!(
+                "scene_batch[{}]: dropping skinned draw (uvs mismatch)",
+                self.id
+            );
+            return;
+        }
+        if mesh.joints.len() != n || mesh.weights.len() != n {
+            log::warn!(
+                "scene_batch[{}]: dropping skinned draw (skin weights len {} vs {} verts)",
+                self.id,
+                mesh.joints.len(),
+                n
+            );
+            return;
+        }
+        if draw.joint_count > crate::MAX_SKIN_JOINTS {
+            log::warn!(
+                "scene_batch[{}]: dropping skinned draw ({} joints past the cap)",
+                self.id,
+                draw.joint_count
+            );
+            return;
+        }
+        if mesh.indices.iter().any(|i| (*i as usize) >= n) {
+            log::warn!(
+                "scene_batch[{}]: dropping skinned draw (index out of range)",
+                self.id
+            );
+            return;
+        }
+        if !mesh.uvs.is_empty() && mesh.texture_page >= self.desc.layers {
+            log::warn!(
+                "scene_batch[{}]: dropping skinned draw (page {} >= {} layers)",
+                self.id,
+                mesh.texture_page,
+                self.desc.layers
+            );
+            return;
+        }
+        let center: Option<[f32; 3]> = {
+            let mut it = mesh.positions.iter();
+            match it.next() {
+                None => None,
+                Some(first) => {
+                    let mut min = glam::Vec3::from(*first);
+                    let mut max = min;
+                    for p in it {
+                        let v = glam::Vec3::from(*p);
+                        min = min.min(v);
+                        max = max.max(v);
+                    }
+                    if min.is_finite() && max.is_finite() {
+                        Some([
+                            (min.x + max.x) * 0.5,
+                            (min.y + max.y) * 0.5,
+                            (min.z + max.z) * 0.5,
+                        ])
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+        let mut clamped_joints = mesh.joints.clone();
+        let cap = draw.joint_count.saturating_sub(1);
+        let mut clamped = false;
+        for j in clamped_joints.iter_mut() {
+            for slot in j.iter_mut() {
+                if (*slot as usize) > cap {
+                    *slot = cap as u16;
+                    clamped = true;
+                }
+            }
+        }
+        if clamped {
+            log::warn!(
+                "scene_batch[{}]: clamping skinned joint slots to {} ({})",
+                self.id,
+                cap,
+                mesh.name
+            );
+        }
+        self.skinned.push(SkinnedPending {
+            positions: mesh.positions.clone(),
+            colors: mesh.colors.clone(),
+            normals: mesh.normals.clone(),
+            uvs: mesh.uvs.clone(),
+            joints: clamped_joints,
+            weights: mesh.weights.clone(),
+            palette: draw.palette.iter().map(|m| m.to_cols_array_2d()).collect(),
+            texture_page: mesh.texture_page,
+            material: mesh.material,
+            center,
+            indices: cull_degenerate(&mesh.positions, &mesh.indices),
+            transparent: mesh.transparent,
+            alpha: mesh.alpha.clamp(0.0, 1.0),
+            alpha_cutoff: mesh.alpha_cutoff.clamp(0.0, 1.0),
+            depth_test: mesh.depth_test,
+        });
+    }
+
+    /// Skinned draws staged (pre-`finish`).
+    pub fn skinned_count(&self) -> usize {
+        self.skinned.len()
     }
 
     /// Extract the six frustum planes (world space, normalized) from a
@@ -711,7 +1325,6 @@ impl SceneBatch {
                             page,
                             alpha: g.alpha,
                             cutoff: g.alpha_cutoff,
-                            world: *p,
                             metallic: mat.metallic.clamp(0.0, 1.0),
                             roughness: if mat.roughness.is_finite() {
                                 mat.roughness.clamp(0.0, 1.0)
@@ -719,6 +1332,10 @@ impl SceneBatch {
                                 1.0
                             },
                             emissive: mat.emissive,
+                            joints: [0; 4],
+                            weights: [0.0; 4],
+                            skin_mix: 0.0,
+                            skin_base: 0.0,
                         }),
                 );
             let start = self.indices.len() as u32;
@@ -728,6 +1345,89 @@ impl SceneBatch {
                 index_end: self.indices.len() as u32,
                 depth_test: g.depth_test,
                 transparent: g.transparent,
+            });
+        }
+        self.palette.clear();
+        let eye = glam::Vec3::from(self.camera_pos);
+        let mut skin_opaque: Vec<SkinnedPending> = Vec::new();
+        let mut skin_transparent: Vec<(SkinnedPending, f32)> = Vec::new();
+        for s in self.skinned.drain(..) {
+            if s.indices.len() < 3 {
+                continue;
+            }
+            if culling && s.depth_test && Self::group_outside(&planes, &s.positions) {
+                self.culled += 1;
+                continue;
+            }
+            if s.transparent {
+                let d = s
+                    .center
+                    .map(|c| (glam::Vec3::from(c) - eye).length_squared());
+                skin_transparent.push((s, d.unwrap_or(-1.0)));
+            } else {
+                skin_opaque.push(s);
+            }
+        }
+        skin_transparent.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for s in skin_opaque
+            .into_iter()
+            .chain(skin_transparent.into_iter().map(|(s, _)| s))
+        {
+            if s.indices.len() < 3 {
+                continue;
+            }
+            if culling && s.depth_test && Self::group_outside(&planes, &s.positions) {
+                self.culled += 1;
+                continue;
+            }
+            let base = self.verts.len() as u32;
+            let skin_base = self.palette.len() as f32;
+            self.palette.extend_from_slice(&s.palette);
+            let lit = !s.normals.is_empty();
+            let textured = !s.uvs.is_empty();
+            let page = s.texture_page as f32;
+            let mat = s.material;
+            let transparent = s.transparent;
+            let depth_test = s.depth_test;
+            self.verts
+                .extend(
+                    s.positions
+                        .iter()
+                        .zip(s.colors.iter())
+                        .enumerate()
+                        .map(|(i, (p, c))| Vert {
+                            pos: *p,
+                            color: *c,
+                            normal: if lit { s.normals[i] } else { [0.0, 1.0, 0.0] },
+                            lit: if lit { 1.0 } else { 0.0 },
+                            uv: if textured { s.uvs[i] } else { [0.0, 0.0] },
+                            tex_mix: if textured { 1.0 } else { 0.0 },
+                            page,
+                            alpha: s.alpha,
+                            cutoff: s.alpha_cutoff,
+                            metallic: mat.metallic.clamp(0.0, 1.0),
+                            roughness: if mat.roughness.is_finite() {
+                                mat.roughness.clamp(0.0, 1.0)
+                            } else {
+                                1.0
+                            },
+                            emissive: mat.emissive,
+                            joints: {
+                                let j = s.joints[i];
+                                [j[0] as u32, j[1] as u32, j[2] as u32, j[3] as u32]
+                            },
+                            weights: s.weights[i],
+                            skin_mix: 1.0,
+                            skin_base,
+                        }),
+                );
+            let start = self.indices.len() as u32;
+            self.indices.extend(s.indices.iter().map(|i| i + base));
+            self.ranges.push(DrawRange {
+                index_start: start,
+                index_end: self.indices.len() as u32,
+                depth_test,
+                transparent,
             });
         }
     }
@@ -780,6 +1480,18 @@ impl SceneBatch {
         resources: &mut CallbackResources,
     ) {
         let shadow_size = self.shadow_tex_size();
+        let (cascade_size, cascade_count) = match self.cascade_desc {
+            Some(d) => (d.clamped_size(), d.clamped_count() as u32),
+            None => (0, 0),
+        };
+        let cube_size = match self.point_caster {
+            Some(i) => self
+                .staged_points
+                .get(i)
+                .map(|p| p.clamped_size())
+                .unwrap_or(0),
+            None => 0,
+        };
         let key = (
             screen.target_format,
             screen.sample_count,
@@ -787,6 +1499,9 @@ impl SceneBatch {
             self.desc.layers,
             self.desc.filter as u32,
             shadow_size,
+            cascade_size,
+            cascade_count,
+            cube_size,
         );
         let fresh = resources
             .get::<SceneResources>()
@@ -800,7 +1515,7 @@ impl SceneBatch {
         }
         if stale {
             log::warn!(
-                "scene_batch[{}]: rebuilding pipeline/texture (format/sample/desc/shadow changed); texture contents dropped, re-upload required",
+                "scene_batch[{}]: rebuilding pipeline/texture (format/sample/desc/shadow/rig changed); texture contents dropped, re-upload required",
                 self.id
             );
         }
@@ -860,24 +1575,48 @@ impl SceneBatch {
         });
         let cam_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_cam_bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let skin_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("repame_view3d_skin"),
+            size: (crate::MAX_SKIN_JOINTS * 64) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         let cam_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("repame_view3d_cam_bg"),
             layout: &cam_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: skin_buffer.as_entire_binding(),
+                },
+            ],
         });
         let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_tex_bgl"),
@@ -944,6 +1683,63 @@ impl SceneBatch {
             anisotropy_clamp: 1,
             border_color: None,
         });
+        let cascade_edge = cascade_size.max(1);
+        let cascade_layers = cascade_count.max(1);
+        let cascade_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("repame_view3d_cascades"),
+            size: wgpu::Extent3d {
+                width: cascade_edge,
+                height: cascade_edge,
+                depth_or_array_layers: cascade_layers,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let cascade_view = cascade_tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let cube_edge = cube_size.max(1);
+        let point_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("repame_view3d_point_cube"),
+            size: wgpu::Extent3d {
+                width: cube_edge,
+                height: cube_edge,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let point_view = point_tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+        let mk_comparison_sampler = |label: &'static str| {
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some(label),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                lod_min_clamp: 0.0,
+                lod_max_clamp: 1.0,
+                compare: Some(wgpu::CompareFunction::LessEqual),
+                anisotropy_clamp: 1,
+                border_color: None,
+            })
+        };
+        let cascade_sampler = mk_comparison_sampler("repame_view3d_cascade_sampler");
+        let point_sampler = mk_comparison_sampler("repame_view3d_point_sampler");
         let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_shadow_bgl"),
             entries: &[
@@ -963,6 +1759,38 @@ impl SceneBatch {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
             ],
         });
         let shadow_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -976,6 +1804,22 @@ impl SceneBatch {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&cascade_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&cascade_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&point_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&point_sampler),
                 },
             ],
         });
@@ -1034,24 +1878,39 @@ impl SceneBatch {
                     shader_location: 8,
                 },
                 wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Float32,
                     offset: 64,
                     shader_location: 9,
                 },
                 wgpu::VertexAttribute {
                     format: wgpu::VertexFormat::Float32,
-                    offset: 76,
+                    offset: 68,
                     shader_location: 10,
                 },
                 wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 80,
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 72,
                     shader_location: 11,
                 },
                 wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Uint32x4,
                     offset: 84,
                     shader_location: 12,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 100,
+                    shader_location: 13,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 116,
+                    shader_location: 14,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 120,
+                    shader_location: 15,
                 },
             ],
         })];
@@ -1123,18 +1982,59 @@ impl SceneBatch {
                 cache: None,
             })
         };
-        /// Depth-only vertex shader for the shadow pass: position through the
-        /// shadow matrix only (no color/normal/uv reads beyond position).
+        /// Depth-only vertex shader for the shadow pass: skinned position
+        /// through the shadow matrix (bind pose + palette, same blend as
+        /// the scene pass, so animated casters shadow their posed shape,
+        /// not their bind pose). Static verts carry skin_mix 0 and skip
+        /// the palette exactly like the scene shader.
+        ///
+        /// Locations are depth-pass-local (0..4): the pass uses its own
+        /// buffer layout below (same offsets, remapped locations), because
+        /// the scene layout's 17 attributes exceed the device's 16-slot
+        /// vertex limit.
         const SHADOW_DEPTH_SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
 };
 
+struct SkinPalette {
+    joints: array<mat4x4<f32>, 128>,
+};
+
 @group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var<uniform> skin_palette: SkinPalette;
 
 @vertex
-fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return camera.view_proj * vec4<f32>(pos, 1.0);
+fn vs_main(
+    @location(0) pos: vec3<f32>,
+    @location(1) joints: vec4<u32>,
+    @location(2) weights: vec4<f32>,
+    @location(3) skin_mix: f32,
+    @location(4) skin_base: f32,
+) -> @builtin(position) vec4<f32> {
+    var p = pos;
+    if (skin_mix > 0.5) {
+        let wsum = weights.x + weights.y + weights.z + weights.w;
+        if (wsum > 1e-8) {
+            let base = i32(skin_base + 0.5);
+            var acc = vec3<f32>(0.0);
+            for (var k: i32 = 0; k < 4; k = k + 1) {
+                var w: f32 = 0.0;
+                var slot: i32 = 0;
+                if (k == 0) { w = weights.x; slot = i32(joints.x); }
+                else if (k == 1) { w = weights.y; slot = i32(joints.y); }
+                else if (k == 2) { w = weights.z; slot = i32(joints.z); }
+                else { w = weights.w; slot = i32(joints.w); }
+                w = w / wsum;
+                if (w > 0.0) {
+                    let m = skin_palette.joints[base + slot];
+                    acc = acc + (m * vec4<f32>(pos, 1.0)).xyz * w;
+                }
+            }
+            p = acc;
+        }
+    }
+    return camera.view_proj * vec4<f32>(p, 1.0);
 }
 "#;
 
@@ -1156,10 +2056,16 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         let shadow_cam_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("repame_view3d_shadow_cam_bg"),
             layout: &cam_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: shadow_camera_buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: shadow_camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: skin_buffer.as_entire_binding(),
+                },
+            ],
         });
         let shadow_depth_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1168,7 +2074,37 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
                 vertex: wgpu::VertexState {
                     module: &shadow_depth_shader,
                     entry_point: Some("vs_main"),
-                    buffers: &buffers,
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<Vert>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32x4,
+                                offset: 84,
+                                shader_location: 1,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 100,
+                                shader_location: 2,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32,
+                                offset: 116,
+                                shader_location: 3,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32,
+                                offset: 120,
+                                shader_location: 4,
+                            },
+                        ],
+                    })],
                     compilation_options: Default::default(),
                 },
                 fragment: None,
@@ -1205,6 +2141,13 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
             shadow_bind,
             shadow_view,
             shadow_edge,
+            cascade_tex,
+            cascade_edge,
+            point_tex,
+            point_edge: cube_edge,
+            point_faces: None,
+            skin_buffer,
+            skin_cap: 0,
             verts: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("repame_view3d_verts"),
                 size: 64,
@@ -1280,6 +2223,14 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
         }
         queue.write_buffer(&res.camera, 0, bytemuck::cast_slice(&[self.camera]));
         res.camera_mat = self.camera;
+        res.point_faces = self
+            .point_caster
+            .and_then(|i| self.staged_points.get(i))
+            .and_then(|p| p.cube_faces());
+        if !self.palette.is_empty() {
+            queue.write_buffer(&res.skin_buffer, 0, bytemuck::cast_slice(&self.palette));
+            res.skin_cap = self.palette.len();
+        }
         if !self.verts.is_empty() {
             queue.write_buffer(&res.verts, 0, bytemuck::cast_slice(&self.verts));
         }
@@ -1376,7 +2327,7 @@ fn vs_main(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
 }
 
 struct SceneEntry {
-    key: (wgpu::TextureFormat, u32, u32, u32, u32, u32),
+    key: (wgpu::TextureFormat, u32, u32, u32, u32, u32, u32, u32, u32),
     pipeline_depth: wgpu::RenderPipeline,
     pipeline_flat: wgpu::RenderPipeline,
     pipeline_transparent: wgpu::RenderPipeline,
@@ -1387,6 +2338,17 @@ struct SceneEntry {
     shadow_bind: wgpu::BindGroup,
     shadow_view: wgpu::TextureView,
     shadow_edge: u32,
+    cascade_tex: wgpu::Texture,
+    cascade_edge: u32,
+    point_tex: wgpu::Texture,
+    point_edge: u32,
+    /// Caster cube faces sampled this frame (six VPs), written by
+    /// `upload_all` from the staged points. `None` = cube pass off.
+    point_faces: Option<[[[f32; 4]; 4]; 6]>,
+    skin_buffer: wgpu::Buffer,
+    /// Joint count currently uploaded (matrices). Grows like the vert
+    /// buffers; shrinks never (uniform upload is a prefix write).
+    skin_cap: usize,
     verts: wgpu::Buffer,
     vert_cap: usize,
     indices: wgpu::Buffer,
@@ -1437,6 +2399,13 @@ pub fn prepare_scene_with_id(
         shadow_edge: u32,
         shadow_vp: [[f32; 4]; 4],
         shadows_on: bool,
+        cascade_tex: wgpu::Texture,
+        cascade_edge: u32,
+        cascade_vps: [[[f32; 4]; 4]; 4],
+        cascade_count: usize,
+        point_tex: wgpu::Texture,
+        point_edge: u32,
+        point_faces: Option<[[[f32; 4]; 4]; 6]>,
         verts: wgpu::Buffer,
         indices: wgpu::Buffer,
         pipeline_depth: wgpu::RenderPipeline,
@@ -1456,6 +2425,18 @@ pub fn prepare_scene_with_id(
         if res.last_ranges.is_empty() {
             return;
         }
+        let mat = res.camera_mat;
+        let cascade_vps = [
+            mat.cascade_vp0,
+            mat.cascade_vp1,
+            mat.cascade_vp2,
+            mat.cascade_vp3,
+        ];
+        let cascade_count = if mat.cascade_params[1] > 0.5 {
+            (mat.cascade_params[2] as usize).min(crate::MAX_CASCADES)
+        } else {
+            0
+        };
         Some(Snapshot {
             cam_bind: res.cam_bind.clone(),
             tex_bind: res.tex_bind.clone(),
@@ -1465,8 +2446,15 @@ pub fn prepare_scene_with_id(
             shadow_camera_buf: res.shadow_camera_buf.clone(),
             shadow_tex_view: res.shadow_view.clone(),
             shadow_edge: res.shadow_edge,
-            shadow_vp: res.camera_mat.shadow_vp,
-            shadows_on: res.camera_mat.shadow_params[1] > 0.5,
+            shadow_vp: mat.shadow_vp,
+            shadows_on: mat.shadow_params[1] > 0.5,
+            cascade_tex: res.cascade_tex.clone(),
+            cascade_edge: res.cascade_edge,
+            cascade_vps,
+            cascade_count,
+            point_tex: res.point_tex.clone(),
+            point_edge: res.point_edge,
+            point_faces: res.point_faces,
             verts: res.verts.clone(),
             indices: res.indices.clone(),
             pipeline_depth: res.pipeline_depth.clone(),
@@ -1513,6 +2501,101 @@ pub fn prepare_scene_with_id(
         for r in &snap.ranges {
             if !r.transparent && r.depth_test {
                 spass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
+            }
+        }
+    }
+    for slice in 0..snap.cascade_count {
+        let vp = snap
+            .cascade_vps
+            .get(slice)
+            .copied()
+            .unwrap_or_else(|| glam::Mat4::IDENTITY.to_cols_array_2d());
+        queue.write_buffer(&snap.shadow_camera_buf, 0, bytemuck::cast_slice(&vp));
+        let layer = snap.cascade_tex.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("repame_view3d_cascade_layer"),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: slice as u32,
+            array_layer_count: Some(1),
+            ..Default::default()
+        });
+        {
+            let mut cpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("repame_view3d_cascade"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &layer,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            cpass.set_viewport(
+                0.0,
+                0.0,
+                snap.cascade_edge as f32,
+                snap.cascade_edge as f32,
+                0.0,
+                1.0,
+            );
+            cpass.set_pipeline(&snap.shadow_depth_pipeline);
+            cpass.set_bind_group(0, &snap.shadow_cam_bind, &[]);
+            cpass.set_vertex_buffer(0, snap.verts.slice(..));
+            cpass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for r in &snap.ranges {
+                if !r.transparent && r.depth_test {
+                    cpass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
+                }
+            }
+        }
+    }
+    if let Some(faces) = snap.point_faces {
+        for (face, vp) in faces.iter().enumerate() {
+            queue.write_buffer(&snap.shadow_camera_buf, 0, bytemuck::cast_slice(vp));
+            let layer = snap.point_tex.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("repame_view3d_point_layer"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: face as u32,
+                array_layer_count: Some(1),
+                ..Default::default()
+            });
+            {
+                let mut ppass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("repame_view3d_point"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &layer,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                ppass.set_viewport(
+                    0.0,
+                    0.0,
+                    snap.point_edge as f32,
+                    snap.point_edge as f32,
+                    0.0,
+                    1.0,
+                );
+                ppass.set_pipeline(&snap.shadow_depth_pipeline);
+                ppass.set_bind_group(0, &snap.shadow_cam_bind, &[]);
+                ppass.set_vertex_buffer(0, snap.verts.slice(..));
+                ppass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for r in &snap.ranges {
+                    if !r.transparent && r.depth_test {
+                        ppass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
+                    }
+                }
             }
         }
     }
@@ -3166,5 +4249,527 @@ mod tests {
             return;
         };
         assert_eq!(center(&flat), lit, "strength 0 reproduces legacy");
+    }
+
+    /// End-to-end GPU proof for hardware skinning: a two-vertex limb baked
+    /// two ways — CPU `pose` vs GPU `SkinnedDraw` through `push_skinned` —
+    /// must rasterize the same pixels. The GPU draw blends bind verts by
+    /// the uploaded palette; the CPU path uploads pre-blended verts. Both
+    /// feed the same scene shader, so any palette/attribute mismatch shows
+    /// as a pixel difference. Skips gracefully without a GPU.
+    #[test]
+    fn offscreen_skinned_matches_cpu_pose() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+        use super::super::skin::{SkinnedDraw, SkinnedMesh};
+        use std::collections::HashMap;
+
+        /// Screen-filling quad skinned 50/50 across a joint that lifts it:
+        /// bind at y=0 (below view), joint 1 translates +10y. CPU pose
+        /// bakes y=5; GPU must rasterize the same quad.
+        fn skinned_quad() -> (MeshGroup, SkinnedDraw) {
+            let up = [0.0, 1.0, 0.0];
+            let mut baked = MeshGroup {
+                depth_test: true,
+                ..Default::default()
+            };
+            baked.push_quad_lit(
+                [-5.0, 5.0, 5.0],
+                [5.0, 5.0, 5.0],
+                [5.0, 5.0, -5.0],
+                [-5.0, 5.0, -5.0],
+                [1.0, 1.0, 1.0],
+                up,
+            );
+            let mut bind_pos = Vec::new();
+            let mut bind_nrm = Vec::new();
+            for p in [
+                [-5.0, 0.0, 5.0],
+                [5.0, 0.0, 5.0],
+                [5.0, 0.0, -5.0],
+                [-5.0, 0.0, -5.0],
+            ] {
+                bind_pos.push(p);
+                bind_nrm.push(up);
+            }
+            let n = bind_pos.len();
+            let mesh = SkinnedMesh {
+                name: "test_quad".into(),
+                positions: bind_pos,
+                normals: bind_nrm,
+                uvs: vec![],
+                colors: vec![[1.0, 1.0, 1.0]; n],
+                indices: vec![0, 1, 2, 0, 2, 3],
+                joints: vec![[0, 1, 0, 0]; n],
+                weights: vec![[0.5, 0.5, 0.0, 0.0]; n],
+                inverse_bind: vec![glam::Mat4::IDENTITY, glam::Mat4::IDENTITY],
+                node_to_joint: HashMap::from([(0, 0), (1, 1)]),
+                joint_nodes: vec![0, 1],
+                depth_test: true,
+                ..Default::default()
+            };
+            let joints = [
+                glam::Mat4::IDENTITY,
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.0, 0.0)),
+            ];
+            let draw = SkinnedDraw::from_matrices(&mesh, &joints).expect("fits the cap");
+            (baked, draw)
+        }
+
+        struct SkinCase {
+            cam: OrbitCamera,
+            baked: MeshGroup,
+            draw: SkinnedDraw,
+            use_gpu: bool,
+        }
+
+        impl WgpuCallback for SkinCase {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let id = if self.use_gpu {
+                    "test.skin.gpu"
+                } else {
+                    "test.skin.cpu"
+                };
+                let mut batch = SceneBatch::with_id(id);
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.set_camera_pos(self.cam.eye().into());
+                batch.set_light(super::SceneLight {
+                    direction: [0.0, 1.0, 0.0],
+                    color: [1.0, 1.0, 1.0],
+                    diffuse: 1.0,
+                    ambient: [0.0, 0.0, 0.0],
+                    ..super::SceneLight::default()
+                });
+                if self.use_gpu {
+                    batch.push_skinned(&self.draw);
+                } else {
+                    batch.push_group(&self.baked);
+                }
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    id,
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut wgpu::RenderPass<'static>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_id(
+                    if self.use_gpu {
+                        "test.skin.gpu"
+                    } else {
+                        "test.skin.cpu"
+                    },
+                    rpass,
+                    resources,
+                );
+            }
+        }
+
+        fn render_case(baked: MeshGroup, draw: SkinnedDraw, use_gpu: bool) -> Option<Vec<u8>> {
+            let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("SKIP skin test (no GPU): {e}");
+                    return None;
+                }
+            };
+            let cam = OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: 0.0,
+                pitch: 0.9,
+                dist: 30.0,
+                fov_y_deg: 30.0,
+            };
+            let scene = Scene {
+                clear_color: Color::from_rgba(0, 0, 0, 255),
+                nodes: vec![SceneNode::Callback {
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 64.0,
+                        h: 64.0,
+                    },
+                    payload: Callback::new(SkinCase {
+                        cam,
+                        baked,
+                        draw,
+                        use_gpu,
+                    }),
+                }],
+            };
+            Some(
+                renderer
+                    .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+                    .expect("offscreen render"),
+            )
+        }
+
+        let (baked, draw) = skinned_quad();
+        let Some(cpu) = render_case(baked.clone(), draw.clone(), false) else {
+            return;
+        };
+        let Some(gpu) = render_case(baked, draw, true) else {
+            return;
+        };
+        let at = |px: &[u8]| -> [u8; 4] {
+            let i = ((32 * 64 + 32) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+        assert_eq!(
+            at(&cpu),
+            [255, 255, 255, 255],
+            "cpu control is lit: {:?}",
+            at(&cpu)
+        );
+        assert_eq!(at(&gpu), at(&cpu), "gpu skin matches cpu bake");
+    }
+
+    /// End-to-end GPU proof for cascades: the same occluder scene as the
+    /// single-map test, routed through `set_rig` with a 1-cascade rig,
+    /// darkens the ground vs the unshadowed control. A 1-cascade rig is
+    /// the closest cascade analog of the legacy map (one fitted slice),
+    /// so this pins the rig plumbing (uniforms, array texture, slice
+    /// pass, shader branch) without asserting cascade-vs-single pixel
+    /// equality (fits differ legitimately).
+    #[test]
+    fn offscreen_cascade_rig_darkens_ground() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+        use super::super::shadow::CascadeDesc;
+
+        struct RigScene {
+            cam: OrbitCamera,
+            groups: Vec<MeshGroup>,
+            rig: super::LightRig,
+        }
+
+        impl WgpuCallback for RigScene {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.cascade");
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.set_camera_pos(self.cam.eye().into());
+                batch.set_rig(
+                    &self.rig,
+                    self.cam.eye().into(),
+                    self.cam.view_matrix(),
+                    self.cam.view_proj(1.0).inverse(),
+                );
+                for g in &self.groups {
+                    batch.push_group(g);
+                }
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.cascade",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut wgpu::RenderPass<'static>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_id("test.cascade", rpass, resources);
+            }
+        }
+
+        fn lid_and_ground() -> Vec<MeshGroup> {
+            let up = [0.0, 1.0, 0.0];
+            let mut ground = MeshGroup {
+                depth_test: true,
+                ..Default::default()
+            };
+            ground.push_quad_lit(
+                [-10.0, 0.0, 10.0],
+                [10.0, 0.0, 10.0],
+                [10.0, 0.0, -10.0],
+                [-10.0, 0.0, -10.0],
+                [1.0, 1.0, 1.0],
+                up,
+            );
+            let mut lid = MeshGroup {
+                depth_test: true,
+                ..Default::default()
+            };
+            lid.push_quad_lit(
+                [-3.0, 5.0, 3.0],
+                [3.0, 5.0, 3.0],
+                [3.0, 5.0, -3.0],
+                [-3.0, 5.0, -3.0],
+                [1.0, 1.0, 1.0],
+                up,
+            );
+            vec![ground, lid]
+        }
+
+        fn render_case(rig: super::LightRig) -> Option<Vec<u8>> {
+            let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("SKIP cascade test (no GPU): {e}");
+                    return None;
+                }
+            };
+            let cam = OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: std::f32::consts::PI,
+                pitch: 1.2,
+                dist: 24.0,
+                fov_y_deg: 30.0,
+            };
+            let scene = Scene {
+                clear_color: Color::from_rgba(0, 0, 0, 255),
+                nodes: vec![SceneNode::Callback {
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 64.0,
+                        h: 64.0,
+                    },
+                    payload: Callback::new(RigScene {
+                        cam,
+                        groups: lid_and_ground(),
+                        rig,
+                    }),
+                }],
+            };
+            Some(
+                renderer
+                    .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+                    .expect("offscreen render"),
+            )
+        }
+
+        fn rig_with(cascades: Option<CascadeDesc>) -> super::LightRig {
+            super::LightRig {
+                sun: super::SceneLight {
+                    direction: [1.0, 2.5, 0.0],
+                    color: [1.0, 1.0, 1.0],
+                    diffuse: 1.0,
+                    ambient: [0.0, 0.0, 0.0],
+                    ..super::SceneLight::default()
+                },
+                cascades,
+                ..super::LightRig::default()
+            }
+        }
+
+        let Some(off) = render_case(rig_with(None)) else {
+            return;
+        };
+        let Some(on) = render_case(rig_with(Some(CascadeDesc {
+            count: 1,
+            size: 1024,
+            ..CascadeDesc::default()
+        }))) else {
+            return;
+        };
+        let at = |px: &[u8], x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * 64 + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+        let mut lit_darkest: u8 = 255;
+        let mut cascade_darkest: u8 = 255;
+        for y in 0..64 {
+            for x in 0..64 {
+                lit_darkest = lit_darkest.min(at(&off, x, y)[0]);
+                cascade_darkest = cascade_darkest.min(at(&on, x, y)[0]);
+            }
+        }
+        assert!(
+            (cascade_darkest as i32) + 40 < lit_darkest as i32,
+            "cascade rig darkens: lit min {lit_darkest} vs cascade min {cascade_darkest}"
+        );
+    }
+
+    /// End-to-end GPU proof for point lights: a ground slab lit only by
+    /// a point light above it reads bright at the center; the same frame
+    /// with the light moved far away (past range... covered by distance
+    /// falloff instead) reads dark. Also pins the unshadowed point path
+    /// (no cube pass armed): coverage without a cube texture.
+    #[test]
+    fn offscreen_point_light_falloff() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+        use super::super::shadow::PointLight;
+
+        struct PointScene {
+            cam: OrbitCamera,
+            group: MeshGroup,
+            rig: super::LightRig,
+        }
+
+        impl WgpuCallback for PointScene {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.point");
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.set_camera_pos(self.cam.eye().into());
+                batch.set_rig(
+                    &self.rig,
+                    self.cam.eye().into(),
+                    self.cam.view_matrix(),
+                    self.cam.view_proj(1.0).inverse(),
+                );
+                batch.push_group(&self.group);
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.point",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut wgpu::RenderPass<'static>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_id("test.point", rpass, resources);
+            }
+        }
+
+        fn slab() -> MeshGroup {
+            let mut g = MeshGroup {
+                depth_test: true,
+                ..Default::default()
+            };
+            g.push_quad_lit(
+                [-10.0, 0.0, 10.0],
+                [10.0, 0.0, 10.0],
+                [10.0, 0.0, -10.0],
+                [-10.0, 0.0, -10.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 0.0],
+            );
+            g
+        }
+
+        fn rig_with(light_pos: [f32; 3]) -> super::LightRig {
+            super::LightRig {
+                sun: super::SceneLight {
+                    diffuse: 0.0,
+                    ambient: [0.0, 0.0, 0.0],
+                    ..super::SceneLight::default()
+                },
+                points: vec![PointLight {
+                    position: light_pos,
+                    color: [1.0, 1.0, 1.0],
+                    intensity: 400.0,
+                    range: 60.0,
+                    ..PointLight::default()
+                }],
+                ..super::LightRig::default()
+            }
+        }
+
+        fn render_case(rig: super::LightRig) -> Option<[u8; 4]> {
+            let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("SKIP point test (no GPU): {e}");
+                    return None;
+                }
+            };
+            let cam = OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: 0.0,
+                pitch: 1.2,
+                dist: 24.0,
+                fov_y_deg: 30.0,
+            };
+            let scene = Scene {
+                clear_color: Color::from_rgba(0, 0, 0, 255),
+                nodes: vec![SceneNode::Callback {
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 64.0,
+                        h: 64.0,
+                    },
+                    payload: Callback::new(PointScene {
+                        cam,
+                        group: slab(),
+                        rig,
+                    }),
+                }],
+            };
+            let px = renderer
+                .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+                .expect("offscreen render");
+            let i = ((32 * 64 + 32) * 4) as usize;
+            Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+        }
+
+        let Some(near) = render_case(rig_with([0.0, 8.0, 0.0])) else {
+            return;
+        };
+        let Some(far) = render_case(rig_with([0.0, 200.0, 0.0])) else {
+            return;
+        };
+        assert!(near[0] > 200, "point lights the slab: {near:?}");
+        assert!(far[0] < 20, "past-range point is dark: {far:?}");
     }
 }

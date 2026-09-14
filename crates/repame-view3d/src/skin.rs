@@ -735,7 +735,10 @@ fn collect_skeleton(
 /// (see [`alpha_mode`](crate::alpha_mode)): [`pose`](SkinnedMesh::pose)
 /// copies them into every baked group, so animated BLEND/MASK materials
 /// fade and cut out exactly like static ones.
-#[derive(Clone, Debug, Default)]
+///
+/// `Default` is opaque (`alpha: 1.0`, like [`MeshGroup`]): a hand-built
+/// bind mesh draws until the importer overwrites alpha from the material.
+#[derive(Clone, Debug)]
 pub struct SkinnedMesh {
     pub name: String,
     pub positions: Vec<[f32; 3]>,
@@ -768,6 +771,32 @@ pub struct SkinnedMesh {
     pub depth_test: bool,
 }
 
+impl Default for SkinnedMesh {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            positions: Vec::new(),
+            normals: Vec::new(),
+            uvs: Vec::new(),
+            colors: Vec::new(),
+            indices: Vec::new(),
+            joints: Vec::new(),
+            weights: Vec::new(),
+            inverse_bind: Vec::new(),
+            node_to_joint: HashMap::new(),
+            joint_nodes: Vec::new(),
+            texture_page: 0,
+            base_image: None,
+            pick_id: 0,
+            transparent: false,
+            alpha: 1.0,
+            alpha_cutoff: 0.0,
+            material: super::mesh::Material::default(),
+            depth_test: false,
+        }
+    }
+}
+
 impl SkinnedMesh {
     pub fn joint_count(&self) -> usize {
         self.inverse_bind.len()
@@ -781,6 +810,14 @@ impl SkinnedMesh {
     /// `inverse_bind`) into a world-space [`MeshGroup`]. Normals rotate by
     /// the blended matrix's 3x3 and renormalize. Unweighted verts (all-zero
     /// weights) hold bind pose.
+    ///
+    /// CPU path: prefer [`SkinnedDraw::from_player`](crate::SkinnedDraw::from_player)
+    /// over this when the joint count fits
+    /// [`MAX_SKIN_JOINTS`](crate::MAX_SKIN_JOINTS) — the GPU blends from
+    /// bind pose per frame instead of re-uploading baked verts.
+    ///
+    /// This stays for >128-joint rigs, morph+skin combos (morphs apply to
+    /// the baked group), and headless/pick proxies.
     ///
     /// Transparency/alpha/cutoff carry through from the bind mesh (usually
     /// identity/opaque, see [`SkinnedMesh`] defaults); the group is
@@ -1497,6 +1534,106 @@ pub fn attach_to_joint(group: &mut MeshGroup, node: &Mat4, offset: &Mat4) {
     }
 }
 
+/// One GPU-skinned draw: bind-pose geometry plus the joint palette sampled
+/// this frame. The batch uploads bind positions/normals once per frame
+/// (same buffers as static groups) and the palette into a per-draw uniform
+/// range; the vertex shader blends `sum(w * (joint * inverse_bind) * pos)`
+/// in hardware. Per-frame CPU cost is one palette sample (`joint_matrices`)
+/// instead of one full vertex bake.
+///
+/// `joints`/`weights` ride the vertex (u16x4 + f32x4, same data
+/// [`SkinnedMesh`] parses); `palette` is `joint_world * inverse_bind` per
+/// joint slot, padded with identity to exactly
+/// [`MAX_SKIN_JOINTS`](crate::MAX_SKIN_JOINTS) so the uniform shape is
+/// frame-stable. Meshes with more joints than the cap return `None` from
+/// [`from_mesh`](SkinnedDraw::from_mesh) (caller falls back to
+/// [`pose`](SkinnedMesh::pose)).
+#[derive(Clone, Debug)]
+pub struct SkinnedDraw {
+    /// Bind-pose mesh (positions/normals/uvs/colors/indices shared, never
+    /// mutated by the draw).
+    pub mesh: SkinnedMesh,
+    /// Palette matrices: `joint_world[slot] * inverse_bind[slot]`, padded
+    /// with identity to `MAX_SKIN_JOINTS`.
+    pub palette: Vec<Mat4>,
+    /// True joint count (pre-pad, for the shader's loop bound).
+    pub joint_count: usize,
+}
+
+impl SkinnedDraw {
+    /// Sample `player`/`anim`/`skeleton` at the player's current time and
+    /// build the palette. Returns `None` when the mesh exceeds
+    /// [`MAX_SKIN_JOINTS`](crate::MAX_SKIN_JOINTS) (CPU-bake fallback).
+    pub fn from_player(
+        mesh: &SkinnedMesh,
+        anim: &Animation,
+        skeleton: &Skeleton,
+        player: &SkeletonPlayer,
+    ) -> Option<Self> {
+        Self::from_matrices(mesh, &player.joint_matrices(anim, skeleton, mesh))
+    }
+
+    /// Build from explicit joint matrices (same order as
+    /// [`SkinnedMesh::inverse_bind`]). Returns `None` past the cap.
+    /// Short palettes pad with identity (unweighted verts hold bind);
+    /// long ones clamp per vertex at batch time (warned, never panics).
+    pub fn from_matrices(mesh: &SkinnedMesh, joint_matrices: &[Mat4]) -> Option<Self> {
+        let n = mesh.joint_count();
+        if n > crate::MAX_SKIN_JOINTS {
+            log::warn!(
+                "gpu skin: {} joints exceeds {} ({}), CPU-bake fallback",
+                n,
+                crate::MAX_SKIN_JOINTS,
+                mesh.name
+            );
+            return None;
+        }
+        let mut palette = Vec::with_capacity(crate::MAX_SKIN_JOINTS);
+        for slot in 0..n {
+            let joint = joint_matrices.get(slot).copied().unwrap_or(Mat4::IDENTITY);
+            let ib = mesh
+                .inverse_bind
+                .get(slot)
+                .copied()
+                .unwrap_or(Mat4::IDENTITY);
+            palette.push(joint * ib);
+        }
+        palette.resize(crate::MAX_SKIN_JOINTS, Mat4::IDENTITY);
+        Some(Self {
+            mesh: mesh.clone(),
+            palette,
+            joint_count: n,
+        })
+    }
+
+    /// CPU reference: blend one bind vertex by the palette (mirrors the
+    /// WGSL `skin_vertex` exactly, pinned by tests). Returns
+    /// (position, normal).
+    pub fn blend_vertex(&self, index: usize) -> Option<([f32; 3], [f32; 3])> {
+        let pos = Vec3::from(*self.mesh.positions.get(index)?);
+        let nrm = Vec3::from(*self.mesh.normals.get(index).unwrap_or(&[0.0, 1.0, 0.0]));
+        let joints = self.mesh.joints.get(index).copied().unwrap_or([0; 4]);
+        let weights = self.mesh.weights.get(index).copied().unwrap_or([0.0; 4]);
+        let wsum: f32 = weights.iter().sum();
+        if wsum <= 1e-8 || self.joint_count == 0 {
+            return Some((pos.into(), nrm.into()));
+        }
+        let mut p = Vec3::ZERO;
+        let mut n = Vec3::ZERO;
+        for k in 0..4 {
+            let w = weights[k] / wsum;
+            if w <= 0.0 {
+                continue;
+            }
+            let slot = (joints[k] as usize).min(self.joint_count.saturating_sub(1));
+            let m = self.palette.get(slot).copied().unwrap_or(Mat4::IDENTITY);
+            p += m.transform_point3(pos) * w;
+            n += m.transform_vector3(nrm) * w;
+        }
+        Some((p.into(), n.try_normalize().unwrap_or(Vec3::Y).into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1873,5 +2010,46 @@ mod tests {
         assert_eq!(track.sample(-1.0), vec![0.0, 0.0]);
         assert_eq!(track.sample(0.5), vec![0.5, 0.25]);
         assert_eq!(track.sample(9.0), vec![1.0, 0.5]);
+    }
+
+    #[test]
+    fn gpu_draw_blends_like_cpu_pose() {
+        let mesh = limb();
+        let joints = [
+            Mat4::IDENTITY,
+            Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+        ];
+        let baked = mesh.pose(&joints);
+        let draw = SkinnedDraw::from_matrices(&mesh, &joints).expect("fits the cap");
+        assert_eq!(draw.joint_count, 2);
+        assert_eq!(draw.palette.len(), crate::MAX_SKIN_JOINTS);
+        for i in 0..mesh.positions.len() {
+            let (p, n) = draw.blend_vertex(i).expect("in range");
+            for k in 0..3 {
+                assert!(
+                    (p[k] - baked.positions[i][k]).abs() < 1e-5,
+                    "vert {i} pos: {p:?} vs {:?}",
+                    baked.positions[i]
+                );
+                assert!(
+                    (n[k] - baked.normals[i][k]).abs() < 1e-5,
+                    "vert {i} nrm: {n:?} vs {:?}",
+                    baked.normals[i]
+                );
+            }
+        }
+        assert!(draw.blend_vertex(99).is_none());
+    }
+
+    #[test]
+    fn oversize_rig_refuses_the_gpu_path() {
+        let mut mesh = limb();
+        mesh.inverse_bind = vec![Mat4::IDENTITY; crate::MAX_SKIN_JOINTS + 1];
+        mesh.joint_nodes = (0..mesh.inverse_bind.len()).collect();
+        let id = vec![Mat4::IDENTITY; mesh.inverse_bind.len()];
+        assert!(
+            SkinnedDraw::from_matrices(&mesh, &id).is_none(),
+            "past the cap: CPU-bake fallback"
+        );
     }
 }

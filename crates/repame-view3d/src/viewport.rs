@@ -48,13 +48,28 @@ pub struct Frame3d {
     /// mismatches fail at the call site).
     pub desc: BatchDesc,
     /// Frame light for groups carrying normals. Flat groups ignore it.
+    /// Legacy field: when [`rig`](Frame3d::rig) is `Some`, the rig wins
+    /// (sun copied from here stays in sync via [`Frame3d::set_rig`]).
+    /// Games should write the rig and leave this at default.
     pub light: SceneLight,
     /// Shadow-map configuration. `None` (default) disables the depth pass
     /// and reproduces legacy pixels exactly. `Some` renders opaque
     /// depth-tested groups into a light-space depth texture during
     /// `prepare` and scales diffuse + specular per lit fragment (3x3 PCF).
     /// Blob shadows (`repame-fx` decals) keep covering contact grounding.
+    /// Legacy field: a `Some` [`rig`](Frame3d::rig) overrides this (its
+    /// cascades replace the single map; set neither for legacy pixels).
     pub shadow: Option<crate::ShadowDesc>,
+    /// Full light rig: sun + points + cascades + cube caster. `None`
+    /// (default) keeps the legacy `light`/`shadow` path exactly. `Some`
+    /// routes through [`SceneBatch::set_rig`](crate::SceneBatch::set_rig):
+    /// the batch fits cascade slices from the frame camera and stages
+    /// the brightest [`MAX_POINTS`](crate::MAX_POINTS) points.
+    pub rig: Option<crate::LightRig>,
+    /// GPU-skinned draws for the frame (bind mesh + sampled palette).
+    /// Empty (default) disables the skin path; the palette uniform stays
+    /// bound but unread.
+    pub skinned: Vec<crate::SkinnedDraw>,
     /// Offscreen clear color (linear 0..1 RGBA). The shared UI pass this
     /// viewport paints into has its own clear; this selects the scene
     /// target clear inside the viewport-owned pass.
@@ -74,6 +89,8 @@ impl Default for Frame3d {
             desc: BatchDesc::default(),
             light: SceneLight::default(),
             shadow: None,
+            rig: None,
+            skinned: Vec::new(),
             background: None,
             viewport_px: [1600.0, 900.0],
         }
@@ -93,6 +110,21 @@ impl Frame3d {
     /// Push one mesh group into the snapshot.
     pub fn push(&mut self, group: MeshGroup) {
         self.groups.push(group);
+    }
+
+    /// Set the full light rig. Copies `rig.sun` into [`light`](Frame3d::light)
+    /// so legacy readers (debug overlays, CPU-side exposure math) stay in
+    /// sync; clears [`shadow`](Frame3d::shadow) (the rig's cascades own the
+    /// directional pass now, a stale single map would double-shadow).
+    pub fn set_rig(&mut self, rig: crate::LightRig) {
+        self.light = rig.sun;
+        self.rig = Some(rig);
+        self.shadow = None;
+    }
+
+    /// Push one GPU-skinned draw (bind mesh + sampled palette).
+    pub fn push_skinned(&mut self, draw: crate::SkinnedDraw) {
+        self.skinned.push(draw);
     }
 
     /// Append cached chunk geometry (see [`ChunkCache`](crate::ChunkCache)):
@@ -458,14 +490,30 @@ impl WgpuCallback for GpuViewport3d {
         let mut batch = SceneBatch::with_desc(self.batch_id.clone(), desc);
         batch.set_camera(self.input.cam.view_proj(aspect));
         batch.set_camera_pos(self.input.cam.eye().into());
-        batch.set_light(self.input.light);
-        batch.set_shadow(
-            self.input.shadow,
-            self.input.cam.target.into(),
-            self.input.cam.dist,
-        );
+        match &self.input.rig {
+            Some(rig) => {
+                let vp = self.input.cam.view_proj(aspect);
+                batch.set_rig(
+                    rig,
+                    self.input.cam.eye().into(),
+                    self.input.cam.view_matrix(),
+                    vp.inverse(),
+                );
+            }
+            None => {
+                batch.set_light(self.input.light);
+                batch.set_shadow(
+                    self.input.shadow,
+                    self.input.cam.target.into(),
+                    self.input.cam.dist,
+                );
+            }
+        }
         for g in &self.input.groups {
             batch.push_group(g);
+        }
+        for s in &self.input.skinned {
+            batch.push_skinned(s);
         }
         batch.extend_uploads(self.input.uploads.iter().cloned());
         batch.finish();

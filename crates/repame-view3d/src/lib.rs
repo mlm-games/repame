@@ -22,6 +22,7 @@ pub mod pick;
 pub mod render;
 pub mod shadow;
 pub mod skin;
+pub mod stream;
 pub mod textures;
 pub mod viewport;
 pub mod voxel;
@@ -34,14 +35,18 @@ pub use gltf::{
 };
 pub use mesh::{Material, MeshGroup, Rgb, shade, shade_for_dir};
 pub use pick::{MeshHit, group_bounds, pick_ray, pick_screen, ray_aabb, ray_triangle};
-pub use render::{BatchDesc, SceneBatch, SceneFilter, SceneLight, SceneUpload};
+pub use render::{BatchDesc, LightRig, SceneBatch, SceneFilter, SceneLight, SceneUpload};
 pub use render::{paint_scene_with_id, prepare_scene_with_id};
-pub use shadow::{ShadowDesc, light_view_proj, shadow_extent};
+pub use shadow::{
+    CascadeDesc, CascadeSlice, PointLight, ShadowDesc, light_view_proj, shadow_extent,
+};
+pub use shadow::{MAX_CASCADES, MAX_POINTS, MAX_SKIN_JOINTS};
 pub use skin::{
     Animation, Interp, JointPose, MorphSet, MorphTrack, NodePose, SkeletalAdvance, Skeleton,
-    SkeletonLoop, SkeletonPlayer, SkinnedMesh, attach_to_joint, import_animations, import_morphs,
-    import_skeleton, import_skinned,
+    SkeletonLoop, SkeletonPlayer, SkinnedDraw, SkinnedMesh, attach_to_joint, import_animations,
+    import_morphs, import_skeleton, import_skinned,
 };
+pub use stream::{ChunkBuild, ChunkPriority, ChunkStreamer, StreamPlan, plan_stream};
 pub use textures::{
     ImageSkip, PlacedPage, TextureImage, TexturedImport, decode_document_images,
     decode_image_bytes, decode_slice_images, import_slice_textured,

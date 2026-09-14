@@ -1,11 +1,11 @@
-//! Voxel chunk mesher: game-owned grid in, [`MeshGroup`](super::mesh::MeshGroup)s out.
+//! Voxel chunk mesher: game-owned grid in, [`MeshGroup`]s out.
 
 use std::collections::{HashMap, HashSet};
 
 use super::mesh::{MeshGroup, Rgb, shade_for_dir};
 
 /// Chunk edge in cells. Matches the rustbox `CHUNK_SIZE` convention (and the
-/// [`ChunkCache`](super::chunk::ChunkCache) key convention).
+/// [`ChunkCache`](crate::ChunkCache) key convention).
 pub const CHUNK_SIZE: i32 = 16;
 
 /// Voxel block shape (mirrors the rustbox `BlockShape` set the mesher was
@@ -61,7 +61,7 @@ impl Cell {
 }
 
 /// Caller-owned grid. Must answer across chunk borders (neighbor lookups
-/// cross them — that is what fixes seam holes). `None` = air.
+/// cross them, that is what fixes seam holes). `None` = air.
 pub trait VoxelSource {
     fn get(&self, cell: [i32; 3]) -> Option<Cell>;
 }
@@ -93,7 +93,7 @@ pub struct ChunkMeshInput<F, G> {
     pub is_solid: G,
     /// Base tint per kind (linear RGB; missing kinds read white).
     pub kind_tint: HashMap<u32, Rgb>,
-    /// Kind×shape pairs replaced by pack models (skipped, like the rustbox
+    /// Kindxshape pairs replaced by pack models (skipped, like the rustbox
     /// overlay path).
     pub skip_overlay: HashSet<(u32, VoxelShape)>,
     /// Global water plane Y (`None` = no plane). Cells below it (or
@@ -106,7 +106,7 @@ pub struct ChunkMeshInput<F, G> {
     /// Emit normals + shade-baked tints (lit path). Off = flat exact colors.
     pub lit: bool,
     /// Emit full-quad 0..1 uvs (game assigns pages after upload). Off =
-    /// untextured (never an invisible discard).
+    /// untextured (tint only).
     pub textured: bool,
 }
 
@@ -143,9 +143,9 @@ impl Default for ChunkMeshInput<fn(u32) -> FaceKind, fn(u32) -> bool> {
 pub struct ChunkMeshOutput {
     pub opaque: HashMap<u32, MeshGroup>,
     pub water: MeshGroup,
-    /// Greedy-merged quads (subset of opaque) — stats/tests.
+    /// Greedy-merged quads (subset of opaque), stats/tests.
     pub merged_quads: usize,
-    /// Exact fallback quads (shaped cells, submerged Fulls) — stats/tests.
+    /// Exact fallback quads (shaped cells, submerged Fulls), stats/tests.
     pub fallback_quads: usize,
 }
 
@@ -367,7 +367,7 @@ pub fn build_chunk_mesh<S, F, G>(
 }
 
 /// Push one quad into a group through the matching [`MeshGroup`] helper
-/// (flat / lit / textured / lit+textured — one style per group, never
+/// (flat / lit / textured / lit+textured, one style per group, never
 /// mixed). `shade` bakes the directional contrast; `normal` is the exact
 /// face normal (axis faces) or geometric normal (shaped fallback).
 #[allow(clippy::too_many_arguments)]
@@ -609,7 +609,7 @@ fn merged_quad_frame(
 
 /// Exact per-face quads for shaped (non-Full) cells: Half/TopHalf/Thin as
 /// true boxes; other shapes as full-cube faces with rotation-aware culling
-/// (conservative — never punches holes).
+/// (conservative, never punches holes).
 fn push_shaped_faces<S, F, G>(
     grid: &S,
     cell: [i32; 3],

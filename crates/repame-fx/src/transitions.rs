@@ -1,14 +1,6 @@
-//! State transitions: fade cover/hold/uncover with input blocking.
-//! Mirrors the retired `Transition` numbers exactly (Fade at speed 2.5
-//! = 0.4 s cover + 0.4 s uncover at 100 Hz); the game paints
-//! [`TransitionFx::alpha`] as a black rect and gates its tick driver on
-//! [`TransitionFx::blocking`].
-//!
-//! Custom visuals (spiral vortex, circle wipes, …) attach the Godot/Bevy
-//! way: the game picks a [`TransitionVisual::Custom`] id, drives its own
-//! fullscreen pass (e.g. `repame-sprite::FullscreenPass`) from
-//! [`TransitionFx::cover_amount`], and gates input on [`TransitionFx::blocking`].
-//! `Custom(1)` is the spiral-vortex convention.
+//! State transitions: fade cover, hold, uncover with input blocking.
+//! Fade runs 0.4 s cover plus 0.4 s uncover at 100 Hz.
+//! Custom visuals drive their own pass from cover amount.
 
 /// Ticks per half (0.4 s at 100 Hz).
 pub const HALF_TICKS: i32 = 40;
@@ -17,14 +9,14 @@ pub const VORTEX_CUSTOM_ID: u8 = 1;
 
 use bevy_ecs::prelude::*;
 
-/// What the transition looks like. Timing/alpha/blocking are identical
-/// for every variant; only the game's renderer interprets the kind.
+/// What the transition looks like. Timing and blocking match
+/// across variants; only the renderer interprets the kind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TransitionVisual {
     #[default]
     Fade,
-    /// Opaque custom visual — this crate only drives timing/cover amount.
-    /// The consumer decides how to render it (e.g. a spiral-vortex shader).
+    /// Opaque custom visual; this crate only drives timing and cover.
+    /// The consumer renders it from cover amount.
     Custom(u8),
 }
 
@@ -42,7 +34,6 @@ pub struct TransitionFx {
     t: i32,
     kind: TransitionVisual,
     /// Kind used by [`Self::begin`] unless the consumer overrides it.
-    /// Set once (e.g. at startup) to pick a house style.
     pub default_kind: TransitionVisual,
 }
 
@@ -51,27 +42,24 @@ impl TransitionFx {
         Self::default()
     }
 
-    /// Start a cover->uncover cycle (state already swapped underneath,
-    /// like `begin_to_state`). Uses [`Self::default_kind`].
+    /// Start a cover and uncover cycle. Uses [`Self::default_kind`].
     pub fn begin(&mut self) {
         self.begin_with(self.default_kind);
     }
 
-    /// Start a cover->uncover cycle with an explicit visual.
+    /// Start a cover and uncover cycle with an explicit visual.
     pub fn begin_with(&mut self, kind: TransitionVisual) {
         self.phase = Phase::Cover;
         self.t = 0;
         self.kind = kind;
     }
 
-    /// Start a custom-visual cycle (spiral vortex, circle wipe, …).
+    /// Start a custom-visual cycle by id.
     pub fn begin_custom(&mut self, id: u8) {
         self.begin_with(TransitionVisual::Custom(id));
     }
 
-    /// Convenience for vortex/spiral wipes — uses `Custom(1)` convention.
-    /// This crate does not render it; check [`Self::is_vortex`] and draw
-    /// the vortex pass with intensity from [`Self::cover_amount`].
+    /// Start a vortex wipe using the `Custom(1)` convention.
     pub fn begin_vortex(&mut self) {
         self.begin_custom(VORTEX_CUSTOM_ID);
     }
@@ -86,8 +74,7 @@ impl TransitionFx {
         matches!(self.kind, TransitionVisual::Custom(v) if v == id)
     }
 
-    /// True when the active visual is the vortex convention
-    /// (`Custom(1)` — see [`Self::begin_vortex`]).
+    /// True when the active visual is the vortex convention.
     pub fn is_vortex(&self) -> bool {
         self.is_custom(VORTEX_CUSTOM_ID)
     }
@@ -96,9 +83,8 @@ impl TransitionFx {
         self.phase != Phase::Idle
     }
 
-    /// Black overlay alpha 0..1 (1 = fully covered). For custom visuals
-    /// this is a fallback dim; prefer [`Self::cover_amount`] as the
-    /// effect intensity.
+    /// Black overlay alpha 0..1 (1 is covered). Custom visuals can use
+    /// [`Self::cover_amount`] as the effect intensity instead.
     pub fn alpha(&self) -> f32 {
         match self.phase {
             Phase::Idle => 0.0,
@@ -107,9 +93,7 @@ impl TransitionFx {
         }
     }
 
-    /// 0.0 = uncovered, 1.0 = fully covered. Drive custom fullscreen
-    /// effects (e.g. vortex density/radius) from this; fades can paint
-    /// it directly as a black rect (same values as [`Self::alpha`]).
+    /// 0.0 is uncovered, 1.0 is covered. Custom passes read this value.
     pub fn cover_amount(&self) -> f32 {
         self.alpha()
     }

@@ -1,9 +1,6 @@
-//! Headless sim: a `bevy_ecs` world stepped without a renderer.
-//!
-//! The game owns a [`Sim`], advances it with fixed-timestep [`Sim::step`],
-//! and pulls a snapshot out each frame for the viewport (see `repame-sprite`).
-//! Systems are plain functions registered on the schedule; no `bevy_app`,
-//! no window, no renderer. The sim stays portable to full Bevy later.
+//! Headless sim: `bevy_ecs` world stepped without a renderer.
+//! Game owns `Sim`, feeds wall time via `Sim::step`,
+//! then reads a snapshot for the viewport.
 
 use web_time::Duration;
 
@@ -13,37 +10,25 @@ use bevy_ecs::system::ScheduleSystem;
 
 pub use bevy_ecs;
 
-/// Fixed-timestep simulation state.
-///
-/// The game owns a `Sim`, registers plain systems on its schedule, feeds it
-/// wall-clock time every frame with [`Sim::step`], and pulls a snapshot out
-/// for the viewport. There is no window, no renderer, and no app object.
+/// Fixed-step sim state. Game registers systems,
+/// feeds wall time with `step`, reads `world` for the snapshot.
 pub struct Sim {
     /// Entity/component store. Game crates add their own components here.
     pub world: World,
     schedule: Schedule,
     accumulator: Duration,
-    /// Fixed step size. Defaults to 60 Hz (see [`Sim::with_default_step`]).
+    /// Fixed step size. Default 60 Hz.
     ///
-    /// Each [`Sim::tick`] advances [`SimTime`] by exactly this amount, so
-    /// gameplay stays deterministic regardless of frame rate. Change it
-    /// before the first [`Sim::step`] call; changing it mid-run rescales
-    /// future ticks but leaves already-simulated time untouched.
+    /// Each tick adds this to `SimTime`. Set before first `step`.
     pub step: Duration,
-    /// Maximum fixed steps per [`Sim::step`] call. Defaults to `8`.
+    /// Max ticks per `step` call. Default `8`.
     ///
-    /// Guards against the spiral of death: after a long hitch (app resume,
-    /// debugger pause, slow device), the sim runs at most this many catch-up
-    /// ticks and drops the excess wall time instead of scheduling dozens of
-    /// ticks that make the next frame even longer. The dropped time is gone,
-    /// not carried over. The sim slows down instead of freezing.
-    ///
-    /// **Note:** clamped to a minimum of `1` per call, so the sim always
-    /// makes progress while wall time keeps arriving.
+    /// Caps catch-up after hitches. Excess wall time is dropped.
+    /// Clamped to a minimum of `1` so the sim keeps moving.
     pub max_steps: u32,
 }
 
-/// Sim time resource, advanced once per fixed step.
+/// Sim time, advanced once per fixed step.
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct SimTime {
     /// Total simulated seconds.
@@ -76,12 +61,9 @@ impl Sim {
         self
     }
 
-    /// Register systems with a guaranteed execution order.
+    /// Register systems with a fixed execution order.
     ///
-    /// A bare `Schedule` does not preserve `add_system` insertion order for
-    /// systems with conflicting accesses, so multi-step pipelines (economy,
-    /// combat) must register as one `(a, b, c).chain()` tuple through here
-    /// instead of separate `add_system` calls.
+    /// Use one `(a, b, c).chain()` tuple for pipelines that need order.
     pub fn add_chained_systems<M>(
         &mut self,
         systems: impl IntoScheduleConfigs<ScheduleSystem, M>,
@@ -90,19 +72,13 @@ impl Sim {
         self
     }
 
-    /// Advance the sim by `dt` wall time, running zero or more fixed steps.
-    /// Returns the number of steps run.
+    /// Advance by `dt` wall time. Returns ticks run.
     ///
-    /// Wall time accumulates across calls: a `dt` smaller than [`Sim::step`]
-    /// banks its fraction for later, and a large `dt` runs several ticks at
-    /// once. At most [`Sim::max_steps`] ticks run per call; any time still
-    /// banked beyond that is dropped (see [`Sim::max_steps`]).
-    ///
-    /// Typical frame pump:
+    /// Small `dt` banks for later. Large `dt` runs up to `max_steps`
+    /// ticks, then drops leftover whole steps. Example:
     ///
     /// ```ignore
     /// let steps = sim.step(frame_dt);
-    /// // `steps` ticks ran; build the viewport snapshot from `sim.world`.
     /// ```
     pub fn step(&mut self, dt: Duration) -> u32 {
         if self.step.is_zero() {
@@ -116,8 +92,7 @@ impl Sim {
             ran += 1;
         }
         if self.accumulator >= self.step {
-            // On hitch: drop only *whole* extra steps, keep fraction for
-            // alpha continuity.
+            // Hitch: keep only the sub-step fraction for alpha continuity.
             let step_ns = self.step.as_nanos();
             if step_ns > 0 {
                 let acc_ns = self.accumulator.as_nanos() % step_ns;
@@ -129,28 +104,13 @@ impl Sim {
         ran
     }
 
-    /// Unconsumed fractional time carried to the next frame.
-    ///
-    /// Always less than one [`Sim::step`] (a full step would have ticked).
-    /// Returns [`Duration::ZERO`] right after a step boundary; after a
-    /// hitch that hit the [`Sim::max_steps`] cap only the sub-step
-    /// fraction is kept (whole extra steps are dropped, alpha stays
-    /// continuous).
+    /// Unconsumed time carried to the next frame. Below one step.
     pub fn leftover(&self) -> Duration {
         self.accumulator
     }
 
-    /// Blend factor between the last ticked state and the next one, from
-    /// `0.0` (just ticked) to `1.0` (a full step banked, tick imminent).
-    ///
-    /// Computed as `accumulator / step`, clamped to `0..1`; returns `0.0`
-    /// for a degenerate (zero) step size. The sim itself never interpolates.
-    /// Snapshots read the last ticked state, but games that keep the
-    /// previous snapshot can blend toward the current one with this factor
-    /// for smooth rendering.
-    ///
-    /// **Note:** after a capped hitch (see [`Sim::max_steps`]) only whole
-    /// steps are dropped, so `alpha` keeps the leftover fraction.
+    /// Blend factor `accumulator / step`, clamped to `0..1`.
+    /// Zero step returns `0.0`. For render blending between snapshots.
     pub fn alpha(&self) -> f32 {
         let step = self.step.as_secs_f64();
         if step <= 0.0 {
@@ -159,9 +119,8 @@ impl Sim {
         (self.accumulator.as_secs_f64() / step).clamp(0.0, 1.0) as f32
     }
 
-    /// Run the schedule exactly once, advancing sim time by one step.
-    /// Tick-model games (integer logic steps) drive this directly instead
-    /// of the wall-clock [`Sim::step`] accumulator.
+    /// Run the schedule once, advancing sim time by one step.
+    /// Tick-model games drive this directly instead of `step`.
     pub fn tick(&mut self) {
         {
             let mut time = self.world.resource_mut::<SimTime>();
@@ -200,7 +159,11 @@ mod tests {
         sim.max_steps = 4;
         let ran = sim.step(Duration::from_secs(10));
         assert_eq!(ran, 4);
-        assert!(sim.leftover() < sim.step, "keeps only fraction, got {:?}", sim.leftover());
+        assert!(
+            sim.leftover() < sim.step,
+            "keeps only fraction, got {:?}",
+            sim.leftover()
+        );
     }
 
     #[test]

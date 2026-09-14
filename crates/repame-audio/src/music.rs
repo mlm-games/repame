@@ -1,10 +1,7 @@
 //! [`Music`]: track director with crossfade, intensity stems, ducking.
-//!
-//! Game-idiomatic music: `play("battle", fade)` crossfades from whatever
-//! runs; `set_intensity` mixes layered stems by windows; `duck` dips
-//! under dialog or stingers and releases. All motion is [`Fade`](crate::RealtimeCommand::Fade)
-//! commands on looping music-bus voices  - the engine owns the ramps,
-//! this owns the policy. `update(dt)` advances the duck envelope.
+//! `play` crossfades between tracks; `set_intensity` mixes stems by
+//! window; `duck` dips under dialog and releases. `update(dt)` advances
+//! the duck envelope.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,8 +13,7 @@ use crate::command::{PlayCmd, RealtimeCommand, SharedFrames};
 use crate::decode_bytes;
 use crate::{AudioChannel, AudioState};
 
-/// One intensity stem: audible across the `[lo, hi]` intensity window
-/// with a linear ramp at both edges.
+/// One intensity stem: audible across `[lo, hi]` with a linear ramp.
 #[derive(Debug, Clone)]
 pub struct StemDef {
     pub lo: f32,
@@ -58,7 +54,7 @@ enum DuckEnv {
     },
 }
 
-/// Looping-track director on the game thread. Silent without a link.
+/// Looping-track director on the game thread.
 pub struct Music {
     tracks: HashMap<String, Track>,
     current: Option<Playing>,
@@ -88,15 +84,13 @@ impl Music {
         }
     }
 
-    /// Wire to an audio thread (done by [`crate::Audio::try_init`]; call
-    /// directly for custom plumbing or tests).
+    /// Wire to an audio thread.
     pub fn attach(&mut self, tx: Sender<RealtimeCommand>, state: Arc<AudioState>) {
         self.tx = Some(tx);
         self.state = Some(state);
     }
 
-    /// Register a looping track (main mix). Stems arrive via
-    /// [`Music::add_stem`]. Replaces any track of the same name.
+    /// Register a looping track (main mix).
     pub fn load_track(&mut self, name: &str, gain: f32, main: &[u8]) -> Result<()> {
         let main = Arc::new(decode_bytes(main)?);
         self.tracks.insert(
@@ -139,7 +133,7 @@ impl Music {
         self.current.as_ref().map(|c| c.name.as_str())
     }
 
-    /// Crossfade to a track (`0.0` = hard cut). Unknown names fail soft.
+    /// Crossfade to a track (`0.0` is a hard cut). Unknown names return false.
     pub fn play(&mut self, name: &str, fade_secs: f32) -> bool {
         let (tx, state) = match (&self.tx, &self.state) {
             (Some(tx), Some(state)) => (tx, state),
@@ -204,7 +198,7 @@ impl Music {
         true
     }
 
-    /// Hard stop with a fade-out. Completions reap through `reap`.
+    /// Hard stop with a fade-out.
     pub fn stop(&mut self, fade_secs: f32) {
         if let (Some(tx), Some(old)) = (&self.tx, self.current.take()) {
             for (voice, _) in old.voices {
@@ -223,8 +217,7 @@ impl Music {
         self.retarget(0.3);
     }
 
-    /// Dip under dialog/stingers: instant attack to `amount_db`, hold,
-    /// then linear release. Re-calling re-ducks from the current factor.
+    /// Dip under dialog: attack to `amount_db`, hold, then release.
     pub fn duck(&mut self, amount_db: f32, hold_secs: f32, release_secs: f32) {
         self.duck_target = 10.0_f32.powf(amount_db / 20.0).clamp(0.0, 1.0);
         self.duck_release_secs = release_secs.max(0.05);
@@ -273,7 +266,7 @@ impl Music {
         }
     }
 
-    /// Absolute voice-gain target for one stem (main = `None`).
+    /// Absolute voice-gain target for one stem (`None` is the main mix).
     fn stem_target(&self, stem: Option<usize>, track: &Track) -> f32 {
         let window = match stem {
             None => 1.0,
@@ -299,7 +292,7 @@ impl Music {
             (Some(tx), Some(current)) => (tx, current),
             _ => return,
         };
-        // Track lookup by name (current borrows self; re-borrow fields).
+        // Track lookup by name (current borrows self, so re-borrow fields).
         let name = current.name.clone();
         let (track_gain, stems): (f32, Vec<(f32, f32, f32)>) = match self.tracks.get(&name) {
             Some(t) => (

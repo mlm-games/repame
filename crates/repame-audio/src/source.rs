@@ -1,8 +1,5 @@
 //! [`AudioSource`]: encoded sound bytes plus format sniffing.
-//!
-//! Sources stay encoded until [`crate::Audio::add_source`] decodes them
-//! into the backend. Kenney packs ship Ogg Vorbis, which kira decodes
-//! natively  - no conversion step needed.
+//! Sources stay encoded until decode; Ogg Vorbis needs no conversion.
 
 /// Container/codec of encoded sound bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -32,7 +29,7 @@ pub fn sniff_format(bytes: &[u8]) -> AudioFormat {
     }
 }
 
-/// Encoded sound bytes, registered once via [`crate::Audio::add_source`].
+/// Encoded sound bytes, registered once via add.
 #[derive(Debug, Clone)]
 pub struct AudioSource {
     bytes: Vec<u8>,
@@ -62,8 +59,7 @@ impl AudioSource {
     }
 }
 
-/// Minimal mono 16-bit WAV writer: sine burst with exponential decay.
-/// Pure (no kira) so tests and placeholders work on every platform.
+/// Minimal mono 16-bit WAV writer: sine burst with decay.
 pub fn synth_sine_wav(freq_hz: f32, secs: f32, sample_rate: u32) -> Vec<u8> {
     let n = (sample_rate as f32 * secs) as usize;
     let mut out = Vec::with_capacity(44 + n * 2);

@@ -1,34 +1,30 @@
-//! glTF 2.0 import behind [`MeshGroup`](super::mesh::MeshGroup).
+//! glTF 2.0 import to [`MeshGroup`].
 
 use glam::{Mat4, Quat, Vec3};
 
 use super::mesh::MeshGroup;
 
-/// Why an import produced no (or partial) geometry. Parsing itself reports
-/// through `gltf::Error`; this covers the semantic skips the importer logs.
+/// Why an import produced no (or partial) geometry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImportSkip {
-    /// Primitive mode isn't triangles/fans/strips (points/lines).
+    /// Primitive mode is points or lines.
     NonTriangleMode,
-    /// No position accessor (nothing to draw).
+    /// No position accessor.
     NoPositions,
-    /// Index/attribute read failed (sparse/mismatched — skipped).
+    /// Index or attribute read failed.
     BadAccessor,
 }
 
-/// One imported mesh: named node baked to world space.
+/// One imported mesh: node name plus world-space groups.
 #[derive(Clone, Debug, Default)]
 pub struct ImportedMesh {
-    /// Node name (`mesh_{index}` fallback), for pick ids / debugging.
+    /// Node name (`mesh_{index}` fallback).
     pub name: String,
-    /// Draw groups (one per primitive, world-space, lit when the source
-    /// had normals, tinted by the material base-color factor, alpha mode
-    /// carried from [`alpha_mode`]).
+    /// One group per primitive.
     pub groups: Vec<MeshGroup>,
 }
 
-/// A primitive's alpha behavior: glTF `alphaMode` plus the resolved
-/// cutoff, in [`MeshGroup`] terms. `(transparent, alpha, alpha_cutoff)`.
+/// Primitive alpha: (transparent, alpha, cutoff).
 pub fn alpha_mode(material: &gltf::Material<'_>) -> (bool, f32, f32) {
     use gltf::material::AlphaMode as M;
     let bc = material.pbr_metallic_roughness().base_color_factor();
@@ -39,11 +35,8 @@ pub fn alpha_mode(material: &gltf::Material<'_>) -> (bool, f32, f32) {
     }
 }
 
-/// A primitive's surface material: glTF metallic/roughness factors plus
-/// the emissive factor (scaled by `KHR_materials_emissive_strength`), in
-/// [`MeshGroup`](super::mesh::MeshGroup) terms.
-/// Factors are file-authored (may exceed 1.0 for emissive pops); the batch
-/// clamps metallic/roughness into range at flatten time.
+/// Primitive surface material: metallic/roughness/emissive factors.
+/// Clamped at flatten time.
 pub fn material_of(material: &gltf::Material<'_>) -> super::mesh::Material {
     let pbr = material.pbr_metallic_roughness();
     let emissive = material.emissive_factor();
@@ -59,9 +52,7 @@ pub fn material_of(material: &gltf::Material<'_>) -> super::mesh::Material {
     }
 }
 
-/// Whether the primitive draws on the unlit (flat) path:
-/// `KHR_materials_unlit` set. Unlit groups keep base-color tint/texture
-/// but skip the light entirely (like Godot's `shading_mode = unshaded`).
+/// True when `KHR_materials_unlit` is set. Unlit skips light.
 pub fn is_unlit(material: &gltf::Material<'_>) -> bool {
     material.unlit()
 }
@@ -76,25 +67,16 @@ impl ImportedMesh {
     }
 }
 
-/// Import `.glb` (or inline-buffer `.gltf`) bytes into baked meshes.
-///
-/// Node transforms compose down the scene graph (T * R * S per node, column
-/// major); normals use the inverse-transpose rotation only (uniform-scale
-/// safe — non-uniform scale renormalizes on the way out). One group per
-/// primitive; material base-color factor becomes the tint (textures stay
-/// game-decoded: uvs copy through verbatim, `texture_page` stays 0 — see
-/// the hazard note on [`MeshGroup`](super::mesh::MeshGroup) `uvs`: push
-/// groups with uvs only after uploading their page, or use
-/// [`import_slice_textured`]).
+/// Import .glb (or inline-buffer .gltf) bytes into baked meshes.
+/// Node transforms compose down the graph. One group per primitive.
+/// Base-color factor becomes tint. Uvs copy through; `texture_page`
+/// stays 0, see [`import_slice_textured`](crate::import_slice_textured).
 pub fn import_slice(bytes: &[u8]) -> Result<Vec<ImportedMesh>, gltf::Error> {
     let (doc, buffers, _) = gltf::import_slice(bytes)?;
     Ok(import_document(&doc, &buffers))
 }
 
-/// Scene-graph walk shared by [`import_slice`] and the textured import
-/// (which parses without image decoding so one bad/external image never
-/// sinks the geometry). Buffers come from [`gltf::import_buffers`] in both
-/// paths.
+/// Scene walk shared by plain and textured import.
 pub(crate) fn import_document(
     doc: &gltf::Document,
     buffers: &[gltf::buffer::Data],
@@ -149,7 +131,7 @@ fn collect_node(
     }
 }
 
-/// glTF primitive modes we draw (everything else is [`ImportSkip`]).
+/// Primitive modes we draw. Others are [`ImportSkip`].
 pub(crate) fn triangles_only(mode: gltf::mesh::Mode) -> Result<(), ImportSkip> {
     match mode {
         gltf::mesh::Mode::Triangles
@@ -197,11 +179,8 @@ fn import_primitive(
     let uvs: Option<Vec<[f32; 2]>> = reader
         .read_tex_coords(tex_coord)
         .map(|it| it.into_f32().collect());
-    // Document image behind the base-color texture (`None` = untextured
-    // material). The textured import resolves this to `texture_page`.
-    // Guarded (never a panic on corrupt files): the geometry importer
-    // previously never touched textures, and a dangling texture/source
-    // index must not sink the mesh.
+    // Document image behind base-color texture. None = untextured.
+    // Guarded against corrupt texture indices.
     let base_image = prim
         .material()
         .pbr_metallic_roughness()
@@ -311,7 +290,7 @@ fn import_primitive(
             }
         } else {
             log::warn!(
-                "gltf: COLOR_0 len {} != {} verts — skipping vertex colors",
+                "gltf: COLOR_0 len {} != {} verts, skipping vertex colors",
                 rgba.len(),
                 group.colors.len()
             );
@@ -326,7 +305,7 @@ fn import_primitive(
     Ok(group)
 }
 
-/// Triangle fan (0, i, i+1) to a triangle list.
+/// Fan (0, i, i+1) to triangle list.
 pub fn fan_to_list(indices: &[u32]) -> Vec<u32> {
     let mut out = Vec::with_capacity(indices.len());
     if indices.len() < 3 {
@@ -338,8 +317,7 @@ pub fn fan_to_list(indices: &[u32]) -> Vec<u32> {
     out
 }
 
-/// Triangle strip to a triangle list (alternating winding preserved: odd
-/// steps swap so every triangle stays front-facing).
+/// Strip to triangle list. Odd steps swap to hold winding.
 pub fn strip_to_list(indices: &[u32]) -> Vec<u32> {
     let mut out = Vec::with_capacity(indices.len());
     if indices.len() < 3 {
@@ -355,9 +333,7 @@ pub fn strip_to_list(indices: &[u32]) -> Vec<u32> {
     out
 }
 
-/// Push every imported mesh's groups into one [`MeshGroup`] list (for
-/// direct snapshot assembly). Names are dropped — use
-/// [`ImportedMesh::groups`] when per-node pick ids matter.
+/// Push all imported groups into one list. Drops node names.
 pub fn flatten_imported(meshes: &[ImportedMesh]) -> Vec<MeshGroup> {
     meshes
         .iter()
@@ -369,8 +345,7 @@ pub fn flatten_imported(meshes: &[ImportedMesh]) -> Vec<MeshGroup> {
 mod tests {
     use super::*;
 
-    /// Minimal JSON-only glTF container (no buffers): enough for material
-    /// / alpha-mode fixtures without rebuilding the binary quad.
+    /// JSON-only glTF container for material fixtures.
     pub(crate) fn wrap_json(json: &str) -> Vec<u8> {
         let json_bytes = json.as_bytes();
         let json_pad = (4 - json_bytes.len() % 4) % 4;
@@ -511,8 +486,7 @@ mod tests {
         assert!(triangles_only(gltf::mesh::Mode::TriangleStrip).is_ok());
     }
 
-    /// Quad fixture with COLOR_0 (u8 RGBA, Godot encoding): per-vert tint
-    /// multiplies the base factor, alpha channel scales group alpha.
+    /// Quad with COLOR_0 (u8 RGBA). Tint multiplies, alpha scales group.
     fn color_quad_gltf() -> Vec<u8> {
         let mut bin: Vec<u8> = Vec::new();
         for p in [

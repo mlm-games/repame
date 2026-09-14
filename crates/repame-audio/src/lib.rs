@@ -1,16 +1,7 @@
-//! Game-idiomatic sound on the house stack (cpal + symphonia + atomics).
-//!
-//! [`Audio`] is the game-thread handle: [`SoundBank`] one-shots
-//! (`play("footstep")` with variations, cooldowns, polyphony caps),
-//! [`Music`] direction (crossfade, intensity stems, ducking), and
-//! [`RigAudio`] forwarding of renamite rig events (`footstep`, `bite`)
-//! into cues. Per frame the game pumps [`Audio::update`] with real dt.
-//!
-//! A lock-free command channel carries work to the audio thread, which
-//! renders voices over cpal (desktop, Android AAudio, wasm AudioWorklet
-//! host)  - the same shape as the shipping DAW engine, written fresh for
-//! this crate's license. [`Audio::try_init`] fails soft without a device;
-//! [`Audio::noop`] keeps game code and tests running silent.
+//! Game sound on cpal plus symphonia with an atomic command channel.
+//! [`Audio`] is the game-thread handle: [`SoundBank`] one-shots,
+//! [`Music`] direction, and [`RigAudio`] rig-event routing.
+//! [`Audio::try_init`] bails without a device; [`Audio::noop`] runs silent.
 
 mod audio;
 mod bank;

@@ -38,7 +38,7 @@ pub struct FullscreenDesc {
 /// One texture upload: tight `w`*`h`*4 RGBA8, row-major top first.
 /// Recreates the slot texture when the size changes, plain rewrite
 /// otherwise. Out-of-range or malformed uploads are dropped with a
-/// warning, never a panic.
+/// warning.
 #[derive(Clone, Debug)]
 pub struct FullscreenTexture {
     pub slot: u32,

@@ -5,8 +5,8 @@ use bevy_ecs::schedule::IntoScheduleConfigs;
 use glam::Vec3;
 use repame_sim::{Sim, SimTime};
 
-/// Feet position + half extents (AABB min corner + half sizes): `pos` is the
-/// min corner so standing on top of cell `y` means `pos.y == y + 1`.
+/// Feet position plus half extents. `pos` is the AABB min corner, so standing
+/// on cell `y` means `pos.y == y + 1`.
 #[derive(Clone, Copy, Debug)]
 pub struct Body {
     pub pos: Vec3,
@@ -40,9 +40,7 @@ impl Body {
     }
 }
 
-/// Last-resolve contact state: what the last [`move_and_collide`] touched,
-/// plus the ground/platform velocity underfoot (conveyor ride without
-/// stale-velocity hacks).
+/// Contact state from the last resolve, plus ground velocity underfoot.
 #[derive(Clone, Debug, Default)]
 pub struct PhysicsState {
     pub on_ground: bool,
@@ -52,28 +50,20 @@ pub struct PhysicsState {
     pub ground_vel: [f32; 3],
 }
 
-/// World solidity query shared by every mover (the single truth that
-/// replaces per-system solid tables). Pulse/on-off already resolved by the
-/// caller: `is_solid` answers for movement *now*.
-///
-/// Ramps/wedges live behind `surface_top` (the query interpolates tops;
-/// rustbox shapes do this in its `LevelQuery`): there is no `Collider`
-/// enum here — collision geometry is always answered through the query,
-/// so the mover and the game can never diverge on shapes. Mesh colliders
-/// stay a rotated AABB (see [`rotated_box_aabb`]).
+/// World solidity query shared by every mover; `is_solid` answers for now.
+/// Ramps live behind `surface_top`; one shape source, no collider enum.
+/// Rotated boxes use [`rotated_box_aabb`].
 pub trait VoxelQuery {
     /// Is `cell` solid for movement?
     fn is_solid(&self, cell: [i32; 3]) -> bool;
-    /// Top surface height of `cell` at world (`wx`, `wz`), if any material.
-    /// Flat cells return `(cell[1] + 1)`; ramps interpolate; `None` = air.
+    /// Top surface height of `cell` at (`wx`, `wz`). `None` means air.
     fn surface_top(&self, cell: [i32; 3], wx: f32, wz: f32) -> Option<f32>;
-    /// Ground/platform velocity at `cell` (conveyors, drift plates).
+    /// Ground or platform velocity at `cell` (conveyors, drift plates).
     fn ground_velocity(&self, cell: [i32; 3]) -> [f32; 3] {
         let _ = cell;
         [0.0, 0.0, 0.0]
     }
-    /// Is `cell` fluid (water, lava)? Drives [`PhysicsState::in_fluid`];
-    /// default is air everywhere, so existing queries compile untouched.
+    /// True when `cell` is fluid. Default is air, so existing queries compile.
     fn is_fluid(&self, _cell: [i32; 3]) -> bool {
         false
     }
@@ -88,13 +78,11 @@ pub struct MoveResult {
     pub ground_vel: [f32; 3],
 }
 
-/// Skin offset: bodies rest `SKIN` off surfaces so repeated resolves don't
-/// jitter. Small enough to stay invisible at game scale.
+/// Skin offset: bodies rest off surfaces so repeated resolves hold still.
 pub const SKIN: f32 = 0.001;
 
-/// Segmented axis-separated resolve: integrate in slices so fast bodies
-/// can't tunnel through 1-cell walls. `delta` is the full-step displacement
-/// (`vel * dt`, caller-owned integration); contact state lands in `state`.
+/// Axis-separated resolve in slices so fast bodies hold through 1-cell walls.
+/// `delta` is the full-step displacement (`vel * dt`); contacts land in `state`.
 pub fn move_and_collide<Q: VoxelQuery>(
     query: &Q,
     body: &mut Body,
@@ -128,26 +116,20 @@ pub fn move_and_collide<Q: VoxelQuery>(
         resolve_axis(query, body, 2, step.z, &mut result, state);
     }
 
-    // Standing-still support: with no downward motion no Y resolve runs, so
-    // a resting body would report airborne every other frame (grounded →
-    // gravity skipped → delta.y == 0 → not grounded → gravity resumes →
-    // jitter). When nothing landed this call, probe the cells underfoot:
-    // support within SKIN of the feet keeps grounded + ground_vel alive.
+    // Resting support: with no downward motion no Y resolve runs, so probe
+    // the cells underfoot. Support within skin keeps grounded alive.
     if !result.grounded {
         probe_support(query, body, &mut result, state);
     }
-    // Fluid is positional, not a contact: any overlapped fluid cell counts,
-    // even when standing still or moving without touching a wall.
+    // Fluid is positional: any overlapped fluid cell counts.
     state.in_fluid = overlaps_fluid(query, body);
 
     body.on_ground = result.grounded;
     result
 }
 
-/// Support probe for resting bodies: the feet cell row (one row below the
-/// AABB min, over the XZ footprint) is solid and its top is within `SKIN`
-/// of the feet → grounded, with that cell's ground velocity. Pure readout:
-/// moves nothing, zeroes no velocity.
+/// Support probe for resting bodies: solid row underfoot with its top near
+/// the feet reads grounded, with that cell's ground velocity. Moves nothing.
 fn probe_support<Q: VoxelQuery>(
     query: &Q,
     body: &Body,
@@ -155,10 +137,8 @@ fn probe_support<Q: VoxelQuery>(
     state: &mut PhysicsState,
 ) {
     let (min, max) = body.aabb();
-    // Support row: the cell layer the soles rest on. `2 * SKIN` below the
-    // feet — not one — because a landed body sits at exactly `top + SKIN`,
-    // so `feet - SKIN` is the integer boundary itself and floors into the
-    // air cell above the support.
+    // Landed bodies sit at `top + SKIN`, so sample two skins below the feet:
+    // one skin lands on the boundary and floors into the air cell.
     let row = (min.y - SKIN * 2.0).floor() as i32;
     let x0 = (min.x + SKIN).floor() as i32;
     let x1 = (max.x - SKIN).floor() as i32;
@@ -231,10 +211,8 @@ fn resolve_axis<Q: VoxelQuery>(
     let z0 = (min.z + SKIN).floor() as i32;
     let z1 = (max.z - SKIN).floor() as i32;
 
-    // Scan direction-aware: resolving against the first overlapping cell in
-    // ascending order regardless of direction corrects a -X/-Z move against
-    // the far face (leaving penetration) and lands a fall on the lowest
-    // stacked top instead of the highest.
+    // Scan toward the motion: a fixed ascending order would correct -X/-Z
+    // moves against the far face and land falls on the lowest top.
     let xs: Vec<i32> = if axis == 0 && amount < 0.0 {
         (x0..=x1).rev().collect()
     } else {
@@ -304,9 +282,8 @@ fn resolve_axis<Q: VoxelQuery>(
     }
 }
 
-/// Entity-entity pushback: separate overlapping AABBs along the
-/// min-penetration axis before the terrain pass. Pure function so crates
-/// *and* the player share it.
+/// Entity pushback: separate overlapping AABBs along min penetration
+/// before the terrain pass.
 pub fn pushback(a: &mut Body, b: &mut Body) {
     let (amin, amax) = a.aabb();
     let (bmin, bmax) = b.aabb();
@@ -346,7 +323,7 @@ pub fn pushback(a: &mut Body, b: &mut Body) {
     }
 }
 
-/// Rotated box AABB (single implementation both movers share).
+/// Rotated box extents shared by movers.
 pub fn rotated_box_aabb(half: [f32; 3], rot: u8) -> [f32; 3] {
     match rot % 4 {
         1 | 3 => [half[2], half[1], half[0]],
@@ -354,9 +331,8 @@ pub fn rotated_box_aabb(half: [f32; 3], rot: u8) -> [f32; 3] {
     }
 }
 
-/// Flat level query over a caller-owned solid predicate + uniform top.
-/// Adapter for tests and flat-ground games; voxel levels implement
-/// [`VoxelQuery`] directly.
+/// Flat level query over a caller-owned solid predicate and uniform top.
+/// Adapter for tests and flat-ground games.
 #[derive(Clone, Debug, Default, Resource)]
 pub struct FlatQuery {
     /// Solid floor top at y = `floor_top` over the whole XZ plane.
@@ -373,9 +349,8 @@ impl VoxelQuery for FlatQuery {
     }
 }
 
-/// Sim component: a body stepped once per fixed step by [`step_bodies`].
-/// Gravity/controls stay game-side (games write `vel` before the step);
-/// this module integrates `pos += vel * dt` then collides.
+/// Sim component stepped once per fixed step by [`step_bodies`].
+/// Games write `vel`; this module integrates `pos += vel * dt`, then collides.
 #[derive(Component, Clone, Debug)]
 pub struct PhysBody {
     pub body: Body,
@@ -391,19 +366,16 @@ impl Default for PhysBody {
     }
 }
 
-/// Renderer-agnostic transform snapshot. Games copy this into their viewport
-/// frame (same pattern as the vehicle integration: translation + rotation,
-/// no renderer types here).
+/// Renderer-agnostic transform snapshot. Games copy this into viewport
+/// frames (translation and rotation, no renderer types).
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct BodyTransform {
     pub translation: Vec3,
     pub yaw_rad: f32,
 }
 
-/// Fixed-step integration + collide for every [`PhysBody`], against the
-/// [`VoxelQuery`] resource `Q`. Register as
-/// `sim.add_system(step_bodies::<MyQuery>)` chained before
-/// [`sync_body_transforms`].
+/// Fixed-step integrate and collide for every [`PhysBody`] against `Q`.
+/// Register chained before [`sync_body_transforms`].
 pub fn step_bodies<Q: VoxelQuery + Resource>(
     time: Res<SimTime>,
     query: Res<Q>,
@@ -416,15 +388,14 @@ pub fn step_bodies<Q: VoxelQuery + Resource>(
     }
 }
 
-/// Copy body positions into [`BodyTransform`] snapshots (translation
-/// tracks the body center; yaw stays game-owned).
+/// Copy body centers into [`BodyTransform`] snapshots; yaw stays game-owned.
 pub fn sync_body_transforms(mut query: Query<(&PhysBody, &mut BodyTransform)>) {
     for (b, mut t) in &mut query {
         t.translation = b.body.center();
     }
 }
 
-/// Register stepping + sync chained (every step runs before every sync).
+/// Register stepping plus sync chained (each step runs before each sync).
 pub fn register_physics_systems<Q: VoxelQuery + Resource>(sim: &mut Sim) {
     sim.add_chained_systems((step_bodies::<Q>, sync_body_transforms).chain());
 }
@@ -470,15 +441,13 @@ mod tests {
                 break;
             }
         }
-        assert!(state.on_ground);
+        assert!(state.on_ground, "support probe still grounds");
         assert!((body.pos.y - 1.0).abs() < 0.05, "y={}", body.pos.y);
     }
 
     #[test]
     fn standing_still_stays_grounded() {
-        // The resting-body contract: once landed, zero-delta steps must
-        // keep reporting grounded (no gravity flicker). Regression for the
-        // land → vel.y = 0 → delta.y = 0 → airborne → gravity → jitter loop.
+        // Resting contract: zero-delta steps keep reporting grounded.
         let q = floor();
         let mut body = Body::new(Vec3::new(0.0, 1.0 + SKIN, 0.0), Vec3::new(0.3, 0.9, 0.3));
         let mut state = PhysicsState::default();
@@ -572,8 +541,7 @@ mod tests {
             },
             BodyTransform::default(),
         ));
-        // Game-side gravity applied as a chained pre-system (the documented
-        // pattern: games own forces, this crate owns integration+collide).
+        // Game-side gravity as a chained pre-system: games own forces.
         fn gravity(mut q: Query<&mut PhysBody>, time: Res<SimTime>) {
             for mut b in &mut q {
                 if !b.body.on_ground {

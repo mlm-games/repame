@@ -1,8 +1,5 @@
-//! Texture atlas: CPU-side rectangle packing + upload queue.
-//!
-//! Packing is shelf-based per square page ([`pack`]); pages spill over
-//! automatically and the page index feeds straight into
-//! `repame_sprite::SpriteInstance.page`.
+//! Texture atlas: CPU rectangle packing plus upload queue.
+//! Shelf packing per square page. Page index maps to sprite layer.
 //!
 //! ```rust
 //! use repame_atlas::{Atlas, AtlasDesc};
@@ -22,13 +19,12 @@ pub use upload::{AtlasWrite, PageClear, UploadQueue};
 
 use std::collections::HashMap;
 
-/// Opaque sprite key. Games hash their asset names with [`atlas_id`];
-/// explicit ids are fine too as long as they are unique per atlas.
+/// Opaque sprite key. Hash asset names with `atlas_id`.
+/// Ids must be unique per atlas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AtlasId(pub u64);
 
-/// Deterministic FNV-1a name hash, stable across runs and platforms so
-/// packs (and tests) reproduce byte-identically.
+/// FNV-1a name hash. Stable across runs and platforms.
 pub fn atlas_id(name: &str) -> AtlasId {
     const OFFSET: u64 = 0xcbf29ce484222325;
     const PRIME: u64 = 0x100000001b3;
@@ -40,8 +36,7 @@ pub fn atlas_id(name: &str) -> AtlasId {
     AtlasId(hash)
 }
 
-/// Normalized texture coords for one sprite: `page` selects the atlas
-/// layer, `min`/`max` the sub-rectangle (y-down, matching PNG row order).
+/// Normalized coords for one sprite. Y-down, matching PNG row order.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UvRect {
     pub page: u32,
@@ -52,12 +47,11 @@ pub struct UvRect {
 /// Atlas construction parameters.
 #[derive(Clone, Copy, Debug)]
 pub struct AtlasDesc {
-    /// Square page edge in pixels (e.g. 1024, 2048).
+    /// Square page edge in pixels.
     pub size: u32,
-    /// Hard cap on page count; allocations beyond it fail cleanly.
+    /// Hard cap on page count. Allocations past it fail.
     pub max_pages: u32,
-    /// Empty border around each sprite in px (default 1). Prevents bleed
-    /// with linear filtering / subpixel cameras.
+    /// Border around each sprite in px. Guards against filter bleed.
     pub padding: u32,
 }
 
@@ -71,21 +65,18 @@ impl Default for AtlasDesc {
     }
 }
 
-/// Why an allocation failed. Never panics: oversize and exhaustion are
-/// normal load-time conditions the game resolves (bigger atlas, split
-/// pack, streaming).
+/// Why an allocation failed. Returned, not panicked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllocError {
-    /// A live entry already owns `key`; remove it first (or keep it -
-    /// allocating the same sprite twice is usually a game bug).
+    /// Key already has a live entry. Remove it first.
     Duplicate,
     /// Larger than one page in either dimension.
     TooLarge,
-    /// Every page is full (and `max_pages` is reached).
+    /// All pages full and `max_pages` reached.
     OutOfSpace,
 }
 
-/// The atlas: multi-page shelf packer + upload queue facade.
+/// Multi-page shelf packer plus upload queue.
 #[derive(Debug)]
 pub struct Atlas {
     desc: AtlasDesc,
@@ -94,11 +85,11 @@ pub struct Atlas {
     queue: UploadQueue,
 }
 
-/// Reserved 1x1 white texel for untextured / particle quads.
+/// Reserved 1x1 white texel for untextured quads.
 pub const WHITE_TEXEL_NAME: &str = "__repame_white";
 
-/// Expand tight RGBA into a padded buffer with clamped edge replicate
-/// (Bevy atlas builder style). Returns `(padded, out_w, out_h)`.
+/// Expand tight RGBA into a padded buffer with edge replicate.
+/// Returns `(padded, out_w, out_h)`.
 pub fn pad_rgba(src: &[u8], w: u32, h: u32, pad: u32) -> (Vec<u8>, u32, u32) {
     if pad == 0 {
         return (src.to_vec(), w, h);
@@ -134,13 +125,9 @@ impl Atlas {
         }
     }
 
-    /// Place a `w`x`h` sprite under `key`. Queues exactly one
-    /// [`AtlasWrite`] so the backend knows what to upload where.
+    /// Place a `w`x`h` sprite under `key`. Queues one `AtlasWrite`.
     ///
-    /// With `padding > 0` the packer reserves a border around the sprite;
-    /// the UV covers the inner content rect only, and the queued write is
-    /// the inner rect (games blit tight pixels there, or use [`pad_rgba`]
-    /// to replicate edges into the pad).
+    /// UV covers the inner content rect. Queued write is the inner rect.
     pub fn alloc(&mut self, key: AtlasId, w: u32, h: u32) -> Result<UvRect, AllocError> {
         if self.entries.contains_key(&key) {
             return Err(AllocError::Duplicate);
@@ -176,11 +163,8 @@ impl Atlas {
         self.alloc(atlas_id(name), w, h)
     }
 
-    /// Ensure a 1x1 white pixel exists; returns its UvRect.
-    /// The drained [`AtlasWrite`] for this key has no pixel data (the
-    /// atlas is CPU packing only): upload `[255, 255, 255, 255]` for it —
-    /// see `repame_sprite::AtlasUpload::white_for` — then sample the
-    /// returned rect for solid-tint particles/untextured quads.
+    /// Ensure a 1x1 white pixel exists. Returns its rect.
+    /// Write carries no pixel data: upload white for it, then sample.
     pub fn ensure_white(&mut self) -> Result<UvRect, AllocError> {
         let id = atlas_id(WHITE_TEXEL_NAME);
         if let Some(uv) = self.uv_rect(id) {
@@ -190,8 +174,7 @@ impl Atlas {
     }
 
     fn insert(&mut self, key: AtlasId, page: u32, p: Placement, pad: u32) -> UvRect {
-        // Outer placement `p` includes the pad border; the content lives
-        // at the inner rect.
+        // Placement includes the pad border. Content is the inner rect.
         let inner = Placement {
             x: p.x + pad,
             y: p.y + pad,
@@ -212,7 +195,7 @@ impl Atlas {
         uv
     }
 
-    /// Look up a live entry's uv rect (inner content rect).
+    /// Look up a live entry UV. None when key is absent.
     pub fn uv_rect(&self, key: AtlasId) -> Option<UvRect> {
         let (page, p) = *self.entries.get(&key)?;
         let pad = self.desc.padding;
@@ -234,9 +217,8 @@ impl Atlas {
         }
     }
 
-    /// Remove an entry, returning its pixels to the page's gap pool.
-    /// Returns false when `key` was not live. Removals queue no upload:
-    /// stale texels are simply never sampled again.
+    /// Remove an entry and return its rect to the gap pool.
+    /// Queues no upload. False when key was not live.
     pub fn remove(&mut self, key: AtlasId) -> bool {
         let Some((page, p)) = self.entries.remove(&key) else {
             return false;
@@ -247,10 +229,8 @@ impl Atlas {
         true
     }
 
-    /// Drop everything; queues one [`PageClear`] per touched page so the
-    /// backend can recycle whole textures. Also discards pending writes:
-    /// they reference placements that no longer exist, and a backend
-    /// applying writes after the clear would resurrect deleted texels.
+    /// Drop all entries. Queues one `PageClear` per page.
+    /// Pending writes are discarded with the placements they name.
     pub fn clear(&mut self) {
         for page in 0..self.pages.len() as u32 {
             self.queue.push_clear(PageClear { page });
@@ -269,12 +249,12 @@ impl Atlas {
         self.entries.is_empty()
     }
 
-    /// Pages currently backing the pack (<= `max_pages`).
+    /// Pages backing the pack. At most `max_pages`.
     pub fn page_count(&self) -> u32 {
         self.pages.len() as u32
     }
 
-    /// Approximate fill ratio over touched pages (0..1).
+    /// Fill ratio over touched pages, `0..1`.
     pub fn utilization(&self) -> f32 {
         if self.pages.is_empty() {
             return 0.0;
@@ -304,7 +284,7 @@ mod tests {
             max_pages: 2,
             padding: 0,
         });
-        // nt-style strip frames: 48x32 cells.
+        // Strip frames: 48x32 cells.
         for i in 0..32 {
             let uv = atlas.alloc(AtlasId(i), 48, 32).expect("fits");
             assert_eq!(uv.page, 0, "frame {i} spilled early");

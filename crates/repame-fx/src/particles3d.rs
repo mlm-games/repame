@@ -1,27 +1,6 @@
-//! Sim-side 3D particles on fixed 100 Hz ticks: spawners plus one-shot
-//! bursts, integrated with gravity/drag, rendered as camera-facing
-//! billboard quads ([`MeshGroup`]) through `repame-view3d`.
-//!
-//! Same design as the 2D [`super::particles`] module (spawner rate
-//! accumulation, per-spawner + global caps, deterministic seeded RNG,
-//! gradient-over-life, ease-curve shrink), lifted to world space:
-//!
-//! - `pos`/`vel` are world `[f32; 3]` (Y-up). Gravity pulls **−Y**
-//!   (world down) — note the sign flip vs the 2D module, whose `+y` is
-//!   canvas-down.
-//! - [`EffectDef`](super::effect::EffectDef) is reused verbatim
-//!   (`SpawnerDef`, [`Jittered`](super::effect::Jittered),
-//!   [`Gradient`](super::effect::Gradient),
-//!   [`EaseKind`](super::effect::EaseKind)): one asset shape for 2D and 3D.
-//!   `size_px` reads as **world units** here (documented at the call site,
-//!   not converted — there is no dpi in world space).
-//! - Rendering is one [`MeshGroup`] per live particle (unlit textured
-//!   quad, billboarded around the camera eye): per-particle alpha rides
-//!   the group's `alpha`, so fading particles sort back-to-front in the
-//!   transparent pass instead of sharing one flat fade.
-//!
-//! Step fns take whole ticks (`i32`), not a game clock type, so any
-//! fixed-step game can drive them.
+//! 3D particles on fixed 100 Hz ticks: spawners plus one-shot bursts.
+//! Output is camera-facing billboard quads for `repame-view3d`.
+//! World space is Y-up; gravity pulls -Y; step fns take tick counts.
 
 use bevy_ecs::prelude::*;
 use glam::Vec3;
@@ -31,25 +10,22 @@ use repame_view3d::MeshGroup;
 
 use super::effect::EffectDef;
 
-/// One live 3D particle. Age/life in 100 Hz ticks; deterministic.
-/// `spawner` tags the emitter for per-spawner caps (see
-/// [`tick_spawners3`]); `None` for untracked one-shot bursts.
+/// One live 3D particle. Age and life in 100 Hz ticks.
 #[derive(Clone, Debug)]
 pub struct Particle3 {
     pub pos: [f32; 3],
     pub vel: [f32; 3],
     pub age_ticks: i32,
     pub life_ticks: i32,
-    /// Billboard edge length in world units (before the ease shrink).
+    /// Billboard edge length in world units, before the ease shrink.
     pub size_world: f32,
-    /// Gravity strength in world units/s², applied toward −Y.
+    /// Gravity in world units/s^2, applied toward -Y.
     pub gravity_pps2: f32,
     pub drag_per_sec: f32,
     pub gradient: super::effect::Gradient,
     pub ease: super::effect::EaseKind,
     pub spawner: Option<Entity>,
-    /// Texture array page + sub-rect sampled for this particle, copied
-    /// from the def at spawn (textured sparks/puffs vs solid tinted quads).
+    /// Texture page and sub-rect for this particle, copied from the def.
     pub page: u32,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
@@ -64,7 +40,6 @@ impl Component for Particle3 {
 #[derive(Clone, Debug)]
 pub struct Spawner3 {
     pub def: EffectDef,
-    /// World-space emitter origin.
     pub pos: [f32; 3],
     pub acc: f32,
 }
@@ -74,10 +49,7 @@ impl Component for Spawner3 {
     type Mutability = Mutable;
 }
 
-/// Spawn one particle from a def at `pos`. Initial velocity is uniform on
-/// the sphere (3D analog of the 2D disc sample). Returns the entity so
-/// the game can tag it. `spawner` tags the emitter for per-spawner caps;
-/// pass `None` for untracked bursts.
+/// Spawn one particle at `pos` with a uniform-sphere direction.
 pub fn spawn_particle3(
     commands: &mut Commands,
     pos: [f32; 3],
@@ -85,7 +57,6 @@ pub fn spawn_particle3(
     spawner: Option<Entity>,
     rng: &mut impl Rng,
 ) -> Entity {
-    // Uniform sphere: z uniform in −1..1, azimuth uniform in 0..TAU.
     let z: f32 = rng.random_range(-1.0..1.0);
     let theta: f32 = rng.random_range(0.0..std::f32::consts::TAU);
     let r = (1.0 - z * z).max(0.0).sqrt();
@@ -110,7 +81,7 @@ pub fn spawn_particle3(
         .id()
 }
 
-/// One-shot burst of `count` particles (explosions, impact puffs).
+/// One-shot burst of `count` particles.
 pub fn burst3(
     commands: &mut Commands,
     pos: [f32; 3],
@@ -123,11 +94,7 @@ pub fn burst3(
     }
 }
 
-/// Advance emitter clocks; spawn whole particles at the def rate.
-/// Same two caps as the 2D path: the global `max_total` on live count
-/// and each def's `spawner.max_alive` per spawner. Hitting either cap
-/// zeroes that spawner's accumulator, so emission resumes clean instead
-/// of burst-catching-up. `ticks <= 0` pauses.
+/// Advance emitter clocks and spawn whole particles at the def rate.
 pub fn tick_spawners3(
     commands: &mut Commands,
     spawners: &mut Query<(Entity, &mut Spawner3)>,
@@ -173,8 +140,7 @@ pub fn tick_spawners3(
     }
 }
 
-/// Integrate motion, age, and despawn the spent. Gravity pulls −Y
-/// (world down); drag is exponential per second.
+/// Integrate motion, age, and despawn the spent.
 pub fn step_particles3(
     commands: &mut Commands,
     particles: &mut Query<(Entity, &mut Particle3)>,
@@ -200,12 +166,8 @@ pub fn step_particles3(
     }
 }
 
-/// Camera basis for spherical billboards: `right = Y × fwd`, `up = fwd ×
-/// right`, where `fwd` runs from the particle toward the eye. Top-down
-/// degenerate (eye directly overhead): `right` falls back to +X. The
-/// basis is right-handed with `right × up == fwd`, so quads wound
-/// `(a, b, c) + (a, c, d)` with `a = c − r − u` face the camera and
-/// survive backface culling.
+/// Camera basis for spherical billboards. `fwd` runs particle to eye.
+/// Right-handed with `right x up == fwd`, so quads face the camera.
 fn billboard_basis(eye: Vec3, center: Vec3) -> (Vec3, Vec3) {
     let fwd = (eye - center).normalize_or_zero();
     let mut right = Vec3::Y.cross(fwd);
@@ -218,13 +180,8 @@ fn billboard_basis(eye: Vec3, center: Vec3) -> (Vec3, Vec3) {
     (right, up)
 }
 
-/// Map live particles to one billboard [`MeshGroup`] each: gradient color
-/// at life fraction, size shrinking along the ease curve, per-particle
-/// alpha on the group (fading particles land in the transparent pass and
-/// sort back-to-front; fully opaque ones stay in the opaque pass).
-/// Unlit textured quads: tint × texel, no scene-light dependence (sparks
-/// pop in the dark). Takes an iterator so both systems (`query.iter()`)
-/// and tests can feed it.
+/// One billboard [`MeshGroup`] per live particle: gradient color at life
+/// fraction, size shrinking along the ease curve, per-particle alpha.
 pub fn particle_groups<'a>(
     particles: impl Iterator<Item = &'a Particle3>,
     eye: Vec3,
@@ -341,14 +298,12 @@ mod tests {
         step(&mut world, 10);
         let mut q = world.query::<&Particle3>();
         let p = q.iter(&world).next().unwrap();
-        assert!(p.pos[1] < 0.0, "falls toward −Y, y = {}", p.pos[1]);
+        assert!(p.pos[1] < 0.0, "falls toward -Y, y = {}", p.pos[1]);
         assert!(p.vel[1] < 0.0);
     }
 
     #[test]
     fn initial_velocities_cover_the_sphere() {
-        // Zero jitter on speed would hide direction bugs; fixed speed +
-        // many samples must spread over all octants.
         let mut world = World::new();
         let mut d = def();
         d.speed_pps = Jittered::exact(10.0);
@@ -387,8 +342,6 @@ mod tests {
 
     #[test]
     fn billboard_faces_the_eye() {
-        // Eye on +Z: quad must sit in the z = 0 plane, 2x2, CCW from +Z
-        // (front face toward the camera, survives backface culling).
         let mut world = World::new();
         burst_n(&mut world, [0.0, 0.0, 0.0], &def(), 1);
         let groups = particle_groups(
@@ -398,6 +351,7 @@ mod tests {
         assert_eq!(groups.len(), 1);
         let g = &groups[0];
         assert_eq!(g.tri_count(), 2);
+        // Eye on +Z: quad sits in the z = 0 plane, 2x2.
         assert!(g.positions.iter().all(|p| p[2].abs() < 1e-5));
         let xs: Vec<f32> = g.positions.iter().map(|p| p[0]).collect();
         let ys: Vec<f32> = g.positions.iter().map(|p| p[1]).collect();
@@ -405,7 +359,7 @@ mod tests {
         assert!((xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max) - 1.0).abs() < 1e-5);
         assert!((ys.iter().cloned().fold(f32::INFINITY, f32::min) + 1.0).abs() < 1e-5);
         assert!((ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max) - 1.0).abs() < 1e-5);
-        // Winding: first triangle normal faces +Z (toward the eye).
+        // First triangle normal faces +Z (toward the eye).
         let a = Vec3::from(g.positions[g.indices[0] as usize]);
         let b = Vec3::from(g.positions[g.indices[1] as usize]);
         let c = Vec3::from(g.positions[g.indices[2] as usize]);
@@ -448,8 +402,6 @@ mod tests {
 
     #[test]
     fn particle_groups_flatten_in_the_batch() {
-        // The batch contract holds for emitted groups: validation passes,
-        // opaque + transparent ranges both flatten.
         use repame_view3d::SceneBatch;
         let mut world = World::new();
         let mut d = def();

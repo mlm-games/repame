@@ -1,16 +1,10 @@
-//! Upload queue: the atlas owns geometry, never pixels.
-//!
-//! Games decode their own images (PNG, generated, etc) and blit them into
-//! backend textures. The atlas tells the backend *where* each sprite
-//! landed via [`AtlasWrite`]; removals that free a whole page surface as
-//! [`PageClear`]. Backends drain these once per frame (or once per load)
-//! and translate them into their own upload calls
-//! (`RenderContext::set_image_rgba8`, native texture updates, etc).
+//! Upload queue: atlas owns geometry, games own pixels.
+//! Atlas reports landing spots as `AtlasWrite` and bulk resets
+//! as `PageClear`. Backends drain and translate to texture writes.
 
 use super::{AtlasId, UvRect};
 
-/// One pending pixel upload: the game blits the sprite's RGBA8 pixels
-/// (identified by `key`) into `page` at (`x`, `y`, `w`, `h`).
+/// Pending pixel upload. Game blits RGBA8 for `key` at the rect.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AtlasWrite {
     pub key: AtlasId,
@@ -22,15 +16,13 @@ pub struct AtlasWrite {
     pub uv: UvRect,
 }
 
-/// A page whose contents were bulk-invalidated (after `Atlas::clear`);
-/// the backend should drop or re-upload it wholesale.
+/// Page bulk-invalidated by `Atlas::clear`. Drop or re-upload it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageClear {
     pub page: u32,
 }
 
-/// FIFO queue drained by the backend. Order is allocation order, which
-/// keeps load-time uploads sequential per page.
+/// FIFO queue drained by the backend. Allocation order.
 #[derive(Clone, Debug, Default)]
 pub struct UploadQueue {
     writes: Vec<AtlasWrite>,

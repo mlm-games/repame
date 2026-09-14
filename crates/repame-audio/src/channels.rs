@@ -1,8 +1,4 @@
-//! [`AudioChannels`]: master / music / sfx / ui buses (linear gains).
-//!
-//! Matches the volume settings both shells already persist
-//! (`master_volume`, `sfx_volume`, `music_volume` in `save.ron`)
-//! plus a `ui` bus, mirroring `game_utils_bevy::audio::AudioChannels`.
+//! [`AudioChannels`]: master, music, sfx, and ui buses (linear gains).
 
 /// Named bus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -13,16 +9,9 @@ pub enum AudioChannel {
     Ui,
 }
 
-/// Linear gain (`0..1`, `1` = unchanged) to decibels.
- ///
-/// Volume work is logarithmic: every `-6` dB halves the amplitude, and
-/// `0` dB is full scale. A UI slider reports linear `0..1`, so convert
-/// before writing a bus. Assigning the slider value directly to a dB
-/// volume makes the low end far too loud.
-///
-/// `0.0` maps to negative infinity (silence, which no finite dB value can
-/// represent): guard a slider's zero end by muting the bus instead of
-/// converting it.
+/// Linear gain (`0..1`, `1` is unchanged) to decibels.
+/// Volume work is logarithmic: each -6 dB halves amplitude.
+/// `0.0` maps to negative infinity, so mute the bus at zero instead.
 ///
 /// ```rust
 /// use repame_audio::{db_to_linear, linear_to_db};
@@ -39,11 +28,8 @@ pub fn linear_to_db(linear: f32) -> f32 {
     }
 }
 
-/// Decibels to linear bus gain.
-///
-/// Negative infinity maps to `0.0`, as does anything at or below `-80` dB.
-/// Between `-60` and `-80` dB sound is effectively gone. Round-trips with
-/// [`linear_to_db`]:
+/// Decibels to linear bus gain. Negative infinity maps to `0.0`,
+/// as does anything at or below -80 dB.
 ///
 /// ```rust
 /// use repame_audio::{db_to_linear, linear_to_db};
@@ -94,7 +80,7 @@ impl AudioChannels {
         }
     }
 
-    /// Set one bus (clamped to `>= 0`; master included).
+    /// Set one bus (clamped to `>= 0`).
     pub fn set(&mut self, channel: AudioChannel, gain: f32) {
         let gain = gain.max(0.0);
         match channel {
@@ -115,32 +101,16 @@ impl AudioChannels {
     }
 
     /// Bus volume in decibels (raw bus gain, master not included).
-    ///
-    /// `0.0` dB is unchanged, `-6.0` dB is half amplitude. Silence reads
-    /// as negative infinity. Compare with `is_finite()` or read the
-    /// linear [`get`](AudioChannels::get) when a finite number is needed.
     pub fn get_db(&self, channel: AudioChannel) -> f32 {
         linear_to_db(self.get(channel))
     }
 
-    /// Set one bus from decibels (master included).
-    ///
-    /// Values below `-80` dB (including negative infinity) land at linear
-    /// `0.0`, i.e. muted. For a volume slider, convert with
-    /// [`linear_to_db`] on the way in and mute at exact zero instead:
-    ///
-    /// ```ignore
-    /// if slider > 0.0 { ch.set_db(Music, linear_to_db(slider)); }
-    /// ```
+    /// Set one bus from decibels. Values at or below -80 dB mute.
     pub fn set_db(&mut self, channel: AudioChannel, db: f32) {
         self.set(channel, db_to_linear(db));
     }
 
     /// Effective volume in decibels after the master stage.
-    ///
-    /// Matches [`effective`](AudioChannels::effective) in log form:
-    /// `master_dB + bus_dB`. Reads negative infinity while either stage
-    /// is silent.
     pub fn effective_db(&self, channel: AudioChannel) -> f32 {
         linear_to_db(self.effective(channel))
     }

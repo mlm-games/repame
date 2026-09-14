@@ -1,9 +1,6 @@
 //! GPU sprite batch: instanced textured quads as a [`WgpuCallback`].
-//!
-//! First-class engine piece: the batch owns its atlas texture array and
-//! instance buffer, feeds from [`AtlasUpload`]s (built from a
-//! `repame-atlas` drain), and draws through a caller-supplied camera
-//! matrix. Per-frame usage is snapshot-style.
+//! Owns the atlas texture array and instance buffer. Feeds from
+//! [`AtlasUpload`]s, draws through a caller-supplied camera matrix.
 //!
 //! ```ignore
 //! let mut batch = SpriteBatch::new(BatchDesc::default());
@@ -73,7 +70,7 @@ pub struct AtlasUpload {
 impl AtlasUpload {
     /// Bridge an atlas placement to a GPU upload. `rgba` must hold the
     /// sprite's pixels row-major, `w`*`h`*4 bytes; mismatches are dropped
-    /// with a warning at `prepare` time, never a panic.
+    /// with a warning at `prepare` time.
     pub fn from_write(write: &repame_atlas::AtlasWrite, rgba: Vec<u8>) -> Self {
         Self {
             page: write.page,
@@ -114,7 +111,7 @@ impl AtlasUpload {
     }
 }
 
-/// Pure transform rows mapping quad corners (-0.5..0.5) to world coords,
+/// Transform rows mapping quad corners (-0.5..0.5) to world coords,
 /// honoring size, rotation, anchor, and mirror. Matches the canvas path
 /// pixel-for-pixel at the default anchor: corner (-0.5,-0.5) lands on
 /// `center - size / 2`.
@@ -142,7 +139,7 @@ pub fn instance_rows(
 /// `vframes` rows, `frame` counted row-major from the top-left.
 ///
 /// Returns `(uv_min, uv_max)` normalized to `0..1`, ready for
-/// [`SpriteInstance`](super::SpriteInstance) `uv_min`/`uv_max`. The grid
+/// [`SpriteInstance`] `uv_min`/`uv_max`. The grid
 /// covers the whole texture: cell `(col, row)` spans
 /// `col/hframes..(col+1)/hframes` by `row/vframes..(row+1)/vframes`.
 ///

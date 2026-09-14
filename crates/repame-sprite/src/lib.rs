@@ -1,11 +1,11 @@
 //! 2D sprite viewport: snapshot in, pixels out.
 //!
-//! The UI builds a [`FrameInput`] per frame (plain data, cheap to rebuild
+//! The UI builds a [`FrameInput`] per frame (plain data, rebuilt
 //! during composition) and mounts [`Viewport2d`] as a Repose view, which
 //! draws the snapshot through a dp-space contain-fit and reports pointer
 //! picks back in world coords. Unit discipline lives here, once:
-//! games work purely in world/dp units and never touch physical px.
-//! Camera state lives in Repose signals, never in the renderer.
+//! games work in world/dp units and do not touch physical px.
+//! Camera state lives in Repose signals, not in the renderer.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -31,48 +31,25 @@ pub use fullscreen::{FullscreenDesc, FullscreenPass, FullscreenTexture};
 pub mod post;
 
 /// 2D orthographic camera. Owned by the UI (signals), copied into the
-/// snapshot per frame.
-///
-/// The camera's look point is [`effective_center`](Camera2d::effective_center)
-/// (`center + offset`); `zoom` and `units_per_pixel` scale the view
-/// uniformly. All three viewport consumers (canvas drawing, the GPU batch
-/// matrix, and pointer picks) derive from these fields through one shared
-/// transform, so they can never disagree.
+/// snapshot per frame. `effective_center` is `center + offset`.
+/// Canvas, GPU batch, and picks derive from these fields together.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera2d {
-    /// World-space point the camera follows (the follow target, room
-    /// center, or player position). Defaults to `(0, 0)`.
-    ///
-    /// Scroll limits (`game_utils_repame::feel::apply_limits`) clamp this
-    /// field; put momentary displacement such as trauma shake in
-    /// [`offset`](Camera2d::offset) instead so it can push past the limits.
+    /// Follow target in world units. Defaults to `(0, 0)`.
+    /// Scroll limits clamp this field; shake goes in `offset`.
     pub center: Vec2,
-    /// Momentary displacement added to [`center`](Camera2d::center).
-    /// Defaults to `(0, 0)`.
-    ///
-    /// Useful for looking around or camera shake animations: applied after
-    /// limits, so a shake impulse still moves the view even when the follow
-    /// target is pinned at a scroll edge. Decays back to zero under
-    /// game-side trauma handling.
+    /// Momentary displacement added to `center`. Defaults to `(0, 0)`.
+    /// Applied after scroll limits; game code decays it toward zero.
     pub offset: Vec2,
     /// World units per screen pixel at zoom 1. Defaults to `1.0`.
-    ///
-    /// Combined with the viewport size to build the orthographic
-    /// projection: a smaller value shows less of the world (larger
-    /// sprites). Together with `zoom`, the visible world width is
-    /// `viewport_dp * units_per_pixel / zoom`. Non-positive values fall
-    /// back to `1.0` so a bad snapshot can never divide by zero.
+    /// Visible width is `viewport_dp * units_per_pixel / zoom`.
+    /// Non-positive values fall back to `1.0` (guards division).
     pub units_per_pixel: f32,
-    /// Magnification. Defaults to `1.0`.
-    ///
-    /// Higher values zoom in: `2.0` shows half the world width on each
-    /// axis (a quarter of the area); `0.5` shows twice as much. Applied on
-    /// canvas and GPU alike. Non-positive values fall back to `1.0`.
+    /// Magnification. Defaults to `1.0`; higher zooms in.
+    /// Non-positive values fall back to `1.0`.
     pub zoom: f32,
-    /// Roll in radians around the look point (trauma shake). Defaults to `0.0`.
-    ///
-    /// Applied after look/zoom on canvas, GPU, picks, and actor surfaces,
-    /// so all consumers stay glued. Positive is clockwise in y-down space.
+    /// Roll in radians about the look point. Defaults to `0.0`.
+    /// Applied on canvas, GPU, picks, and actor surfaces alike.
     pub roll: f32,
 }
 
@@ -88,17 +65,13 @@ impl Default for Camera2d {
     }
 }
 
-/// Scroll limits and follow smoothing live in `game_utils_repame::feel`
-/// (`CameraLimits`, `apply_limits`, `smooth_toward`): they are game-side
-/// snapshot-production math, not renderer internals. This crate only
-/// frames what the snapshot already contains.
+/// Scroll limits and follow smoothing live in `game_utils_repame::feel`.
+/// They run game-side when producing the snapshot; this crate only
+/// frames the snapshot contents.
 
 impl Camera2d {
     /// Effective look point: `center + offset`.
-    ///
-    /// All framing (canvas drawing, the GPU batch matrix, pointer picks,
-    /// actor surfaces) uses this value, so shake and look-around applied
-    /// through `offset` move every consumer together.
+    /// Canvas, GPU batch, picks, and actor surfaces all use this value.
     pub fn effective_center(&self) -> [f32; 2] {
         [self.center.x + self.offset.x, self.center.y + self.offset.y]
     }
@@ -116,8 +89,8 @@ impl Camera2d {
         )
     }
 
-    /// World under a dp-space cursor (canvas coords, density already divided out).
-    /// Includes [`roll`](Camera2d::roll).
+    /// World point under a dp-space cursor (density divided out).
+    /// Includes roll.
     pub fn dp_to_world_pt(&self, canvas_dp: [f32; 2], world_size: [f32; 2], dp: [f32; 2]) -> Vec2 {
         let fit = effective_fit(canvas_dp, world_size, self);
         let w = dp_to_world_with_roll(dp, world_size, self.effective_center(), fit, self.roll);
@@ -150,12 +123,9 @@ impl Camera2d {
     }
 
     /// Legacy y-down view-projection: world +y points screen-down.
-    ///
-    /// Diverges from the shared framing contract: this frames from
-    /// `viewport * units_per_pixel / zoom` and ignores
-    /// [`FrameInput::world_size`], so it disagrees with canvas, GPU, and
-    /// picks whenever a contain-fit letterboxes. Kept for guards/tests;
-    /// viewport code must use [`fit_view_proj`] instead.
+    /// Frames from `viewport * units_per_pixel / zoom` and ignores
+    /// `world_size`, so it disagrees with canvas, GPU, and picks
+    /// under letterbox. Viewport code must use [`fit_view_proj`].
     #[deprecated(
         since = "0.1.8",
         note = "ignores world_size; use fit_view_proj for the shared canvas/GPU/pick framing contract"
@@ -164,11 +134,9 @@ impl Camera2d {
         self.view_proj_screen(viewport_px)
     }
 
-    /// Legacy world-space position under a viewport-pixel cursor.
-    ///
-    /// Inverts [`view_proj`](Camera2d::view_proj), so it shares that
-    /// function's divergence from the contain-fit contract. Pointer picks
-    /// must go through [`pick_world`] over the painted [`FrameGeom`].
+    /// Legacy position under a viewport-pixel cursor.
+    /// Inverts `view_proj` with the same letterbox divergence.
+    /// Picks must use [`pick_world`] over the painted [`FrameGeom`].
     #[deprecated(
         since = "0.1.8",
         note = "ignores world_size; use pick_world over the painted FrameGeom instead"
@@ -189,9 +157,7 @@ impl Camera2d {
     }
 }
 
-/// Blend mode per sprite. Alpha is the default; Additive draws with
-/// `SrcAlpha + One` (GML `bm_add` parity, second pipeline, split draw
-/// ranges) so the tint alpha scales the glow.
+/// Blend mode per sprite. Additive uses `SrcAlpha + One`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SpriteBlend {
     #[default]
@@ -207,24 +173,20 @@ pub struct SpriteInstance {
     pub center: Vec2,
     pub rotation: f32,
     pub size: Vec2,
-    /// Normalized anchor (origin): `[0.5, 0.5]` centers the quad on
-    /// `center` (legacy default), `[0, 0]` pins the top-left corner -
-    /// bevy `Anchor` semantics, y-down.
+    /// Normalized anchor: `[0.5, 0.5]` centers the quad on `center`,
+    /// `[0, 0]` pins the top-left corner. Y-down.
     pub anchor: Vec2,
-    /// Mirror around the anchor axes (left-walking hordes, etc.).
-    /// Solid canvas fills are flip-invariant; the GPU batch mirrors
-    /// geometry (UVs untouched).
+    /// Mirror about the anchor axes. Canvas fills are flip-invariant;
+    /// the GPU batch mirrors geometry (UVs untouched).
     pub flip_x: bool,
     pub flip_y: bool,
     pub uv_min: Vec2,
     pub uv_max: Vec2,
-    /// RGBA tint, same byte semantics as the legacy canvas path
-    /// (`(c * 255) as u8` per channel).
+    /// RGBA tint, `(c * 255) as u8` per channel.
     pub color: [f32; 4],
     /// Atlas page index for multi-texture batches.
     pub page: u32,
-    /// Stable draw key; higher draws on top. Default 0. The batch
-    /// stable-sorts by `z` before upload (Bevy `z` semantics).
+    /// Draw key; higher draws on top. Default 0. Stable-sorted by `z`.
     pub z: f32,
     pub blend: SpriteBlend,
 }
@@ -252,60 +214,45 @@ impl Default for SpriteInstance {
 #[derive(Clone, Debug, Default)]
 pub struct WorldText {
     pub text: String,
-    /// World-space anchor, same convention as the legacy canvas text path.
+    /// World-space anchor.
     pub pos: Vec2,
-    /// RGBA, same byte semantics as [`SpriteInstance::color`].
+    /// RGBA, `(c * 255) as u8` per channel.
     pub color: [f32; 4],
     /// Font size in world units.
     pub size: f32,
 }
 
-/// Everything the viewport draws this frame. Plain data, snapshot per frame.
+/// Everything the viewport draws this frame. Plain snapshot data.
 ///
-/// Framing contract (single source of truth): canvas, GPU, and picks all
-/// derive from `world_size` + `cam` through [`effective_fit`] /
-/// [`fit_view_proj`] / [`world_to_dp`]. `cam.effective_center()` is the
-/// look point (rest + `offset` shake included); `cam.zoom` /
-/// `cam.units_per_pixel` scale the fit uniformly on every backend.
+/// Framing contract: canvas, GPU, and picks all derive from `world_size`
+/// + `cam` through [`effective_fit`] / [`fit_view_proj`] / [`world_to_dp`].
 #[derive(Clone, Default, Debug)]
 pub struct FrameInput {
     pub cam: Camera2d,
     /// World-space extent the contain-fit maps into the viewport.
     pub world_size: [f32; 2],
-    /// Cold-start viewport size in **dp** (physical px / density), used for
+    /// Cold-start viewport size in dp (physical px / density), used for
     /// the GPU camera until the first painted [`FrameGeom`] arrives.
-    /// Named for its units: divide physical px by density before storing
-    /// here, or the first frame's fit is off by the density factor on
-    /// HiDPI screens. (Contrast [`FrameGeom::viewport_px`], which is
-    /// genuinely physical px.)
+    /// Divide physical px by density before storing here.
     pub viewport_dp: [f32; 2],
     pub sprites: Vec<SpriteInstance>,
-    /// World-anchored text, drawn after the sprite pass on the canvas
-    /// viewport. The GPU viewport ignores this field: compose texts as
-    /// sibling views (same pattern as `overlay_color` consumers that need
-    /// typography) so GPU and canvas agree by construction.
+    /// World-anchored text, drawn after the sprite pass on canvas.
+    /// GPU viewports ignore this field; compose texts as sibling views.
     pub texts: Vec<WorldText>,
     /// Full-viewport fill under everything (letterbox included).
     pub background: Option<[f32; 4]>,
-    /// Optional fullscreen tint/color-grading hook (e.g. FOW dimming,
-    /// damage flash). Applied after the sprite pass on canvas *and* GPU
-    /// (after the chroma composite when `chroma > 0.0`), with the same
-    /// byte semantics as the canvas path (`(c * 255) as u8` per channel,
-    /// alpha-blended over the scene).
+    /// Optional fullscreen tint, applied after the sprite pass on
+    /// canvas and GPU (`(c * 255) as u8` per channel, alpha-blended).
     pub overlay_color: Option<[f32; 4]>,
-    /// Chromatic aberration amount (bevy `chromatic_intensity` units;
-    /// NT pulses land at 0.04..0.7). GPU viewports render the scene
-    /// offscreen and composite it back with an RGB split; `0.0` keeps
-    /// the zero-cost direct path. Canvas viewports ignore it (sampling
-    /// FX need pixels, and the canvas path is vector commands).
+    /// Chromatic aberration amount. GPU renders offscreen and composites
+    /// back with an RGB split; `0.0` draws the batch into the main pass.
+    /// Canvas ignores it (vector path has no pixels to sample).
     pub chroma: f32,
 }
 
 /// UI-facing pointer events from the viewport.
-///
-/// `Click` fires on pointer **up** when the press started inside and the
-/// pointer moved less than the slop threshold (drag-off cancels, real UI
-/// button feel). `Press` is the down-edge for games that need it.
+/// `Click` fires on pointer up when the press started inside and the
+/// pointer stayed within slop. `Press` is the down-edge.
 #[derive(Clone, Debug)]
 pub enum PickEvent {
     Press {
@@ -319,9 +266,8 @@ pub enum PickEvent {
     Hover {
         world: Vec2,
     },
-    /// Touch/pen contact began: pointer id + window-physical px
-    /// (y-down, `origin + position`). Mouse never emits these; taps
-    /// still emit `Click` too (button/UI parity).
+    /// Touch/pen contact began: pointer id + window-physical px.
+    /// Mouse does not emit these; taps still emit `Click` too.
     TouchDown {
         id: u64,
         screen: [f32; 2],
@@ -337,8 +283,8 @@ pub enum PickEvent {
     },
 }
 
-/// Touch/pen pointers drive game touch zones; mouse stays on the
-/// click/hover path.
+/// Touch/pen pointers drive game touch zones;
+/// mouse stays on the click/hover path.
 fn is_touch(ev: &repose_core::input::PointerEvent) -> bool {
     matches!(
         ev.kind,
@@ -352,17 +298,15 @@ fn screen_of(ev: &repose_core::input::PointerEvent) -> [f32; 2] {
     [p.x, p.y]
 }
 
-/// Clamp helper: finite positive values pass through, everything else
-/// (zero, negative, NaN, infinite) falls back to 1.0 so framing math can
-/// never div-by-zero.
+/// Clamp helper: finite positive values pass through, the rest fall
+/// back to 1.0 so framing math holds a valid divisor.
 fn sane_positive(v: f32) -> f32 {
     if v.is_finite() && v > 1e-6 { v } else { 1.0 }
 }
 
-/// Contain-fit of a `world` extent into a dp-space canvas: uniform scale
-/// plus centering offsets, all dp. Pure, so games and tests can pin it.
-/// No silent clamp: `world_to_dp` and `dp_to_world` are exact inverses
-/// for any positive scale, so picks never drift from drawn content.
+/// Contain-fit of a `world` extent into a dp-space canvas: uniform
+/// scale plus centering offsets. `world_to_dp` / `dp_to_world` invert
+/// each other for any positive scale.
 pub fn contain_fit(canvas_dp: [f32; 2], world: [f32; 2]) -> (f32, f32, f32) {
     if canvas_dp[0] <= 0.0 || canvas_dp[1] <= 0.0 || world[0] <= 0.0 || world[1] <= 0.0 {
         return (1.0, 0.0, 0.0);
@@ -379,9 +323,8 @@ pub fn contain_fit(canvas_dp: [f32; 2], world: [f32; 2]) -> (f32, f32, f32) {
 }
 
 /// Effective fit for one frame: base contain-fit scaled by
-/// `zoom / units_per_pixel`, re-centered. Default camera (`zoom = 1`,
-/// `units_per_pixel = 1`) is exactly [`contain_fit`]; zoom 2 doubles
-/// on-screen size on canvas and GPU alike.
+/// `zoom / units_per_pixel`, re-centered. Default camera matches
+/// [`contain_fit`]; zoom 2 doubles on-screen size on both backends.
 pub fn effective_fit(canvas_dp: [f32; 2], world: [f32; 2], cam: &Camera2d) -> (f32, f32, f32) {
     let (base, _, _) = contain_fit(canvas_dp, world);
     let zoom = sane_positive(cam.zoom);
@@ -397,10 +340,8 @@ pub fn effective_fit(canvas_dp: [f32; 2], world: [f32; 2], cam: &Camera2d) -> (f
     )
 }
 
-/// GPU camera for the shared framing contract: the exact matrix form of
+/// GPU camera for the shared framing contract: matrix form of
 /// [`world_to_dp`] over `canvas_dp` (dp = physical px / density).
-/// Canvas draws via `world_to_dp`, GPU draws via this matrix, picks invert
-/// via `dp_to_world`. One transform, three consumers.
 pub fn fit_view_proj(
     canvas_dp: [f32; 2],
     world_size: [f32; 2],
@@ -410,9 +351,8 @@ pub fn fit_view_proj(
     fit_view_proj_with_roll(canvas_dp, world_size, cam_center, fit, 0.0)
 }
 
-/// [`fit_view_proj`] plus camera roll around the look point.
-/// Roll rotates world points around `cam_center` before the contain-fit
-/// mapping; `0.0` is exactly [`fit_view_proj`].
+/// [`fit_view_proj`] plus camera roll about the look point.
+/// `0.0` matches [`fit_view_proj`].
 pub fn fit_view_proj_with_roll(
     canvas_dp: [f32; 2],
     world_size: [f32; 2],
@@ -454,9 +394,8 @@ pub fn fit_view_proj_with_roll(
     base * rot
 }
 
-/// World point -> dp canvas point through the fit. `cam_center` shifts the
-/// look point (trauma shake included): at the default center
-/// (`world / 2`) this is exactly `offset + world * scale`.
+/// World point to dp canvas point through the fit. At the default
+/// center (`world / 2`) this is `offset + world * scale`.
 pub fn world_to_dp(
     world: [f32; 2],
     world_size: [f32; 2],
@@ -482,8 +421,7 @@ pub fn world_to_dp_with_roll(
     ]
 }
 
-/// Inverse of [`world_to_dp`]: dp canvas point -> world point.
-/// Guards degenerate scales (returns the look point instead of Inf).
+/// Inverse of [`world_to_dp`]. Degenerate scales return the look point.
 pub fn dp_to_world(
     dp: [f32; 2],
     world_size: [f32; 2],
@@ -522,10 +460,9 @@ fn rotate_about(p: [f32; 2], center: [f32; 2], roll: f32) -> [f32; 2] {
     [center[0] + c * dx - r * dy, center[1] + r * dx + c * dy]
 }
 
-/// Viewport-local physical-px press -> world point through the painted
-/// [`FrameGeom`]. Takes the region-local position (`PointerEvent.position`,
-/// already relative to the viewport origin), so HUD chrome, docking, or a
-/// non-fullscreen viewport never shift picks.
+/// Viewport-local physical-px press to world point through the painted
+/// [`FrameGeom`]. Takes the region-local position, so HUD chrome or a
+/// non-fullscreen viewport does not shift picks.
 pub fn pick_world(local_px: [f32; 2], geom: FrameGeom, world_size: [f32; 2]) -> [f32; 2] {
     let d = if geom.density.is_finite() && geom.density > 1e-6 {
         geom.density
@@ -541,25 +478,22 @@ pub fn pick_world(local_px: [f32; 2], geom: FrameGeom, world_size: [f32; 2]) -> 
     )
 }
 
-/// One painted frame's geometry, shared between [`Viewport2d`] /
-/// [`Viewport2dGpu`] (writers) and world-anchored siblings like
-/// [`ActorFrame`] (readers). Everything needed to map either direction,
-/// so board sprites, picks, and actor surfaces stay glued - including
-/// under camera shake.
+/// One painted frame's geometry, shared between viewports (writers)
+/// and world-anchored siblings such as [`ActorFrame`] (readers).
+/// Maps either direction so board sprites, picks, and actor
+/// surfaces track together, including under camera shake.
 ///
-/// Timing: the GPU viewport publishes size/fit/look at layout (ahead of
-/// `prepare`, so resizes apply the same frame) and re-publishes at paint;
-/// canvas publishes at draw. Composition-time readers ([`ActorFrame`]
-/// offsets) still see the previous frame's geometry — math is exact,
+/// Timing: layout publishes ahead of `prepare` and paint re-publishes;
+/// composition-time readers see the previous frame's geometry, so
 /// placement trails the board by one frame under camera motion.
-/// Event-time readers (picks) always see the latest publish.
+/// Event-time readers (picks) see the latest publish.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameGeom {
     /// Effective dp fit of the world extent: `(scale, off_x, off_y)` from
     /// [`effective_fit`] (contain-fit scaled by zoom/units_per_pixel).
     pub fit: (f32, f32, f32),
-    /// Look-point shift in world units: `cam.effective_center() - world / 2`
-    /// (rest + offset shake included; zero when the camera is default).
+    /// Look-point shift in world units: `cam.effective_center() - world / 2`.
+    /// Zero when the camera is default.
     pub look: [f32; 2],
     /// Physical px per dp at paint time.
     pub density: f32,
@@ -567,8 +501,8 @@ pub struct FrameGeom {
     pub viewport_px: [f32; 2],
     /// Camera roll in radians around the look point.
     pub roll: f32,
-    /// Camera look point in world coords (`cam.effective_center()` at
-    /// publish time). Roll pivot for [`surface_dp`] and picks.
+    /// Camera look point in world coords at publish time.
+    /// Roll pivot for [`surface_dp`] and picks.
     pub pivot: [f32; 2],
 }
 
@@ -586,7 +520,7 @@ impl Default for FrameGeom {
 }
 
 /// Shared paint-time geometry. Canvas views use this on the UI thread;
-/// GPU callbacks need `Send + Sync`, so the inner cell is mutex-backed.
+/// GPU callbacks hold it behind a mutex (`Send + Sync`).
 #[derive(Clone, Default)]
 pub struct GeomHandle(Arc<Mutex<FrameGeom>>);
 
@@ -617,15 +551,15 @@ impl From<FrameGeom> for GeomHandle {
 }
 
 impl From<std::sync::Arc<std::sync::Mutex<FrameGeom>>> for GeomHandle {
-    /// Migrate GPU call sites that still hold the raw mutex handle.
+    /// Wrap GPU call sites that hold the raw mutex handle.
     fn from(arc: std::sync::Arc<std::sync::Mutex<FrameGeom>>) -> Self {
         Self(arc)
     }
 }
 
 impl From<std::rc::Rc<std::cell::Cell<FrameGeom>>> for GeomHandle {
-    /// Migrate canvas call sites that still hold the old cell handle:
-    /// snapshots the current value into the shared handle.
+    /// Wrap canvas call sites holding the old cell handle by snapshotting
+    /// the current value into the shared handle.
     fn from(rc: std::rc::Rc<std::cell::Cell<FrameGeom>>) -> Self {
         Self(Arc::new(Mutex::new(rc.get())))
     }
@@ -641,10 +575,9 @@ fn click_within_slop(a: [f32; 2], b: [f32; 2]) -> bool {
     dx * dx + dy * dy <= CLICK_SLOP_PX * CLICK_SLOP_PX
 }
 
-/// World-anchored surface rect in dp: `([off_x, off_y], [w, h])` for a
-/// `size` box centered on `center`. Pure; `ActorFrame` is its view form.
-/// The center rotates with [`FrameGeom::roll`] about [`FrameGeom::pivot`];
-/// size stays axis-aligned.
+/// World-anchored surface rect in dp: `([off_x, off_y], [w, h])`.
+/// `ActorFrame` is its view form. The center rotates with roll about
+/// the pivot; size stays axis-aligned.
 pub fn surface_dp(center: [f32; 2], size: [f32; 2], geom: FrameGeom) -> ([f32; 2], [f32; 2]) {
     let (s, ox, oy) = geom.fit;
     let r = rotate_about(center, geom.pivot, geom.roll);
@@ -666,24 +599,10 @@ fn rgba8(c: [f32; 4]) -> Color {
     )
 }
 
-/// 2D viewport view. Owns nothing render-side; gesture handling and camera
-/// state live in the [`FrameInput`] snapshot (same split as resims
-/// `Viewport3d`).
-///
-/// Layout contract: fills its parent. Draws `background`, then sprites,
-/// then world texts, then the fullscreen tint - all through the shared
-/// [`effective_fit`] framing of [`FrameInput::world_size`]. Pointer presses
-/// (`Click`) and cursor moves (`Hover`) are reported via `on_event` in
-/// world coords (viewport-local, so a non-zero viewport origin never
-/// shifts picks). Each paint publishes a
-/// [`FrameGeom`] snapshot to `geom_out` for dp-space siblings
-/// ([`ActorFrame`]); the viewport, picks, and actor surfaces therefore
-/// share one transform by construction.
-///
-/// Canvas note: sprites draw through the shared [`effective_fit`]
-/// framing; rotation rides the upstream transform stack
-/// (`DrawScope::draw_rect_rotated`), so rotated sprites are exact on
-/// canvas and GPU alike.
+/// 2D viewport view. Gesture handling and camera state live in the
+/// [`FrameInput`] snapshot. Fills its parent; draws `background`, then
+/// sprites, then world texts, then the fullscreen tint. Each paint
+/// publishes [`FrameGeom`] to `geom_out` for dp-space siblings.
 #[allow(non_snake_case)] // Repose view convention (cf. resims `Viewport3d`).
 pub fn Viewport2d(
     input: FrameInput,
@@ -807,16 +726,10 @@ pub fn Viewport2d(
             );
         }
         for spr in draw_input.sprites.iter() {
-            // Exact rotation via the upstream transform stack
-            // (`draw_rect_rotated`): draw the unrotated, mirror-adjusted
-            // quad, rotated in px about the projected center. The world→px
-            // map is a uniform scale (`px_per_world`) plus `cam.roll`, so
-            // the rect origin is `pivot - anchor * size * k` (built from
-            // the pivot, never projected through roll twice) and the angle
-            // is always `roll + rotation`: mirroring is fully captured by
-            // the mirrored anchor rect as a set, commuting with rotation.
-            // Matches `batch::instance_rows` (R(θ) after mirror, anchor
-            // pinned at `center`) and the GPU batch pixel-for-pixel.
+            // Rotation goes through draw_rect_rotated: unrotated quad,
+            // rotated in px about the projected center. The rect origin
+            // is pivot based (not projected twice) and the angle is
+            // roll + rotation. Matches batch::instance_rows.
             let px_per_world = fit.0 * d;
             let [px, py] = project(spr.center.x, spr.center.y);
             let ax = if spr.flip_x {
@@ -866,35 +779,15 @@ pub fn Viewport2d(
     })
 }
 
-/// GPU twin of [`Viewport2d`]: same snapshot in, same picks out, but
-/// sprites draw as textured atlas quads through [`SpriteBatch`].
+/// GPU twin of [`Viewport2d`]: same snapshot in, same picks out, with
+/// sprites as textured atlas quads through [`SpriteBatch`]. Fills its
+/// parent. `background` paints first and `overlay_color` last, matching
+/// canvas except world texts, which stay canvas-side as sibling views.
 ///
-/// Framing is identical to the canvas path: the batch camera is
-/// [`fit_view_proj`] over the density-corrected viewport (physical px /
-/// density, same dp the canvas path draws in). `background` paints first
-/// as a uniform-only fullscreen fill and `overlay_color` paints last the
-/// same way, so GPU and canvas agree on every `FrameInput` field except
-/// world texts, which stay a canvas-view feature for now: GPU consumers
-/// compose those as sibling views.
-///
-/// Frame-timing: layout publishes the viewport size (plus fit/look from
-/// the snapshot camera) through `on_size_changed` ahead of `prepare`, so
-/// the batch camera, the chroma target size, and picks all share one
-/// fresh geometry — resizes take effect the same frame. `paint`
-/// re-publishes authoritatively from its callback info.
-///
-/// Layout contract: fills its parent. The payload is rebuilt from the
-/// snapshot every frame (like the canvas draw closure): `prepare`
-/// rebuilds the batch, and camera from the last painted viewport (cold
-/// start falls back to [`FrameInput::viewport_dp`]), and `paint`
-/// records the fresh viewport into `geom_out` and issues the shared
-/// draw calls. Atlas uploads ride along per frame; games drain their
-/// atlas queue once per frame, so each upload applies exactly once.
-/// Geometry crosses the render thread behind a mutex (`WgpuCallback`
-/// payloads must be `Send + Sync`), picks read it back on the UI side.
-/// `FrameInput::chroma` above `0.0` renders the scene offscreen and
-/// composites it back with an RGB split (see `post`); `0.0` draws the
-/// batch straight into the main pass.
+/// Timing: layout publishes viewport size ahead of `prepare`; paint
+/// re-publishes from callback info. `prepare` rebuilds the batch and
+/// camera; atlas uploads apply once per frame. `chroma` above `0.0`
+/// renders offscreen and composites back (see `post`).
 #[allow(non_snake_case)]
 pub fn Viewport2dGpu(
     input: FrameInput,
@@ -906,9 +799,8 @@ pub fn Viewport2dGpu(
     Viewport2dGpuWithId(input, geom_out, uploads, desc, "viewport2d.main", on_event)
 }
 
-/// GPU viewport with an explicit batch id so a second viewport/minimap can
-/// coexist (each id owns its pipeline/instances in `CallbackResources`,
-/// including its bg/overlay/composite targets).
+/// GPU viewport with explicit batch id so a second viewport or minimap
+/// can coexist (each id owns its pipeline and instances).
 #[allow(non_snake_case)]
 pub fn Viewport2dGpuWithId(
     input: FrameInput,
@@ -1087,8 +979,7 @@ impl WgpuCallback for GpuViewport {
         batch.extend_uploads(self.uploads.iter().cloned());
         batch.prepare(device, queue, encoder, screen, resources);
         let composite = post::use_composite(self.input.chroma);
-        // Background first (uniform-only fill, same color the canvas
-        // path fills under the batch). Skipped when the snapshot has
+        // Background fill under the batch. Skipped when the snapshot has
         if let Some(bg) = self.input.background
             && !composite
         {
@@ -1178,12 +1069,9 @@ impl WgpuCallback for GpuViewport {
     }
 }
 
-/// Stack GPU sprites under canvas texts/tint using the same FrameInput.
-///
-/// Until a glyph atlas exists, GPU games compose world texts as a canvas
-/// overlay sibling: this helper mounts `Viewport2dGpu` plus a transparent
-/// canvas pass that only draws `texts`/`overlay_color` with the same geom,
-/// so GPU games aren't silently missing damage numbers.
+/// Stack GPU sprites under canvas texts/tint from one [`FrameInput`].
+/// Mounts `Viewport2dGpu` plus a transparent canvas pass for `texts` /
+/// `overlay_color`, so GPU games keep damage numbers and tints.
 #[allow(non_snake_case)]
 pub fn Viewport2dGpuWithHud(
     input: FrameInput,
@@ -1259,17 +1147,10 @@ pub fn Viewport2dGpuWithHud(
         .child(Viewport2dGpu(input, geom, uploads, desc, on_event))
         .child(hud)
 }
-/// A world-anchored surface: `child` (painting in its own local coords)
-/// is boxed to a `size` rect centered on a world `center`, positioned
-/// through the viewport's [`FrameGeom`]. Siblings of [`Viewport2d`] -
-/// e.g. live actor surfaces - track sim positions without game-side unit
-/// math, glued to sprites and picks even under camera shake. `mirror_x`
-/// flips around the surface center (left-walking hordes reusing
-/// right-facing art).
-///
-/// Timing: offsets derive from the last painted [`FrameGeom`], so the
-/// surface trails the board by one frame while the camera moves
-/// (see [`FrameGeom`]). Steady-state placement is exact.
+/// World-anchored surface: `child` is boxed to a `size` rect centered
+/// on a world `center`, positioned through [`FrameGeom`]. `mirror_x`
+/// flips about the surface center. Offsets trail the board by one
+/// frame under camera motion; steady state matches.
 #[allow(non_snake_case)]
 pub fn ActorFrame(
     center: [f32; 2],
@@ -1279,8 +1160,8 @@ pub fn ActorFrame(
     child: View,
 ) -> View {
     let ([ox, oy], [w, h]) = surface_dp(center, size, geom.get());
-    // `.absolute()` is load-bearing: without it taffy ignores the offsets
-    // and every surface stacks at the same fixed spot.
+    // `.absolute()` is load-bearing: without it all surfaces stack
+    // at one fixed spot.
     let mut modifier = Modifier::new().size(Dp(w), Dp(h)).absolute().offset(
         Some(Dp(ox)),
         Some(Dp(oy)),
@@ -1300,16 +1181,15 @@ mod tests {
 
     #[test]
     fn contain_fit_roundtrip_at_density_125() {
-        // Production eDP-1 runs at 1.25: px canvas -> dp fit -> world ->
-        // back must be identity or clicks miss their visuals.
+        // 1.25 density: px canvas -> dp fit -> world -> back is identity.
         set_density_default(Density { scale: 1.25 });
         let d = effective_density_scale();
         // 1250x750 px canvas, 800x600 world: dp fit s=1, ox=100, oy=0.
         let fit = contain_fit([1250.0 / d, 750.0 / d], [800.0, 600.0]);
         let cam = [400.0, 300.0];
-        // Draw: world (400,300) -> dp -> px must hit the press point.
+        // Draw: world (400,300) -> dp -> px lands on the press point.
         let [dx, dy] = world_to_dp([400.0, 300.0], [800.0, 600.0], cam, fit);
-        // Pick: window px -> dp -> world must map back exactly.
+        // Pick: window px -> dp -> world maps back.
         let [wx, wy] = dp_to_world([625.0 / d, 375.0 / d], [800.0, 600.0], cam, fit);
         set_density_default(Density { scale: 1.0 });
         assert!(
@@ -1324,7 +1204,7 @@ mod tests {
             (wx - 400.0).abs() < 1e-3 && (wy - 300.0).abs() < 1e-3,
             "pick inverse, got ({wx},{wy})"
         );
-        // Camera shift (trauma shake) moves draw and pick together.
+        // Camera shift moves draw and pick together.
         let shifted = world_to_dp([400.0, 300.0], [800.0, 600.0], [410.0, 290.0], fit);
         let back = dp_to_world(shifted, [800.0, 600.0], [410.0, 290.0], fit);
         assert!(
@@ -1335,10 +1215,8 @@ mod tests {
 
     #[test]
     fn gpu_viewport_honors_cam_and_background() {
-        // End-to-end GPU proof for the viewport contract: the snapshot
-        // camera frames world sprites (cam center lands on the screen
-        // center) and `background` fills every uncovered pixel. Skips
-        // gracefully where no GPU exists.
+        // Snapshot camera frames world sprites; `background` fills pixels
+        // the quad does not cover. Skips where no GPU exists.
         use repose_core::{Color, Rect, Scene, SceneNode};
         use repose_render_wgpu::{Callback, offscreen::OffscreenRenderer};
 
@@ -1514,9 +1392,8 @@ mod tests {
 
     #[test]
     fn surface_dp_matches_board_point_under_shake() {
-        // Actor surfaces and board sprites share FrameGeom: the surface
-        // center must land exactly on the board-space point, including
-        // with a shifted look point (trauma shake).
+        // Actor surfaces share FrameGeom with board sprites: the surface
+        // center lands on the board point, including with a shifted look.
         let geom = FrameGeom {
             fit: (1.0, 100.0, 0.0),
             look: [0.0, 0.0],
@@ -1582,10 +1459,9 @@ mod tests {
 
     #[test]
     fn canvas_rotated_rect_matches_instance_rows() {
-        // The canvas path draws the unrotated mirror-adjusted quad plus a
-        // px-space rotation; the GPU path draws `instance_rows` corners.
-        // Both must land on the same px corners (compared as sets) for
-        // rotation x flip x anchor x camera-roll combinations.
+        // Canvas draws the mirror-adjusted quad plus a px-space rotation;
+        // GPU draws `instance_rows` corners. Both land on the same
+        // px corners (compared as sets) across combos.
         let cam = Camera2d {
             center: Vec2::new(400.0, 300.0),
             offset: Vec2::ZERO,
@@ -1623,9 +1499,9 @@ mod tests {
                 let wy = row1[0] * corner[0] + row1[1] * corner[1] + row1[3];
                 expect[i] = project(wx, wy);
             }
-            // Canvas path: mirror-adjusted rect about the pivot, rotated
-            // by roll + rotation. Mirroring is captured by the rect as a
-            // set, so the angle never negates (it commutes).
+            // Canvas: mirror-adjusted rect about the pivot, rotated by
+            // roll + rotation. Mirroring is captured by the rect as a
+            // set, so the angle does not negate.
             let ax = if flip_x { 1.0 - anchor[0] } else { anchor[0] };
             let ay = if flip_y { 1.0 - anchor[1] } else { anchor[1] };
             let [px, py] = project(ctr[0], ctr[1]);
@@ -1651,7 +1527,7 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
-    fn camera_guards_never_div_by_zero() {
+    fn camera_guards_div_by_zero() {
         let bad = Camera2d {
             center: Vec2::ZERO,
             offset: Vec2::ZERO,
@@ -1660,7 +1536,7 @@ mod tests {
             roll: 0.0,
         };
         let m = bad.view_proj([0.0, 0.0]);
-        assert!(m.is_finite(), "view_proj must stay finite, got {m:?}");
+        assert!(m.is_finite(), "view_proj stays finite, got {m:?}");
         assert_eq!(bad.screen_to_world([0.0, 0.0], [5.0, 5.0]), Vec2::ZERO);
     }
 
@@ -1705,7 +1581,7 @@ mod tests {
 
     #[test]
     fn letterbox_pick_matches_draw() {
-        // canvas 1600x900 dp, world 800x800 → horizontal letterbox
+        // canvas 1600x900 dp, world 800x800 -> horizontal letterbox
         let cam = Camera2d {
             center: Vec2::new(400.0, 400.0),
             ..Default::default()
@@ -1714,10 +1590,10 @@ mod tests {
         let dp = world_to_dp([400.0, 400.0], [800.0, 800.0], cam.effective_center(), fit);
         let back = dp_to_world(dp, [800.0, 800.0], cam.effective_center(), fit);
         assert!((back[0] - 400.0).abs() < 1e-3 && (back[1] - 400.0).abs() < 1e-3);
-        // fit_matrix agrees with the free function.
+        // Method and plain function share the same matrix.
         let m = cam.fit_matrix([1600.0, 900.0], [800.0, 800.0]);
-        let free = fit_view_proj([1600.0, 900.0], [800.0, 800.0], cam.effective_center(), fit);
-        let dm = m - free;
+        let plain = fit_view_proj([1600.0, 900.0], [800.0, 800.0], cam.effective_center(), fit);
+        let dm = m - plain;
         let max = dm
             .to_cols_array()
             .iter()

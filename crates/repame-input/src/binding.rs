@@ -3,8 +3,8 @@
 use repose_core::input::{GamepadAxis, GamepadButton, PointerButton};
 use repose_core::shortcuts::KeyChord;
 
-/// One physical source that can drive an action. Many-to-one: several
-/// bindings can point at the same action (keyboard + pad + axis).
+/// One physical source that can drive an action: keyboard, pad, or axis.
+/// Several bindings can point at the same action.
 #[derive(Clone, Debug)]
 pub enum Binding {
     /// Keyboard chord (key + modifiers), same shape as repose shortcuts.
@@ -13,14 +13,13 @@ pub enum Binding {
     Mouse(PointerButton),
     /// Gamepad button press.
     Pad(GamepadButton),
-    /// Analog axis crossing. Active while `value >= threshold` for a
-    /// positive threshold, `value <= threshold` for a negative one, so
-    /// `-0.5` on `LeftStickX` means "pushed left past half".
+    /// Active while `value >= threshold` for positive threshold,
+    /// `value <= threshold` for negative; `-0.5` on `LeftStickX` is left past half.
     Axis { axis: GamepadAxis, threshold: f32 },
 }
 
-// Manual `PartialEq` + `Eq` + `Hash`: repose `PointerButton` has no
-// `PartialEq`, so compare/hash mouse variants by discriminant.
+// Manual `PartialEq`/`Eq`/`Hash`: `PointerButton` lacks them,
+// so mouse variants compare by discriminant.
 impl PartialEq for Binding {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -64,9 +63,7 @@ impl std::hash::Hash for Binding {
 
 impl Binding {
     /// True while the latest axis value holds past the threshold.
-    /// A zero threshold means "any non-zero deflection" (rest stick at
-    /// exactly 0.0 is inactive), so a centered stick never holds an
-    /// action forever.
+    /// Zero threshold means any non-zero deflection; rest at 0.0 reads inactive.
     pub fn axis_active(threshold: f32, value: f32) -> bool {
         if !value.is_finite() {
             return false;

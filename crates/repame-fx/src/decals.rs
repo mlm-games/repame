@@ -1,43 +1,28 @@
-//! Ground decals: flat quads pinned just above the terrain that fade over
-//! a fixed life (scorch marks, blood splats, selection rings, footprints).
-//!
-//! A decal is one transparent [`MeshGroup`]: a horizontal quad at
-//! `y = ground_y + lift`, unlit textured (tint × texel), `depth_test = true`
-//! so walls occlude it and it occludes nothing (no depth writes in the
-//! transparent pass). Fading rides the group's `alpha`, so decals sort
-//! back-to-front with particles in the same pass instead of needing their
-//! own. Sim-side state ([`Decal`]) steps on the same 100 Hz ticks as
-//! [`super::particles3d`]; rendering is [`decal_groups`], one group per
-//! live decal.
-//!
-//! `lift` exists because depth precision at range makes coplanar quads
-//! flicker: 0.02 world units is invisible at game scale and keeps the quad
-//! above the ground plane it marks. Not a polygon-offset — same lift every
-//! frame, deterministic.
+//! Ground decals: flat quads above the terrain that fade over a fixed life.
+//! One transparent [`MeshGroup`] per decal; state steps on 100 Hz ticks.
+//! Quads sit 0.02 above the plane to avoid z-fighting.
 
 use bevy_ecs::prelude::*;
 use repame_sim::bevy_ecs::component::{Mutable, StorageType};
 use repame_view3d::MeshGroup;
 
-/// One live decal. Age/life in 100 Hz ticks; deterministic.
+/// One live decal. Age and life in 100 Hz ticks.
 #[derive(Clone, Debug)]
 pub struct Decal {
-    /// Quad center in world space.
     pub pos: [f32; 3],
-    /// Quad edge length in world units (before the grow curve).
+    /// Quad edge length in world units, before the grow curve.
     pub size_world: f32,
-    /// Growth from spawn size to final size over life (1.0 = fixed size).
-    /// Scorch marks pop slightly larger than their spawn flash.
+    /// Final size as a multiple of spawn size (1.0 means fixed size).
     pub grow: f32,
-    /// Ticks to full fade (alpha 1 → 0 linearly over the last `fade_ticks`
-    /// of life; `0` = hold full alpha then vanish at expiry).
+    /// Fade length in ticks: alpha runs 1 to 0 over the last
+    /// `fade_ticks` of life. 0 holds full alpha, then vanishes.
     pub fade_ticks: i32,
     pub age_ticks: i32,
     pub life_ticks: i32,
-    /// Yaw about +Y in radians (randomized at spawn for variety).
+    /// Yaw about +Y in radians.
     pub yaw: f32,
     pub tint: [f32; 3],
-    /// Texture array page + sub-rect (splat sprite vs solid ring tint).
+    /// Texture page and sub-rect for the decal sprite.
     pub page: u32,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
@@ -48,11 +33,10 @@ impl Component for Decal {
     type Mutability = Mutable;
 }
 
-/// Spawn spec for [`spawn_decal`] (11 params collapse into one struct so
-/// call sites stay readable and clippy stays quiet).
+/// Spawn parameters for [`spawn_decal`].
 #[derive(Clone, Copy, Debug)]
 pub struct DecalDef {
-    /// Quad center in world space (lift applied on top at spawn).
+    /// Quad center (lift is added on top at spawn).
     pub pos: [f32; 3],
     pub size_world: f32,
     pub tint: [f32; 3],
@@ -61,11 +45,8 @@ pub struct DecalDef {
     pub page: u32,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
-    /// Yaw about +Y in radians (randomized at spawn for variety).
     pub yaw: f32,
-    /// Height above the ground plane (0.02 unless z-fighting says otherwise).
     pub lift: f32,
-    /// Growth from spawn size to final size over life (1.0 = fixed).
     pub grow: f32,
 }
 
@@ -88,9 +69,7 @@ impl Default for DecalDef {
 }
 
 /// Spawn one decal from a [`DecalDef`]. Returns the entity.
-///
-/// Pass `life_ticks = i32::MAX` for a persistent decal (selection rings,
-/// blob shadows): it holds full alpha until explicitly despawned.
+/// `life_ticks = i32::MAX` is persistent: full alpha until despawned.
 pub fn spawn_decal(commands: &mut Commands, def: DecalDef) -> Entity {
     commands
         .spawn((Decal {
@@ -109,21 +88,8 @@ pub fn spawn_decal(commands: &mut Commands, def: DecalDef) -> Entity {
         .id()
 }
 
-/// A blob shadow: one dark ellipse pinned under an agent, following it
-/// every frame. Not a light, not a depth texture — the 90% solution that
-/// ships in every game in `external/` history that grounds its characters
-/// (neither rustbox nor resims enables shadow maps: rustbox sets
-/// `shadow_maps_enabled: false`, resims bakes shade per face).
-///
-/// The game owns the follow: each frame it writes the agent's XZ into the
-/// decal's `pos` (and optionally scales `size_world` by height for the
-/// shrink-with-altitude read). This module only builds the decal spec —
-/// a soft dark disc, full alpha, persistent life — so the follow loop is
-/// three lines at the call site. Despawn explicitly when the agent dies.
-///
-/// Tint `[0, 0, 0]` with a radial texture (dark center, transparent edge)
-/// reads as a contact shadow; without a texture page the solid disc still
-/// grounds, but the edge is hard.
+/// Blob shadow: a dark disc pinned under an agent.
+/// The game writes agent XZ into `pos` each frame.
 pub fn blob_shadow(pos: [f32; 3], radius_world: f32) -> Decal {
     Decal {
         pos: [pos[0], pos[1] + 0.02, pos[2]],
@@ -140,13 +106,13 @@ pub fn blob_shadow(pos: [f32; 3], radius_world: f32) -> Decal {
     }
 }
 
-/// Spawn a [`blob_shadow`] directly (persistent until despawned).
+/// Spawn a [`blob_shadow`] directly. Persistent until despawned.
 pub fn spawn_blob_shadow(commands: &mut Commands, pos: [f32; 3], radius_world: f32) -> Entity {
     let decal = blob_shadow(pos, radius_world);
     commands.spawn((decal,)).id()
 }
 
-/// Age decals and despawn the spent. `ticks <= 0` pauses.
+/// Age decals and despawn the spent.
 pub fn step_decals(commands: &mut Commands, decals: &mut Query<(Entity, &mut Decal)>, ticks: i32) {
     if ticks <= 0 {
         return;
@@ -159,7 +125,7 @@ pub fn step_decals(commands: &mut Commands, decals: &mut Query<(Entity, &mut Dec
     }
 }
 
-/// Alpha at the decal's age: full until the fade window, then linear to 0.
+/// Alpha at decal age: full until the fade window, then linear to 0.
 fn decal_alpha(d: &Decal) -> f32 {
     if d.fade_ticks <= 0 || d.life_ticks <= d.fade_ticks {
         return if d.age_ticks < d.life_ticks { 1.0 } else { 0.0 };
@@ -172,10 +138,8 @@ fn decal_alpha(d: &Decal) -> f32 {
     }
 }
 
-/// Map live decals to one [`MeshGroup`] each: horizontal yaw-rotated quad,
-/// unlit textured, transparent with per-decal alpha (back-to-front with
-/// particles in the same pass). Size grows `size_world → size_world * grow`
-/// over the first quarter of life (spawn pop), then holds.
+/// One [`MeshGroup`] per live decal: horizontal yaw-rotated quad.
+/// Size grows toward `size_world * grow` over the first quarter of life.
 pub fn decal_groups<'a>(decals: impl Iterator<Item = &'a Decal>) -> Vec<MeshGroup> {
     decals
         .map(|d| {
@@ -184,7 +148,6 @@ pub fn decal_groups<'a>(decals: impl Iterator<Item = &'a Decal>) -> Vec<MeshGrou
             let s = d.size_world * (1.0 + (d.grow - 1.0) * grow_t);
             let hs = s * 0.5;
             let (sy, cy) = d.yaw.sin_cos();
-            // Yaw about +Y: local (x, z) → world (x * cy + z * sy, −x * sy + z * cy).
             let rot = |lx: f32, lz: f32| {
                 [
                     d.pos[0] + lx * cy + lz * sy,
@@ -205,10 +168,8 @@ pub fn decal_groups<'a>(decals: impl Iterator<Item = &'a Decal>) -> Vec<MeshGrou
                 alpha: decal_alpha(d),
                 ..Default::default()
             };
-            // Corner order (a, b, c, d) is CCW-from-above: a=(−hs,+hs),
-            // b=(+hs,+hs), c=(+hs,−hs), d=(−hs,−hs), so the face normal is
-            // +Y and backface culling keeps it for above-looking-down
-            // cameras (same convention as the renderer's up-quad fixtures).
+            // CCW from above, so the face normal is +Y and backface culling
+            // keeps the quad for top-down cameras.
             g.push_quad_textured(
                 rot(-hs, hs),
                 rot(hs, hs),
@@ -263,8 +224,7 @@ mod tests {
         assert!(g.transparent && g.depth_test);
         assert_eq!((g.alpha, g.texture_page), (1.0, 1));
         assert_eq!(g.tri_count(), 2);
-        // Winding: up-facing (CCW from above) so backface culling keeps it
-        // for the above-looking-down camera.
+        // Up-facing winding, kept by backface culling from above.
         let a = glam::Vec3::from(g.positions[g.indices[0] as usize]);
         let b = glam::Vec3::from(g.positions[g.indices[1] as usize]);
         let c = glam::Vec3::from(g.positions[g.indices[2] as usize]);
@@ -325,7 +285,7 @@ mod tests {
         assert!((d.pos[1] - 0.02).abs() < 1e-6, "lifted: {}", d.pos[1]);
         assert_eq!(d.life_ticks, i32::MAX, "persistent until despawned");
         assert_eq!(d.tint, [0.0, 0.0, 0.0]);
-        // The game follow: agent moves, shadow XZ tracks, group follows.
+        // Game follow: agent moves, shadow XZ tracks, group follows.
         world.get_mut::<Decal>(e).unwrap().pos[0] = 7.0;
         world.get_mut::<Decal>(e).unwrap().pos[2] = -2.0;
         let groups: Vec<MeshGroup> = decal_groups(world.query::<&Decal>().iter(&world));
@@ -338,7 +298,6 @@ mod tests {
             "({cx}, {cz})"
         );
         assert_eq!(groups[0].alpha, 1.0, "no fade on a persistent shadow");
-        // Persistent shadows never age out.
         step(&mut world, 10_000);
         assert_eq!(world.query::<&Decal>().iter(&world).count(), 1);
     }

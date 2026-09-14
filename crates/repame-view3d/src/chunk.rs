@@ -1,48 +1,25 @@
-//! Persistent chunk geometry: dirty-tracked static groups behind the
-//! per-frame snapshot.
-//!
-//! The per-frame path (`SceneBatch::push_group`) rebuilds + re-uploads every
-//! vertex every frame. That is correct for dynamic scenes (agents, markers,
-//! previews) and stays the path for them. Chunked/voxel worlds (rustbox
-//! gate) instead keep one [`ChunkEntry`] per chunk: the game rebuilds a
-//! chunk's [`MeshGroup`]s only when its `generation` changes, and
-//! [`ChunkCache`] turns them into stable [`ChunkDraw`]s the viewport appends
-//! to its snapshot. Same GPU path, same validators — persistence lives
-//! entirely on the CPU side, in front of the batch.
-//!
-//! Validation lives here ([`validate_group`]) so the cache, the viewport's
-//! [`Frame3d::extend_chunks`](super::viewport::Frame3d::extend_chunks), and
-//! the batch share one implementation instead of three copies drifting.
-//!
-//! Generations mirror the rustbox `MeshGenerations` contract: the game owns a
-//! `u64` per chunk key, bumps it on edit, and the cache rebuilds entries
-//! whose generation moved. Stale background builds (older generation than
-//! the stored one) are dropped by the caller comparing generations — this
-//! module never guesses, it only stores what the game hands it.
+//! Chunk geometry cache: dirty-tracked groups in front of the batch.
+//! Game rebuilds a chunk when its generation changes.
+//! Validation in [`validate_group`] is shared with batch and viewport.
 
 use std::collections::HashMap;
 
 use super::mesh::MeshGroup;
 
-/// One cached chunk: its validated draw groups plus the generation that
-/// produced them. `groups` are stored post-clone (the caller keeps owning
-/// its source); `tri_count` is cached so HUDs/stats skip re-walking.
+/// One cached chunk. `tri_count` avoids re-walk for stats.
 #[derive(Clone, Debug, Default)]
 pub struct ChunkEntry {
-    /// Generation that produced these groups (game-owned counter).
+    /// Generation that produced these groups.
     pub generation: u64,
-    /// Validated, ready-to-push groups (index-checked at insert).
+    /// Validated groups, index-checked at insert.
     pub groups: Vec<MeshGroup>,
     /// Cached `groups.iter().map(tri_count).sum()`.
     pub tri_count: usize,
 }
 
 impl ChunkEntry {
-    /// Validate `groups` the way [`SceneBatch`](super::render::SceneBatch)
-    /// does (matching lengths, in-range indices) and store them under
-    /// `generation`. Malformed groups are dropped with a warning — the same
-    /// never-panic contract, applied at cache time so bad data never sits
-    /// in the cache. Returns the number of groups kept.
+    /// Validate and store `groups` under `generation`. Drops bad groups.
+    /// Returns groups kept.
     pub fn insert(&mut self, generation: u64, groups: &[MeshGroup]) -> usize {
         self.generation = generation;
         self.groups.clear();
@@ -62,16 +39,11 @@ impl ChunkEntry {
     }
 }
 
-/// Shared group validator: the single implementation behind
-/// [`ChunkEntry::insert`], [`Frame3d::extend_chunks`](super::viewport::Frame3d::extend_chunks),
-/// and [`SceneBatch::push_group`](super::render::SceneBatch::push_group).
-/// Matching attribute lengths, in-range indices; degenerate triangles are
-/// culled at batch time (not here — the cache stores source geometry, and
-/// picking runs its own per-triangle degeneracy test).
-/// Returns `false` for malformed groups (logged with a warning), never panics.
+/// Shared group validator for cache, viewport, and batch.
+/// Checks lengths and index range. Degenerate tris cull at batch time.
+/// Returns false for malformed groups. Logs a warning, does not panic.
 ///
-/// Page bounds (`texture_page < layers`) stay batch-side: the cache is
-/// desc-agnostic and the viewport resolves the effective desc per frame.
+/// Page bounds stay batch-side: cache is desc-agnostic.
 pub fn validate_group(group: &MeshGroup) -> bool {
     if group.is_empty() {
         return false;
@@ -111,9 +83,7 @@ pub fn validate_group(group: &MeshGroup) -> bool {
     true
 }
 
-/// A validated group plus the chunk key that owns it, ready to append to a
-/// [`Frame3d`](super::viewport::Frame3d). Borrowed: the viewport copies
-/// what it needs per frame (the snapshot stays the owned path).
+/// Validated group plus owner chunk key. Viewport copies per frame.
 #[derive(Clone, Copy, Debug)]
 pub struct ChunkDraw<'a> {
     /// Chunk key that owns this group.
@@ -122,8 +92,7 @@ pub struct ChunkDraw<'a> {
     pub group: &'a MeshGroup,
 }
 
-/// Dirty-tracked chunk store. Keys are chunk positions (16^3 convention,
-/// but any `[i32; 3]` key works — this module never interprets them).
+/// Chunk store keyed by chunk position. Keys are opaque here.
 #[derive(Clone, Debug, Default)]
 pub struct ChunkCache {
     entries: HashMap<[i32; 3], ChunkEntry>,
@@ -134,9 +103,7 @@ impl ChunkCache {
         Self::default()
     }
 
-    /// Store `groups` under `chunk` at `generation`, replacing any older
-    /// entry. Call only when the game bumped the generation (or for the
-    /// initial build). Returns groups kept.
+    /// Store `groups` under `chunk` at `generation`. Returns groups kept.
     pub fn store(&mut self, chunk: [i32; 3], generation: u64, groups: &[MeshGroup]) -> usize {
         let mut entry = ChunkEntry::default();
         let kept = entry.insert(generation, groups);
@@ -157,22 +124,17 @@ impl ChunkCache {
         self.entries.clear();
     }
 
-    /// Stored generation for `chunk`, if any. Background builders compare
-    /// their build generation against this before calling `store`: a newer
-    /// stored generation means the build is stale and must be dropped.
+    /// Stored generation for `chunk`, if any.
     pub fn generation(&self, chunk: &[i32; 3]) -> Option<u64> {
         self.entries.get(chunk).map(|e| e.generation)
     }
 
-    /// True when `generation` is newer than what's stored (or nothing is
-    /// stored): the chunk needs a rebuild/store.
+    /// True when `generation` is newer than stored, or nothing stored.
     pub fn is_stale(&self, chunk: &[i32; 3], generation: u64) -> bool {
         self.generation(chunk).is_none_or(|g| generation > g)
     }
 
-    /// All cached draws, chunk-sorted for deterministic submission order.
-    /// The viewport appends these to its per-frame groups alongside dynamic
-    /// content; depth-tested-first flattening still applies at batch time.
+    /// All cached draws, chunk-sorted for stable submission order.
     pub fn draws(&self) -> Vec<ChunkDraw<'_>> {
         let mut keys: Vec<[i32; 3]> = self.entries.keys().copied().collect();
         keys.sort();
@@ -260,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_groups_never_enter_the_cache() {
+    fn malformed_groups_drop_at_store() {
         let mut cache = ChunkCache::new();
         let bad = MeshGroup {
             positions: vec![[0.0, 0.0, 0.0]],
@@ -277,10 +239,8 @@ mod tests {
     }
 
     #[test]
-    fn stale_builds_are_detectable_before_store() {
-        // The rustbox race: two background builds for one chunk, the older
-        // finishing last. The caller checks `is_stale` (or `generation`)
-        // before storing, so the newer result survives.
+    fn stale_builds_drop_before_store() {
+        // Two background builds for one chunk, older finishing last.
         let mut cache = ChunkCache::new();
         cache.store([3, 0, 1], 5, &[quad_group([1.0, 0.0, 0.0])]);
         assert!(

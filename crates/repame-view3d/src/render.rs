@@ -1,32 +1,8 @@
-//! Flat-shaded + single-light 3D scene batch: snapshot in, depth-tested pixels out.
-//!
-//! [`SceneBatch`] owns the per-frame mesh snapshot (validate → flatten →
-//! upload) plus its depth-tested/flat pipelines.
-//!
-//! The offscreen scene target + depth buffer + blit live in
-//! [`DepthComposite`](repose_render_wgpu::DepthComposite): the shared UI
-//! pass carries no depth ops, so depth-tested content renders into a
-//! viewport-owned target during `prepare` and composites back in `paint`.
-//!
-//! Lit/texture plumbing mirrors `repame-sprite` `SpriteBatch`: the batch
-//! owns a texture array fed from [`SceneUpload`]s (games drain their
-//! image/atlas source once per frame), and each group carries one page.
-//! Groups without uvs sample nothing; groups with uvs multiply the texel
-//! into the tint before lighting. `BatchDesc` matches the sprite batch
-//! shape (layer count + size + filter) so asset code reads the same.
-//!
-//! Frustum culling runs at group granularity in [`SceneBatch::finish`]
-//! (AABB vs the six view-projection planes, extracted per frame —
-//! `groups_culled` reports the count for HUDs). `depth_test = false`
-//! overlays (gizmos, decals) are never culled: they must draw even when
-//! their bounds sit off-screen.
-
-//! Flat-shaded 3D pass: world-space pos+color through a view-projection uniform.
-//! Lit groups add per-vertex normals and sample the frame light from the
-//! same uniform block (ambient + one directional, linear space).
-//! Textured groups add uvs + a page and sample the batch texture array;
-//! the texel multiplies the tint before lighting (untextured vertices
-//! carry a dummy uv and page 0 with weight 0, so one pipeline fits all).
+//! Scene batch: snapshot in, depth-tested pixels out.
+//! Owns per-frame snapshot plus depth-tested and flat pipelines.
+//! Offscreen target and blit live in `DepthComposite`.
+//! Texture array is fed from [`SceneUpload`]s, one page per group.
+//! Frustum cull runs per group in `finish`. `depth_test = false` overlays skip cull.
 const SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -156,35 +132,28 @@ struct CameraUniform {
 
 const _: () = assert!(size_of::<CameraUniform>() == 160);
 
-/// One directional light + ambient for the frame, linear space.
-///
-/// The direction points from the surface toward the light (Godot
-/// `DirectionalLight3D` convention). `shade_for_dir` producers keep
-/// working: their baked colors ride the unlit path untouched.
-///
-/// `fog`/`fog_end`/`exposure` ride the same uniform block: fog blends lit
-/// fragments toward `fog_color` between `fog_start` and `fog_end` camera
-/// distances (density 0 disables); `exposure` 1.0 is the identity. Flat
-/// groups ignore both.
+/// Frame light, linear space. Direction points toward light.
+/// Flat groups ignore it. Fog blends lit frags toward fog color.
+/// Exposure 1.0 is identity. Flat groups ignore both.
 #[derive(Clone, Copy, Debug)]
 pub struct SceneLight {
-    /// Unit vector from the surface toward the light (normalized on use).
+    /// Unit vector toward light (normalized on use).
     pub direction: [f32; 3],
-    /// Light color (linear RGB).
+    /// Light color, linear RGB.
     pub color: [f32; 3],
     /// Diffuse strength.
     pub diffuse: f32,
-    /// Ambient floor (linear RGB added to every lit fragment).
+    /// Ambient floor added to each lit frag.
     pub ambient: [f32; 3],
-    /// Fog density 0..1 (0 = off).
+    /// Fog density 0..1. 0 = off.
     pub fog: f32,
-    /// Fog color (linear RGB).
+    /// Fog color, linear RGB.
     pub fog_color: [f32; 3],
-    /// Fog starts here (world units from the camera).
+    /// Fog starts here, world units from camera.
     pub fog_start: f32,
-    /// Fog is full past here (world units from the camera).
+    /// Fog is full past here.
     pub fog_end: f32,
-    /// Reinhard exposure (1.0 = off, identity).
+    /// Reinhard exposure. 1.0 = off.
     pub exposure: f32,
 }
 
@@ -204,15 +173,8 @@ impl Default for SceneLight {
     }
 }
 
-/// One vertex: position + albedo + normal + lit flag + uv/page in a
-/// single layout, so flat, lit, and textured groups share one buffer and
-/// one pipeline. Flat vertices carry a dummy up-normal and `lit = 0.0`
-/// (their baked color passes through untouched); untextured vertices
-/// carry a dummy uv and `tex_mix = 0.0` (no sampling, tint only).
-/// `alpha` is the group multiplier and `cutoff` the discard threshold
-/// (both per-vertex so one buffer serves all three alpha behaviors).
-/// `world` is the raw position for the camera-distance fog/specular math;
-/// `metallic`/`roughness`/`emissive` are the group [`Material`](super::mesh::Material).
+/// One vertex layout for flat, lit, and textured groups.
+/// Flat verts carry dummy up-normal and lit 0. Untextured carry dummy uv and mix 0.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vert {
@@ -244,9 +206,9 @@ pub enum SceneFilter {
 /// page per mesh group, same as sprite atlas pages.
 #[derive(Clone, Copy, Debug)]
 pub struct BatchDesc {
-    /// Square texture layer edge in pixels.
+    /// Square layer edge in pixels.
     pub layer_size: u32,
-    /// Array layer count (= max texture pages).
+    /// Array layer count (= max pages).
     pub layers: u32,
     pub filter: SceneFilter,
 }
@@ -264,7 +226,7 @@ impl Default for BatchDesc {
 /// One pending texture upload: blit `rgba` (tight `w`*`h`*4 bytes) into
 /// `page` at (`x`, `y`). Games fill these from their image source (atlas
 /// drain, decoded PNG, procedural texel) once per frame; mismatches are
-/// dropped with a warning at upload time, never a panic.
+/// dropped with a warning at upload time.
 #[derive(Clone, Debug)]
 pub struct SceneUpload {
     pub page: u32,
@@ -277,13 +239,13 @@ pub struct SceneUpload {
 
 /// Drop zero-area (and NaN) triangles from an index list, preserving the
 /// survivors in submission order. Mirrors the picker's
-/// [`ray_triangle`](super::pick::ray_triangle) degeneracy test (area² ≤
-/// 1e-12 misses there, so it must not draw here either — content and picks
+/// [`ray_triangle`] degeneracy test (area^2 <=
+/// 1e-12 misses there, so it must not draw here either, content and picks
 /// stay glued). Returns an empty vec when fewer than 3 indices remain.
 /// Non-multiple-of-3 tails are ignored, matching `pick_ray`'s chunking.
 ///
 /// `is_finite` rides alongside the area test (not folded into one
-/// comparison): NaN poisons every ordering, so the check must name it —
+/// comparison): NaN fails every ordering, so name the check explicitly -
 /// a bare `area2 <= 1e-12` reads like it culls NaN but actually lets it
 /// through.
 fn cull_degenerate(positions: &[[f32; 3]], indices: &[u32]) -> Vec<u32> {
@@ -293,7 +255,7 @@ fn cull_degenerate(positions: &[[f32; 3]], indices: &[u32]) -> Vec<u32> {
         let (ia, ib, ic) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
         let (Some(a), Some(b), Some(c)) = (positions.get(ia), positions.get(ib), positions.get(ic))
         else {
-            continue; // validated in-range by the caller; belt and braces
+            continue; // caller validates range; double guard
         };
         let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
         let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
@@ -321,7 +283,7 @@ struct Pending {
     material: super::mesh::Material,
     /// World-space AABB center (computed at push time) for back-to-front
     /// transparent sorting. Opaque groups ignore it; `None` (degenerate
-    /// bounds — never happens post-validation, belt and braces) sorts
+    /// bounds - post-validation this is None only for empty input) sorts
     /// nearest.
     center: Option<[f32; 3]>,
     indices: Vec<u32>,
@@ -350,7 +312,7 @@ struct DrawRange {
 ///
 /// Each `id` owns its pipelines + texture in `CallbackResources` (the
 /// `repame-sprite` `SpriteBatch` pattern): viewports coexist. Rebuilding
-/// on format/sample/desc change drops texture contents (logged) — the
+/// on format/sample/desc change drops texture contents (logged), the
 /// game re-uploads from its next frame's [`SceneUpload`]s, same as the
 /// sprite batch's atlas contract.
 pub struct SceneBatch {
@@ -364,9 +326,9 @@ pub struct SceneBatch {
     /// View-projection matrix for frustum culling ([`SceneBatch::finish`]
     /// extracts the six planes from it). Set alongside the uniform matrix
     /// by [`SceneBatch::set_camera`]; identity disables culling (the
-    /// unit tests' default — they assert content preservation directly).
+    /// unit tests' default, they assert content preservation directly).
     view_proj: Mat4,
-    /// Groups culled by the last [`SceneBatch::finish`] (frustum only —
+    /// Groups culled by the last [`SceneBatch::finish`] (frustum only  -
     /// malformed/degenerate drops are separate, counted nowhere by
     /// design). HUD/stats readout, reset per `finish`.
     culled: usize,
@@ -484,7 +446,7 @@ impl SceneBatch {
     pub fn upload(&mut self, upload: SceneUpload) {
         // Guard the same contract `push_group` enforces for pages: an
         // out-of-range upload is dropped at queue time (with a warning) so
-        // a caller packing against a smaller desc can't poison the texture.
+        // a caller packing against a smaller desc cannot corrupt the texture.
         if upload.page >= self.desc.layers
             || upload.x + upload.w > self.desc.layer_size
             || upload.y + upload.h > self.desc.layer_size
@@ -514,12 +476,12 @@ impl SceneBatch {
 
     /// Append one group. Malformed groups (index out of range, or
     /// position/color length mismatch, partial normals/uvs, page past the
-    /// batch layers, non-finite alpha) are dropped with a warning — never
+    /// batch layers, non-finite alpha) are dropped with a warning, never
     /// a panic, never partial draws. Degenerate triangles (zero area, NaN)
     /// are culled tri-by-tri so one bad triangle can't sink its group: the
     /// group draws with the surviving triangles. Normals and uvs stay
     /// all-or-nothing per group. Shares
-    /// [`validate_group`](super::chunk::validate_group) with the chunk
+    /// [`validate_group`](crate::validate_group) with the chunk
     /// cache so both paths agree on malformed.
     pub fn push_group(&mut self, group: &MeshGroup) {
         if !super::chunk::validate_group(group) {
@@ -575,7 +537,7 @@ impl SceneBatch {
     /// are convention-free (`|x|,|y| <= w`), but near/far differ: near is
     /// `row2` (`z >= 0`), far is `row3 - row2` (`z <= w`). Using the
     /// OpenGL `row3 + row2` near plane here would accept everything (it
-    /// tests `w + z >= 0`, always true post-remap) — the tests pin the far
+    /// tests `w + z >= 0`, always true post-remap), the tests pin the far
     /// plane with a beyond-FAR slab, which only culls with this form.
     fn frustum_planes(view_proj: &Mat4) -> [[f32; 4]; 6] {
         let m = view_proj.to_cols_array_2d();
@@ -605,12 +567,12 @@ impl SceneBatch {
     }
 
     /// Flatten pending groups into the draw buffers: opaque first
-    /// (depth-tested, then flat overlays — submission order decides ties),
+    /// (depth-tested, then flat overlays, submission order decides ties),
     /// then transparent back-to-front (camera distance of the AABB center;
     /// groups without bounds sort nearest). Frustum culling drops fully
     /// outside groups before flattening (`depth_test = false` overlays are
-    /// never culled — gizmos must draw even off-screen). Split from
-    /// [`push_group`] so the viewport payload, which rebuilds the batch
+    /// never culled, gizmos must draw even off-screen). Split from
+    /// [`SceneBatch::push_group`] so the viewport payload, which rebuilds the batch
     /// per frame, shares the path.
     ///
     /// Flat vertices (no normals) carry a dummy up-normal and `lit = 0.0`
@@ -633,7 +595,7 @@ impl SceneBatch {
         let mut transparent: Vec<(Pending, f32)> = Vec::new();
         for g in self.pending.drain(..) {
             // Frustum culling (vertex-exact, only when the camera is real;
-            // `depth_test = false` overlays are never culled — gizmos must
+            // `depth_test = false` overlays are never culled, gizmos must
             // draw even off-screen).
             if culling && g.depth_test && Self::group_outside(&planes, &g.positions) {
                 self.culled += 1;
@@ -644,7 +606,7 @@ impl SceneBatch {
                     .center
                     .map(|c| (glam::Vec3::from(c) - eye).length_squared());
                 // `None` (degenerate bounds) sorts nearest: it draws last,
-                // on top — visible beats culled when the math gives up.
+                // on top - drawn last when bounds are degenerate.
                 transparent.push((g, d.unwrap_or(-1.0)));
             } else {
                 opaque.push(g);
@@ -706,8 +668,8 @@ impl SceneBatch {
     /// plane. Vertex-exact (no AABB approximation): costs one walk per
     /// group per frame, only when culling is armed (real camera). Groups
     /// are small in practice (chunked terrain splits by material, agents
-    /// are single meshes) — and a wrongly-culled group is a missing
-    /// object, so exactness beats cleverness here.
+    /// are single meshes), and a wrongly-culled group is a missing
+    /// object, so test every vertex here.
     fn group_outside(planes: &[[f32; 4]; 6], positions: &[[f32; 3]]) -> bool {
         if positions.is_empty() {
             return false;
@@ -1053,9 +1015,9 @@ impl SceneBatch {
 
     /// Upload camera + geometry + texture uploads after [`finish`].
     /// No-op when the id has no prepared entry (call
-    /// [`ensure_resources`](Self::ensure_resources) first —
+    /// [`ensure_resources`](Self::ensure_resources) first  -
     /// [`prepare_scene_with_id`] + the viewport do). Out-of-range or
-    /// mis-sized uploads are dropped with a warning, never a panic
+    /// mis-sized uploads are dropped with a warning
     /// (sprite-batch contract).
     pub(crate) fn upload_all(
         &self,
@@ -1229,7 +1191,7 @@ pub fn prepare_scene_with_id(
 ) {
     DepthComposite::get(resources).ensure(device, screen, id, w, h);
     // Snapshot the draw state into owned bind groups: pipelines and buffers
-    // are shared resources, so clone the (cheap) handles and end the borrow
+    // shared resources: clone the handles, then end the borrow
     // before beginning the mutable scene pass.
     struct Snapshot {
         cam_bind: wgpu::BindGroup,
@@ -1353,7 +1315,7 @@ mod tests {
         };
         let aspect = 16.0 / 9.0;
         // Visible: a slab under the camera (same shape as the picking
-        // fixtures — the center ray lands on it).
+        // fixtures, the center ray lands on it).
         let mut near = MeshGroup {
             depth_test: true,
             ..Default::default()
@@ -1626,7 +1588,7 @@ mod tests {
     }
 
     /// Materials ride the vertices (clamped), and bad light extras fall
-    /// back instead of poisoning the uniform.
+    /// back instead of writing a bad uniform.
     #[test]
     fn material_and_light_extras_plumb_and_clamp() {
         let mut batch = SceneBatch::with_id("test.material");
@@ -1938,7 +1900,7 @@ mod tests {
             let i = ((y * 64 + x) * 4) as usize;
             [px[i], px[i + 1], px[i + 2], px[i + 3]]
         };
-        // Pure primaries are sRGB fixed points: exact asserts.
+        // Primaries are sRGB fixed points, so asserts are exact.
         assert_eq!(at(32, 32), [0, 255, 0, 255], "near quad wins by depth");
     }
 
@@ -2464,7 +2426,7 @@ mod tests {
         };
         assert_eq!(px, [188, 188, 0, 255], "half-green over red blends: {px:?}");
 
-        // Cutoff above the ghost's alpha discards it: pure red shows.
+        // Cutoff above ghost alpha discards it: red shows.
         let Some(px) = render_case(sheets(0.5, 0.6)) else {
             return;
         };

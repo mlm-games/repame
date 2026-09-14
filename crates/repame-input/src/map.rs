@@ -5,10 +5,8 @@ use std::hash::Hash;
 
 use super::binding::Binding;
 
-/// Named set of actions, e.g. `"gameplay"` vs `"menu"`. When a map has
-/// no contexts every action is live; otherwise only actions in an
-/// active context fire. Mirrors repose `InstallShortcutMap` scopes,
-/// but for sim-side game actions instead of UI shortcuts.
+/// Named action set, e.g. `"gameplay"` vs `"menu"`. With no contexts
+/// every action is live; otherwise only actions in an active context fire.
 #[derive(Clone, Debug, Default)]
 pub struct ActionMap<A> {
     bindings: HashMap<A, Vec<Binding>>,
@@ -23,13 +21,13 @@ impl<A: Clone + Eq + Hash> ActionMap<A> {
         }
     }
 
-    /// Bind one more physical source to an action (many-to-one).
+    /// Bind one more physical source to an action.
     pub fn bind(&mut self, action: A, binding: Binding) -> &mut Self {
         self.bindings.entry(action).or_default().push(binding);
         self
     }
 
-    /// Put an action in a named context (member of several allowed).
+    /// Put an action in a named context.
     pub fn in_context(&mut self, context: &str, action: A) -> &mut Self {
         self.contexts
             .entry(context.to_string())
@@ -53,8 +51,8 @@ impl<A: Clone + Eq + Hash> ActionMap<A> {
         !self.contexts.is_empty()
     }
 
-    /// True when `action` may fire under `active` contexts. Actions in
-    /// no context are always live (shared buttons like pause).
+    /// True when `action` may fire under `active` contexts.
+    /// Actions in no context stay live (shared buttons like pause).
     pub fn live_in(&self, action: &A, active: &HashSet<String>) -> bool {
         if !self.has_contexts() {
             return true;

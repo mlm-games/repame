@@ -1,10 +1,7 @@
-//! [`SoundBank`]: named cues with variations, cooldowns, polyphony caps.
-//!
-//! The game-idiomatic core: `bank.play("footstep")` picks a variation,
-//! enforces per-cue cooldown and voice caps (stealing the oldest), and
-//! sends a [`PlayCmd`](crate::PlayCmd) down the command channel. Time is
-//! an explicit `now_ms` parameter on [`SoundBank::play_at_ms`] so tests
-//! run on a fake clock; [`SoundBank::play`] stamps the real clock.
+//! [`SoundBank`]: named cues with variations, cooldowns, voice caps.
+//! `bank.play("footstep")` picks a variation, enforces cooldown and caps,
+//! and sends a play command. Time is an explicit `now_ms` parameter on
+//! [`SoundBank::play_at_ms`] so tests run on a fake clock.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -145,15 +142,13 @@ impl SoundBank {
         self
     }
 
-    /// Wire to an audio thread (done by [`crate::Audio::try_init`]; call
-    /// directly for custom plumbing or tests).
+    /// Wire to an audio thread.
     pub fn attach(&mut self, tx: Sender<RealtimeCommand>, state: Arc<AudioState>) {
         self.tx = Some(tx);
         self.state = Some(state);
     }
 
-    /// Register a cue from encoded files (Ogg/MP3/FLAC/WAV). Each file
-    /// becomes one variation. Replaces any cue of the same name.
+    /// Register a cue from encoded files. Each file is one variation.
     pub fn load(&mut self, name: &str, def: CueDef, files: &[&[u8]]) -> Result<()> {
         if files.is_empty() {
             anyhow::bail!("cue `{name}` needs at least one file");
@@ -179,8 +174,7 @@ impl SoundBank {
         Ok(())
     }
 
-    /// Drop the finished ids from live-voice accounting. Called from
-    /// [`crate::Audio::update`] with the drained completions.
+    /// Drop finished ids from live-voice accounting.
     pub fn reap(&mut self, finished: &[u64]) {
         if finished.is_empty() {
             return;
@@ -215,14 +209,8 @@ impl SoundBank {
 
     /// Deterministic entry: explicit spatial shaping and clock.
     /// Returns `(voice, rate)` so tests can observe the wobble.
-    ///
-    /// Voice accounting is optimistic fire-and-forget: stealing sends
-    /// `Stop` for the oldest voice and drops it from `live` without
-    /// waiting for the audio thread, and a failed `Play` send returns
-    /// `None` without pushing (so `live` shrinks — the stolen voice was
-    /// still told to stop). A lost `Stop` with a successful `Play`
-    /// undercounts by one until `reap` catches up; there is no ack
-    /// channel by design.
+    /// Stealing drops the oldest voice and sends `Stop` without waiting;
+    /// a lost `Stop` undercounts by one until `reap` catches up.
     pub fn play_at_ms(
         &mut self,
         name: &str,

@@ -1,17 +1,15 @@
-//! Animation catalogs: nt-style `{name: {frames, w, h, fps, xorigin,
-//! yorigin}}` JSON parsed, packed frame-by-frame into a [`repame_atlas`]
-//! [`Atlas`], and served back as uv rects.
+//! Animation catalogs: JSON strip defs packed into an atlas.
+//! Served back as UV rects per frame.
 
 use std::collections::HashMap;
 
 use repame_atlas::{AllocError, AtlasId, atlas_id};
 use serde::Deserialize;
 
-/// Atlas types this API surfaces (re-exported so catalog users need no
-/// direct atlas dependency).
+/// Atlas types surfaced here so catalog users skip the atlas dep.
 pub use repame_atlas::{Atlas, AtlasDesc, UvRect};
 
-/// One animation definition: a horizontal strip of `frames` cells.
+/// One strip def: `frames` cells laid out horizontally.
 #[derive(Clone, Debug, Deserialize)]
 pub struct AnimDef {
     /// Frame count in the strip.
@@ -19,17 +17,16 @@ pub struct AnimDef {
     /// Cell size in pixels.
     pub w: u32,
     pub h: u32,
-    /// Playback rate; game-side timers consume this.
+    /// Playback rate. Game timers consume this.
     pub fps: f32,
-    /// Origin in pixels (bevy `Anchor` source).
+    /// Origin in pixels. Source for sprite anchor.
     pub xorigin: f32,
     pub yorigin: f32,
 }
 
 impl AnimDef {
-    /// Normalized anchor (`[0.5, 0.5]` = centered), straight into
-    /// `SpriteInstance.anchor`. Zero-size cells anchor top-left.
-    /// Deliberately unclamped.
+    /// Normalized anchor. `[0.5, 0.5]` is centered.
+    /// Zero-size cells anchor top-left. Unclamped.
     pub fn anchor(&self) -> [f32; 2] {
         if self.w == 0 || self.h == 0 {
             return [0.0, 0.0];
@@ -37,7 +34,7 @@ impl AnimDef {
         [self.xorigin / self.w as f32, self.yorigin / self.h as f32]
     }
 
-    /// Frame index wrapped to the strip (negative-safe for ping-pong).
+    /// Frame index wrapped to the strip. Negative-safe.
     pub fn wrap_frame(&self, frame: i32) -> u32 {
         if self.frames == 0 {
             return 0;
@@ -51,12 +48,11 @@ impl AnimDef {
 pub enum CatalogError {
     /// Malformed JSON.
     Json(serde_json::Error),
-    /// Atlas exhausted mid-pack; `placed` frames landed before it.
+    /// Atlas exhausted mid-pack. `placed` frames landed first.
     AtlasFull { placed: usize },
     /// A single cell is larger than one page.
     CellTooLarge { name: String },
-    /// Two definition keys stem to the same name (e.g.
-    /// `images/a/foo.png` and `images/b/foo.png` both -> `foo`).
+    /// Two keys stem to the same name.
     DuplicateStem {
         stem: String,
         first: String,
@@ -88,9 +84,7 @@ impl std::fmt::Display for CatalogError {
 
 impl std::error::Error for CatalogError {}
 
-/// Parsed + packed catalog. Owns the [`Atlas`]; games drain its upload
-/// queue into their backend after construction (and after streaming
-/// more anims in later).
+/// Parsed and packed catalog. Owns the atlas.
 #[derive(bevy_ecs::prelude::Resource)]
 pub struct AnimCatalog {
     defs: HashMap<String, AnimDef>,
@@ -104,9 +98,7 @@ impl Default for AnimCatalog {
 }
 
 impl AnimCatalog {
-    /// Empty catalog (no defs, empty atlas): systems resolve nothing and
-    /// skip via `def()` returning `None`. Startup default so schedules
-    /// can boot before art loads; the game replaces it on load.
+    /// Empty catalog. `def` returns None until content loads.
     pub fn empty() -> Self {
         Self {
             defs: HashMap::new(),
@@ -117,10 +109,8 @@ impl AnimCatalog {
             }),
         }
     }
-    /// Parse JSON and pack every frame. `serde_json` maps sort keys, so
-    /// packs are deterministic regardless of file order. Definition keys
-    /// are stemmed (`stem`), so bare names and full paths address the
-    /// same entry.
+    /// Parse JSON and pack every frame. Keys sort, so packs repeat.
+    /// Lookup keys stem, so paths and bare names share one entry.
     pub fn from_json(json: &str, desc: AtlasDesc) -> Result<Self, CatalogError> {
         let raw: HashMap<String, AnimDef> =
             serde_json::from_str(json).map_err(CatalogError::Json)?;
@@ -170,16 +160,15 @@ impl AnimCatalog {
         names
     }
 
-    /// Atlas uv rect for one frame (wraps like nt's `image_index`).
+    /// UV rect for one frame. Index wraps to the strip.
     pub fn uv(&self, name: &str, frame: i32) -> Option<UvRect> {
         let def = self.def(name)?;
         self.atlas
             .uv_rect(frame_key(stem(name), def.wrap_frame(frame)))
     }
 
-    /// Source rectangle inside the strip PNG (`{name}.png`, horizontal
-    /// frames): `[x, y, w, h]`. The game blits this into the atlas
-    /// placement from the matching drain entry.
+    /// Source rect in the strip PNG: `[x, y, w, h]`.
+    /// Frames run left to right from x 0.
     pub fn src_rect(&self, name: &str, frame: i32) -> Option<[u32; 4]> {
         let def = self.def(name)?;
         let f = def.wrap_frame(frame);
@@ -200,90 +189,67 @@ impl AnimCatalog {
     }
 }
 
-/// Strip a lookup key to its anim stem: `"images/sprRad.png"` ->
-/// `"sprRad"`, `"sprRad"` -> `"sprRad"`. The bevy build keyed its
-/// catalog by full paths while `anims.json` uses bare names; stemming
-/// makes both spellings resolve to one entry.
+/// Strip lookup key to stem. Drops folders and `.png`.
+/// `"images/sprRad.png"` maps to `"sprRad"`.
 pub fn stem(path: &str) -> &str {
     let base = path.rsplit('/').next().unwrap_or(path);
     base.strip_suffix(".png").unwrap_or(base)
 }
 
-/// Deterministic per-frame key: `"{name}#{frame}"` hashed.
+/// Per-frame key: `"{name}#{frame}"` hashed.
 pub fn frame_key(name: &str, frame: u32) -> AtlasId {
     atlas_id(&format!("{name}#{frame}"))
 }
 
-/// Deterministic per-frame key from a path *or* name.
+/// Per-frame key from a path or bare name. Stems first.
 pub fn frame_key_for(path: &str, frame: u32) -> AtlasId {
     frame_key(stem(path), frame)
 }
 
-/// What happens when playback reaches the end of the strip.
+/// End-of-strip behavior.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LoopMode {
-    /// Wrap to the start and keep playing. The default: walk cycles, idle
-    /// loops, spinning coins.
+    /// Wrap to the start and keep playing. Default.
     #[default]
     Loop,
-    /// Hold the last cell and stop. Reports finished once through
-    /// [`Advance::ended`] and stays there
-    /// until [`play`](AnimPlayer::play) restarts it: one-shot attacks,
-    /// death animations, UI pop-ins.
+    /// Hold the last cell and stop. `ended` fires once at the end.
+    /// `play` restarts from cell 0.
     Once,
-    /// Bounce between the ends (cell `0` to cell `N-1` and back) and keep
-    /// playing: patrol pacing, bobbing pickups, swinging lanterns.
+    /// Bounce from cell 0 to cell N-1 and back. Keeps playing.
     PingPong,
 }
 
-/// Frame player for one animation strip.
+/// Frame player for one strip.
 ///
-/// Owns playback timing over a strip shape (`frames` cells at `fps`,
-/// copied from an [`AnimDef`] at construction). The game drives it with
-/// variable frame time and reads [`frame`](AnimPlayer::frame) to look up
-/// the atlas cell in the catalog:
+/// Holds timing over `frames` cells at `fps`. Game calls `advance(dt)`
+/// then reads `frame` for the atlas lookup:
 ///
 /// ```ignore
 /// player.advance(dt);
 /// let uv = catalog.uv("hero", player.frame() as i32).unwrap();
 /// ```
 ///
-/// Playback state at a glance:
+/// `play` starts or resumes. `pause` holds. `stop` resets to cell 0.
+/// `speed_scale` multiplies the rate. Negative plays in reverse.
+/// `frame` is the current cell. `frame_progress` is `0..1` to next.
 ///
-/// - [`play`](AnimPlayer::play) starts or resumes; [`pause`](AnimPlayer::pause)
-///   freezes in place; [`stop`](AnimPlayer::stop) resets to cell `0`.
-/// - `speed_scale` multiplies the rate: `1` is normal speed, `0.5` half
-///   speed, `2` double speed. A negative value plays in reverse and `0`
-///   freezes the frame while staying "playing" (see
-///   [`is_playing`](AnimPlayer::is_playing)).
-/// - [`frame`](AnimPlayer::frame) is the current cell; [`frame_progress`](AnimPlayer::frame_progress)
-///   is `0..1` toward the next cell (`1..0` in reverse).
-///
-/// **Note:** a player snapshots `frames`/`fps` at construction. Streaming a
-/// replacement definition for the same name needs a fresh player.
+/// Note: player copies `frames` and `fps` at construction.
 #[derive(Clone, Debug)]
 pub struct AnimPlayer {
     frames: u32,
     fps: f32,
-    /// Loop/Once: linear cell clock. PingPong: triangle phase in
-    /// `[0, 2 * (frames - 1))`, mapped to a cell in [`AnimPlayer::cell`].
+    /// Cell clock. PingPong holds triangle phase, folded in `cell`.
     pos: f32,
     playing: bool,
-    /// Signed rate. The sign is the single direction source: negative
-    /// plays in reverse, positive forward. There is no separate direction
-    /// flag; [`play_backwards`](AnimPlayer::play_backwards) negates this
-    /// (magnitude preserved) and [`play`](AnimPlayer::play) never changes
-    /// it.
+    /// Signed rate. Sign sets direction. `play` keeps it.
+    /// `play_backwards` negates it, magnitude kept.
     speed_scale: f32,
     loop_mode: LoopMode,
     finished: bool,
 }
 
 impl AnimPlayer {
-    /// New player over `def`'s strip with the given loop behavior.
-    ///
-    /// Starts paused at cell `0` with `speed_scale` of `1.0`. Call
-    /// [`play`](AnimPlayer::play) to start the clock.
+    /// New player over `def` strip. Paused at cell 0, rate 1.0.
     pub fn new(def: &AnimDef, loop_mode: LoopMode) -> Self {
         Self {
             frames: def.frames,
@@ -296,14 +262,9 @@ impl AnimPlayer {
         }
     }
 
-    /// Start (or resume) playing from the current position.
-    ///
-    /// Resuming a paused animation continues from the kept cell and
-    /// progress, in the current [`speed_scale`](AnimPlayer::speed_scale)
-    /// direction: `play` never changes the sign, so it resumes backwards
-    /// playback as backwards. Replaying a finished one-shot
-    /// ([`is_finished`](AnimPlayer::is_finished)) restarts it from cell
-    /// `0` first.
+    /// Start or resume from the current spot.
+    /// Finished one-shot restarts from cell 0 first.
+    /// Rate sign is kept, so reverse resumes in reverse.
     pub fn play(&mut self) {
         if self.finished {
             self.pos = 0.0;
@@ -312,14 +273,8 @@ impl AnimPlayer {
         self.playing = true;
     }
 
-    /// Play in reverse: forces a negative rate (magnitude preserved) and
-    /// resumes from the current cell.
-    ///
-    /// Jumps to the last cell first when stopped or after a finished
-    /// one-shot, so a fresh player starts at the end of the strip. To play
-    /// forward again, set a positive rate with
-    /// [`set_speed_scale`](AnimPlayer::set_speed_scale): direction follows
-    /// the rate sign alone.
+    /// Play in reverse. Forces negative rate, magnitude kept.
+    /// Fresh or finished player jumps to the last cell first.
     pub fn play_backwards(&mut self) {
         if (!self.playing || self.finished) && self.frames > 0 {
             self.pos = (self.frames.saturating_sub(1)) as f32;
@@ -329,44 +284,26 @@ impl AnimPlayer {
         self.playing = true;
     }
 
-    /// Pause, keeping the current cell and progress.
-    ///
-    /// [`play`](AnimPlayer::play) (or [`play_backwards`](AnimPlayer::play_backwards))
-    /// resumes from the exact same spot. See also [`stop`](AnimPlayer::stop),
-    /// which resets instead of holding.
+    /// Pause. Keeps cell and progress. `play` resumes from here.
     pub fn pause(&mut self) {
         self.playing = false;
     }
 
-    /// Stop and reset to cell `0`.
-    ///
-    /// Clears the finished flag and zeroes the progress. The
-    /// `speed_scale` (including its sign) is kept, so `play` after `stop`
-    /// resumes in the previous direction. See also
-    /// [`pause`](AnimPlayer::pause), which holds the position instead.
+    /// Stop and reset to cell 0. Rate sign is kept.
     pub fn stop(&mut self) {
         self.playing = false;
         self.pos = 0.0;
         self.finished = false;
     }
 
-    /// Speed multiplier for [`advance`](AnimPlayer::advance).
-    ///
-    /// `1.0` is normal speed, `0.5` half speed, `2.0` double speed. A
-    /// negative value plays in reverse; `0.0` freezes the frame while the
-    /// player stays "playing". Non-finite values (`NaN`, infinity) are
-    /// treated as `0.0` so a bad calculation pauses instead of corrupting
-    /// the clock.
-    ///
-    /// The sign is the only direction control: [`play_backwards`](AnimPlayer::play_backwards)
-    /// negates it (magnitude preserved) and [`play`](AnimPlayer::play)
-    /// never changes it, so there is no second flag to disagree with.
+    /// Speed multiplier for `advance`. Negative runs in reverse.
+    /// Zero freezes the frame while staying marked playing.
+    /// Non-finite input becomes 0.0.
     pub fn set_speed_scale(&mut self, s: f32) {
         self.speed_scale = if s.is_finite() { s } else { 0.0 };
     }
 
-    /// Current speed multiplier (see [`set_speed_scale`](AnimPlayer::set_speed_scale)).
-    /// Defaults to `1.0`.
+    /// Current speed multiplier. Default 1.0.
     pub fn speed_scale(&self) -> f32 {
         self.speed_scale
     }
@@ -490,7 +427,7 @@ pub struct Advance {
     /// sounds, particles) exactly once per cell.
     pub frame_changed: bool,
     /// Full laps ([`Loop`](LoopMode::Loop)) or bounces
-    /// ([`PingPong`](LoopMode::PingPong)) crossed by this advance — all
+    /// ([`PingPong`](LoopMode::PingPong)) crossed by this advance, all
     /// of them, even across hitches, so per-lap audio never drops laps.
     /// For [`Once`](LoopMode::Once): 1 on the finishing advance, else 0.
     pub wraps: u32,

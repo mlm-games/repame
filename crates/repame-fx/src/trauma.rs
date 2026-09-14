@@ -1,24 +1,22 @@
-//! Trauma shake: 0..1 impact memory with decay and a squared
-//! response, Perlin-noise offsets applied to rendering only (never to
-//! sim positions). Follows Bevy's `2d_screen_shake` example and the
-//! retired `ScreenEffectsConfig` numbers (`trauma_decay` 1.5).
+//! Trauma shake: 0..1 impact memory with decay and squared response.
+//! Perlin-noise offsets apply to rendering only, not sim positions.
+//! Default decay 1.5 drains full trauma in about 0.67 s.
 
 use bevy_ecs::prelude::*;
 use noise::{NoiseFn, Perlin};
 
-/// Screen-shake state. Plain data: the game owns one (resource, field,
-/// whatever fits) and maps [`Trauma::offset`] onto its camera.
+/// Screen-shake state. The game owns one and maps offsets onto its camera.
 #[derive(Clone, Debug, Resource)]
 pub struct Trauma {
     /// 0 (still) .. 1 (full shake). Clamped on add.
     pub amount: f32,
-    /// Per-second decay (1.5 drains full trauma in ~0.67 s).
+    /// Per-second decay (1.5 drains full trauma in about 0.67 s).
     pub decay_per_sec: f32,
     /// Max translation in px at full trauma.
     pub max_translation_px: f32,
     /// Max roll in radians at full trauma.
     pub max_roll_rad: f32,
-    /// Noise traversal speed (arbitrary units per second).
+    /// Noise traversal speed in noise units per second.
     pub noise_speed: f32,
     seed: u32,
 }
@@ -41,9 +39,8 @@ impl Trauma {
         Self::default()
     }
 
-    /// Non-default noise seed: per-run shake variation, or two
-    /// simultaneous sources that must not correlate. Same seed replays
-    /// the same offsets (deterministic like the default).
+    /// Non-default noise seed for uncorrelated sources.
+    /// Same seed replays the same offsets.
     pub fn with_seed(seed: u32) -> Self {
         Self {
             seed,
@@ -60,7 +57,7 @@ impl Trauma {
         self.amount = (self.amount + amount).clamp(0.0, 1.0);
     }
 
-    /// Decay over `ticks` (100 Hz). No-op at 0.
+    /// Decay over `ticks` (100 Hz).
     pub fn decay(&mut self, ticks: i32) {
         if ticks <= 0 {
             return;
@@ -68,9 +65,8 @@ impl Trauma {
         self.amount = (self.amount - self.decay_per_sec * ticks as f32 / 100.0).max(0.0);
     }
 
-    /// `(dx_px, dy_px, roll_rad)` at `time_secs` (wall or sim time).
-    /// Squared response: small hits barely move, big hits punch.
-    /// Deterministic for the same inputs (headless-stable).
+    /// `(dx_px, dy_px, roll_rad)` at `time_secs`. Squared response:
+    /// small hits move less, full hits use the full range.
     pub fn offset(&self, time_secs: f32) -> (f32, f32, f32) {
         let shake = self.amount * self.amount;
         if shake <= 0.0 {
@@ -88,8 +84,7 @@ impl Trauma {
         )
     }
 
-    /// World-space camera offset for repame `Camera2d`.
-    /// `units_per_pixel` and `zoom` match `Camera2d` fields.
+    /// World-space camera offset for a `Camera2d` with matching units.
     pub fn camera_offset(
         &self,
         time_secs: f32,

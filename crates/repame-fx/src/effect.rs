@@ -1,12 +1,10 @@
-//! Effect definitions: spawner + init + update + render in one
-//! serde struct (hanabi's modifier chain, flattened for fixed-tick CPU).
-//! Code-built today, `.fx.ron` files later without format changes.
+//! Effect definitions: spawner plus init, update, and render in one serde struct.
+//! Built from code today; `.fx.ron` files later without format change.
 
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 
-/// Base value plus symmetric jitter, sampled with any RNG.
-/// (hanabi `Value`, `bevy_particle_systems::JitteredValue`.)
+/// Base value plus symmetric jitter.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Jittered {
     pub base: f32,
@@ -28,11 +26,7 @@ impl Jittered {
 }
 
 /// Color keys over normalized life 0..1, lerped in linear RGBA.
-/// (hanabi `ColorOverLifetimeModifier`, enoki gradients.)
-///
-/// Keys must be sorted ascending by time; unsorted keys trip a
-/// `debug_assert` in [`sample`](Gradient::sample) (release builds walk
-/// forward and silently return the wrong color).
+/// Keys must be sorted ascending; unsorted keys trip a `debug_assert`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Gradient {
     pub keys: Vec<(f32, [f32; 4])>,
@@ -88,14 +82,11 @@ fn lerp_rgba(a: [f32; 4], b: [f32; 4], f: f32) -> [f32; 4] {
     ]
 }
 
-/// Size/alpha curve over life. Re-exported from upstream
-/// (`repose_core::animation::EaseKind`): one easing family for the UI
-/// framework and the sim-side effect defs, so `.fx.ron` curves and UI
-/// tweens can never disagree.
+/// Size and alpha curve over life. Shared with the UI tween family
+/// so `.fx.ron` curves and UI tweens use one easing set.
 pub use repose_core::animation::EaseKind;
 
-/// Spawn policy: continuous rate and/or one-shot burst cap.
-/// (hanabi `SpawnerSettings::rate`, enoki spawner state.)
+/// Spawn policy: continuous rate plus one-shot burst cap.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct SpawnerDef {
     /// Particles per second while active (0 = burst-only).
@@ -113,9 +104,7 @@ impl Default for SpawnerDef {
     }
 }
 
-/// Full effect: init (speed/lifetime/size jitter) + update
-/// (gravity/drag) + render (gradient/size curve). One struct from
-/// code today, from `.fx.ron` tomorrow.
+/// Full effect: init jitter plus gravity, drag, gradient, size curve.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EffectDef {
     pub spawner: SpawnerDef,
@@ -129,9 +118,7 @@ pub struct EffectDef {
     /// Atlas page sampled by this effect's particles (default 0).
     #[serde(default)]
     pub page: u32,
-    /// Normalized atlas sub-rect sampled by this effect's particles:
-    /// full page by default (solid tinted rects), a sprite cell for
-    /// textured particles (sparks, smoke puffs).
+    /// Atlas sub-rect: full page by default, one cell for textured puffs.
     #[serde(default = "uv_min_default")]
     pub uv_min: [f32; 2],
     #[serde(default = "uv_max_default")]

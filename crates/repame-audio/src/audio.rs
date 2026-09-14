@@ -1,9 +1,6 @@
 //! [`Audio`]: game-thread sound service.
-//!
-//! Owns the engine (when a device exists), the command link, bus mirrors,
-//! and  - as later steps land  - the bank, music director, and rig map.
-//! Games hold one `Audio`, call `play`/`music`/`rig_events` per frame,
-//! and pump [`Audio::update`].
+//! Owns the engine, command link, banks, music director, and rig map.
+//! Games hold one `Audio`, call `play` and `music` per frame, and pump update.
 
 use anyhow::Result;
 
@@ -24,8 +21,8 @@ pub struct Audio {
 }
 
 impl Audio {
-    /// Open the real backend. Bails soft without an output device  -
-    /// keep `Option<Audio>` (or [`Audio::noop`]) and skip sound.
+    /// Open the real backend. Bails without an output device, so callers
+    /// keep `Option<Audio>` or [`Audio::noop`] and skip sound.
     pub fn try_init() -> Result<Self> {
         let (game, thread) = audio_link();
         let engine = Engine::open(thread)?;
@@ -75,10 +72,9 @@ impl Audio {
         Ok(())
     }
 
-    /// Per-frame pump with real dt: drain voice completions, prune bank
-    /// accounting, advance the music duck envelope. Pair with
-    /// [`take_finished`](Self::take_finished) each frame: completions
-    /// accumulate until taken (each id is reported exactly once).
+    /// Per-frame pump with real dt: drain completions, prune bank
+    /// accounting, advance the music duck envelope. Each id is
+    /// reported once; pair with [`take_finished`](Self::take_finished).
     pub fn update(&mut self, dt_secs: f32) {
         let mut fresh = Vec::new();
         if let Some(link) = &self.link {
@@ -94,17 +90,9 @@ impl Audio {
         self.music.update(dt_secs);
     }
 
-    /// Voice ids that completed since the last call.
-    ///
-    /// Drains the internal completion queue: each id appears exactly once,
-    /// on the first call after its voice ends. Feed the result back into
-    /// bank/music accounting or your own completion-gated logic (play the
-    /// next line when the current one ends).
-    ///
-    /// Only natural completions appear here. Voices cut short by `stop`
-    /// are removed silently and never report, so logic that waits for a
-    /// completion must also handle the stopped path. Otherwise it waits
-    /// forever after a manual stop.
+    /// Voice ids that completed since the last call. Drains the queue.
+    /// Stopped voices report nothing, so completion-gated logic must
+    /// also handle the stopped path.
     pub fn take_finished(&mut self) -> Vec<u64> {
         std::mem::take(&mut self.finished)
     }
@@ -229,7 +217,7 @@ mod tests {
 
     #[test]
     fn init_fails_soft_without_device() {
-        // Headless CI has no device: must bail soft, never panic.
+        // Headless CI may lack a device: open must bail, not panic.
         let _ = Audio::try_init();
     }
 }

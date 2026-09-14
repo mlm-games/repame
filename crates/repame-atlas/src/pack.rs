@@ -1,11 +1,8 @@
-//! Shelf rectangle packer for one square page.
-//!
-//! Classic shelf algorithm: allocations stack left-to-right on shelves;
-//! a freed rect returns a gap to its shelf, and gaps are reused
-//! first-fit with adjacent-gap coalescing. Shelves never shrink, so
-//! workloads with stable working sets (sprite frames) don't fragment.
+//! Shelf packer for one square page.
+//! Rects stack left to right on shelves. Freed rects return
+//! first-fit gaps with neighbor coalescing. Shelves keep height.
 
-/// Placement of one allocation inside a page, in pixels.
+/// Placement of one allocation in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Placement {
     pub x: u32,
@@ -28,8 +25,7 @@ struct Shelf {
     gaps: Vec<Gap>,
 }
 
-/// One packable page. Not thread-safe; games drive it at load time or
-/// behind their own lock.
+/// One packable page. Drive at load time or behind a lock.
 #[derive(Clone, Debug)]
 pub struct ShelfPage {
     size: u32,
@@ -46,7 +42,7 @@ impl ShelfPage {
         }
     }
 
-    /// Try to place a `w`x`h` rect. Returns its placement on success.
+    /// Place a `w`x`h` rect. None when it does not fit.
     pub fn alloc(&mut self, w: u32, h: u32) -> Option<Placement> {
         if w == 0 || h == 0 || w > self.size || h > self.size {
             return None;
@@ -87,7 +83,7 @@ impl ShelfPage {
     fn place_on_shelf(&mut self, i: usize, w: u32, h: u32) -> Option<Placement> {
         let shelf = &mut self.shelves[i];
         debug_assert!(shelf.h >= h);
-        // Prefer reusing a freed gap over growing the cursor.
+        // Reuse a gap before growing the cursor.
         for (gi, gap) in shelf.gaps.iter_mut().enumerate() {
             if gap.w >= w {
                 let x = gap.x;
@@ -117,14 +113,13 @@ impl ShelfPage {
         })
     }
 
-    /// Return a placement to its shelf's gap list, coalescing neighbours.
+    /// Return a placement to its shelf gap list. Merges neighbors.
     pub fn free(&mut self, p: Placement) {
         let Some(shelf) = self.shelves.iter_mut().find(|s| s.y == p.y && s.h >= p.h) else {
             return;
         };
         shelf.gaps.push(Gap { x: p.x, w: p.w });
         shelf.gaps.sort_by_key(|g| g.x);
-        // Coalesce adjacent gaps.
         let mut merged: Vec<Gap> = Vec::with_capacity(shelf.gaps.len());
         for gap in shelf.gaps.drain(..) {
             if let Some(last) = merged.last_mut()
@@ -138,9 +133,7 @@ impl ShelfPage {
         shelf.gaps = merged;
     }
 
-    /// Allocated pixel area: cursor extent minus freed gaps (so reuse
-    /// lowers the count. Remaining difference to live entries is shelf
-    /// height waste, which shelves never reclaim).
+    /// Allocated area: cursor extent minus freed gaps.
     pub fn used_area(&self) -> u64 {
         let mut area = 0u64;
         for shelf in &self.shelves {
@@ -204,7 +197,7 @@ mod tests {
         let b = page.alloc(16, 16).unwrap();
         page.free(a);
         page.free(b);
-        // A 32-wide rect now fits where two 16-wide gaps merged.
+        // A 32-wide rect fits the merged gap.
         let c = page.alloc(32, 16).expect("merged gap reused");
         assert_eq!((c.x, c.y), (0, 0));
     }

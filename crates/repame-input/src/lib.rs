@@ -1,6 +1,5 @@
-//! Physical inputs (keys, mouse buttons, pad buttons, axes) bound to
-//! game actions. (using leafwing `InputMap`/`ActionState` as ref., flattened for
-//! fixed-tick CPU sims on raw `bevy_ecs` + `repose` input types.)
+//! Physical inputs bound to game actions: leafwing-style map flattened
+//! for fixed-tick CPU sims on raw `bevy_ecs` plus `repose` input types.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -16,8 +15,8 @@ pub use binding::Binding;
 pub use map::ActionMap;
 pub use state::ActionState;
 
-/// Action key bound. Games use their own enums (must be `Clone + Eq +
-/// `Hash`); a `&'static str` works for quick wiring.
+/// Action key. Games use their own enums (`Clone + Eq + Hash`);
+/// a `&'static str` works for quick wiring.
 pub trait ActionLike: Clone + Eq + Hash + Send + Sync + 'static {}
 
 impl<T: Clone + Eq + Hash + Send + Sync + 'static> ActionLike for T {}
@@ -27,9 +26,7 @@ pub fn init_state<A: ActionLike + std::fmt::Debug>(sim: &mut repame_sim::Sim, ma
     sim.world.insert_resource(ActionState::new(map));
 }
 
-/// Edge rollover at the end of each tick: register LAST in the sim
-/// schedule so `just_pressed`/`just_released` survive from compose-fed
-/// events through the tick's systems, then clear.
+/// Edge rollover at tick end: register last so edges survive the tick, then clear.
 pub fn end_tick_system<A: ActionLike + std::fmt::Debug>(mut state: ResMut<ActionState<A>>) {
     state.end_tick();
 }

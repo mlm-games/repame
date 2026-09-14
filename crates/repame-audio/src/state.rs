@@ -1,9 +1,7 @@
-//! [`AudioState`]: atomics shared by the game thread and the audio thread.
-//!
+//! [`AudioState`]: atomics shared by the game thread and audio thread.
 //! Transport flags, bus gains, voice-id generation, overrun counter.
-//! All `Relaxed` (same as the shipping DAW engine): these are signals,
-//! not synchronization points. Sample-accurate work travels through
-//! [`crate::command`] instead.
+//! All `Relaxed`: these are signals, not sync points. Sample work
+//! travels through [`crate::command`] instead.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -11,8 +9,7 @@ use crate::AudioChannel;
 
 /// Thread-shared audio state. Clone shares (wrap in `Arc` once).
 pub struct AudioState {
-    /// Master transport gate: the callback renders silence while false
-    /// (app suspend, Android lifecycle, explicit mute).
+    /// Master transport gate: the callback renders silence while false.
     pub playing: AtomicBool,
     /// Device sample rate in Hz. `0` until the stream opens.
     sample_rate: AtomicU32,
@@ -49,7 +46,7 @@ impl AudioState {
         }
     }
 
-    /// Allocate a fresh voice id (never `0`).
+    /// Allocate a fresh voice id (0 stays reserved).
     pub fn alloc_voice(&self) -> u64 {
         self.next_voice.fetch_add(1, Ordering::Relaxed)
     }

@@ -1,50 +1,20 @@
-//! Mesh snapshots: CPU-owned geometry the renderer uploads per frame.
-//!
-//! Long-term containers (glTF import, skinning, chunk meshing with dirty
-//! tracking) plug in behind these types; the renderer only ever sees
-//! vertex/index/tint/normal/uv lists, so the GPU path stays stable while
-//! the asset side grows.
-//!
-//! Base-color textures arrive decoded ([`textures`](crate::textures)):
-//! groups carry the material's document image in [`base_image`](Self::base_image),
-//! resolved to [`texture_page`](Self::texture_page) with uvs scaled into
-//! the placed rect by [`import_slice_textured`](crate::import_slice_textured)
-//! (static) or [`assign_page`](crate::SkinnedMesh::assign_page) (skinned).
-//!
-//! Lighting is opt-in per group: groups without normals draw flat
-//! (backwards-compatible with the original flat path); groups with normals
-//! are shaded by the frame's [`SceneLight`](crate::SceneLight) as
-//! `base * (ambient + diffuse * max(dot(N, L), 0))`.
-//!
-//! Textures are opt-in the same way: groups without uvs sample nothing
-//! (tint only); groups with uvs sample the batch texture array at
-//! [`MeshGroup::texture_page`], and the sample multiplies the tint before
-//! lighting. One page per group; multi-material scenes submit one group
-//! per material.
+//! Mesh snapshot: CPU-owned geometry uploaded per frame.
+//! Lighting and textures are opt-in per group.
+//! Normals off = flat tint. Uvs off = no texture sample.
 
 use glam::Vec3;
 
-/// Linear-space RGB triplets (authored flat, output raw).
+/// Linear RGB triplets.
 pub type Rgb = [f32; 3];
 
-/// Surface material for lit groups (PBR-lite: metallic/roughness/emissive —
-/// the three params rustbox sets on every material).
-///
-/// Flat groups ignore it; the defaults preserve the legacy look exactly
-/// (dielectric, fully rough so the specular term is zero, no emission).
-/// Backwards compatibility is by construction, pinned by
-/// `default_material_renders_legacy` in `render::tests`.
+/// Surface material for lit groups. Flat groups ignore it.
 #[derive(Clone, Copy, Debug)]
 pub struct Material {
-    /// 0 = dielectric (specular is white), 1 = metal (specular tinted by
-    /// the albedo). Also kills the diffuse term at 1 (metals have none).
+    /// 0 = dielectric, 1 = metal. Kills diffuse at 1.
     pub metallic: f32,
-    /// 0 = mirror, 1 = matte. The specular lobe is
-    /// `pow(max(dot(N, H), 0), mix(256, 8, roughness)) * (1 - roughness)`,
-    /// so 1.0 contributes nothing.
+    /// 0 = mirror, 1 = matte. Spec lobe narrows as this drops.
     pub roughness: f32,
-    /// Added unlit on top of the lit result (linear RGB, may exceed 1.0
-    /// for glow-ish pops — rustbox drives link colors at 2-4x).
+    /// Added unlit on top of lit result. May exceed 1.0.
     pub emissive: Rgb,
 }
 
@@ -58,87 +28,43 @@ impl Default for Material {
     }
 }
 
-/// One draw group: indexed triangles in world space with a per-vertex
-/// tint. Games rebuild these per frame from their sim state (see
-/// [`Frame3d::push`](crate::Frame3d::push)); chunked/voxel worlds submit
-/// one group per material and keep the lists across frames.
+/// One draw group: indexed triangles in world space with per-vertex tint.
 ///
-/// Normals are optional: when `normals` is empty the group draws flat
-/// (legacy path). When present it must match `positions` in length, and
-/// the frame's [`SceneLight`](crate::SceneLight) shades the group.
-///
-/// UVs are optional too: when `uvs` is empty the tint is the final color.
-/// When present it must match `positions` in length and `texture_page`
-/// selects the batch texture array layer; the texel multiplies the tint
-/// (then lighting applies to the product).
-///
-/// Transparency is per group (never per vertex): `transparent` selects
-/// the alpha-blend pass (no depth writes, back-to-front after all opaque
-/// groups); `alpha` scales every fragment's alpha (uniform fades like
-/// ghost previews); `alpha_cutoff` discards below a threshold (glTF
-/// `MASK`). All three default to opaque, so existing groups compile and
-/// draw untouched.
-///
-/// `material` (metallic/roughness/emissive) only affects lit groups; flat
-/// groups ignore it. One material per group: scenes with one material per
-/// primitive (the glTF norm) already submit that way.
+/// Normals opt in to lighting. Must match positions when present.
+/// Uvs opt in to texture. Must match positions when present.
+/// One material and one texture page per group.
 #[derive(Clone, Debug)]
 pub struct MeshGroup {
     /// World-space positions, Y-up right-handed.
     pub positions: Vec<[f32; 3]>,
-    /// Per-vertex tint (linear RGB). Without normals this is the final
-    /// color (shading already baked per face by the producer, see
-    /// [`shade_for_dir`]); with normals it is the albedo the light
-    /// modulates. With uvs the texture sample multiplies this first.
-    /// glTF `COLOR_0` multiplies in here at import (see
-    /// [`apply_vertex_colors`](super::gltf::apply_vertex_colors)).
+    /// Per-vertex tint. With normals this is albedo. Texel multiplies first.
+    /// glTF COLOR_0 folds in here at import.
     ///
-    /// Hazard: uvs without an uploaded page read empty texels (the batch
-    /// texture array starts zeroed, so the sample is black with alpha 0 —
-    /// a fully transparent quad that discards). Importers therefore keep
-    /// `texture_page` at 0 and games assign the drained page after
-    /// uploading (see [`import_slice_textured`](super::gltf::import_slice_textured)).
-    /// Either upload the page or strip the uvs — never submit both
-    /// unassigned uvs and an empty page.
+    /// Hazard: uvs without an uploaded page sample empty texels
+    /// (transparent black that discards). Upload the page or strip uvs.
     pub colors: Vec<[f32; 3]>,
-    /// Per-vertex normals (unit length, world space). Empty = unlit.
+    /// Per-vertex normals, unit length, world space. Empty = unlit.
     pub normals: Vec<[f32; 3]>,
-    /// Per-vertex texture coords (0..1, y-down like `repame-atlas` uvs).
-    /// Empty = untextured.
+    /// Per-vertex uvs, 0..1, y-down. Empty = untextured.
     pub uvs: Vec<[f32; 2]>,
     /// Texture array layer sampled when `uvs` is non-empty.
     pub texture_page: u32,
-    /// Document image index behind this group's base-color texture
-    /// (`None` = untextured material). Set by the glTF importers from the
-    /// material's base-color texture; the textured import
-    /// ([`import_slice_textured`](super::gltf::import_slice_textured))
-    /// resolves it to [`texture_page`](Self::texture_page) once the game
-    /// uploads the decoded pixels. Informational for procedural groups.
+    /// Document image behind base-color texture. None = untextured.
+    /// Textured import resolves this to `texture_page` after upload.
     pub base_image: Option<usize>,
-    /// Pick id for CPU ray picking (`0` = unpickable, skipped by
-    /// [`pick_ray`](crate::pick_ray)). One id per group: scenes with one
-    /// pickable object per group get per-object hits; bulk terrain stays
-    /// `0` and uses ground-plane picks instead.
+    /// Pick id for CPU ray picking. 0 = skipped.
     pub pick_id: u32,
-    /// Alpha-blend pass (`true`) or opaque pass (`false`, default).
-    /// Transparent groups skip depth writes but still depth-test, and
-    /// draw back-to-front after every opaque group.
+    /// Alpha-blend pass when true, opaque when false.
     pub transparent: bool,
-    /// Group alpha multiplier (0..1, default 1.0). Multiplies the texel
-    /// alpha for textured groups; fades untextured groups uniformly.
-    /// The opaque pass still writes 1.0 out, but `alpha_cutoff` below
-    /// gates on this value in both passes.
+    /// Group alpha multiplier, 0..1, default 1.0.
     pub alpha: f32,
-    /// Alpha cutoff (default 0.0 = keep everything). Fragments whose
-    /// final alpha falls below this discard, in both passes.
+    /// Alpha cutoff, default 0.0 = keep all. Discards below it.
     pub alpha_cutoff: f32,
     /// Surface material (lit groups only; flat groups ignore it).
     pub material: Material,
-    /// Triangle indices into `positions` / `colors` / `normals` / `uvs`.
+    /// Indices into positions/colors/normals/uvs.
     pub indices: Vec<u32>,
-    /// Opaque geometry occludes (`true`) or always draws (`false`, e.g.
-    /// flat ground overlays and editor gizmo quads that must stay visible
-    /// under grazing angles).
+    /// Opaque geometry occludes when true. False draws on top.
     pub depth_test: bool,
 }
 
@@ -171,11 +97,8 @@ impl MeshGroup {
         self.indices.len() / 3
     }
 
-    /// AABB of `positions` as `(min, max)`, or `None` when empty or
-    /// non-finite. NaN poisons every ordering, so finiteness is named
-    /// explicitly — the same never-panic contract as the batch validator.
-    /// Shared by frustum culling ([`SceneBatch`](super::render::SceneBatch))
-    /// and CPU picking ([`group_bounds`](super::pick::group_bounds)).
+    /// AABB as (min, max). None when empty or non-finite.
+    /// Used by frustum cull and picking.
     pub fn bounds(&self) -> Option<([f32; 3], [f32; 3])> {
         let mut verts = self.positions.iter();
         let first = Vec3::from(*verts.next()?);
@@ -194,12 +117,8 @@ impl MeshGroup {
         }
     }
 
-    /// Push one triangle (counter-clockwise when viewed from outside).
-    ///
-    /// Adds no normals and no uvs: only use this on groups that stay
-    /// unlit and untextured. Mixing `push_tri` with `push_tri_lit` or
-    /// textured pushes desyncs the attribute lists and the group is
-    /// dropped whole at batch time — pick one style per group.
+    /// Push triangle, CCW from outside. No normals, no uvs.
+    /// Use one push style per group; mixed styles drop at batch time.
     pub fn push_tri(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], color: Rgb) {
         let base = self.positions.len() as u32;
         self.positions.extend_from_slice(&[a, b, c]);
@@ -207,10 +126,7 @@ impl MeshGroup {
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
-    /// Push one textured triangle (counter-clockwise when viewed from
-    /// outside). Adds uvs but no normals: for unlit textured groups.
-    /// Mixing with untextured or lit pushes desyncs the attribute lists
-    /// and the group is dropped whole at batch time.
+    /// Push textured triangle, CCW from outside. No normals.
     pub fn push_tri_textured(
         &mut self,
         a: [f32; 3],
@@ -226,9 +142,7 @@ impl MeshGroup {
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
-    /// Push one triangle with an explicit face normal (unit length, world
-    /// space). Groups mixing `push_tri` and `push_tri_lit` are dropped at
-    /// batch time (all-or-nothing normals), so pick one per group.
+    /// Push triangle with face normal. Unit length, world space.
     pub fn push_tri_lit(
         &mut self,
         a: [f32; 3],
@@ -244,10 +158,7 @@ impl MeshGroup {
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
-    /// Push one triangle with a face normal and uvs (unit-length world
-    /// normal, 0..1 y-down uvs). For lit + textured groups. Mixing push
-    /// styles desyncs the attribute lists and the group is dropped whole
-    /// at batch time — pick one style per group.
+    /// Push triangle with face normal and uvs. For lit textured groups.
     pub fn push_tri_lit_textured(
         &mut self,
         a: [f32; 3],
@@ -265,13 +176,13 @@ impl MeshGroup {
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
-    /// Push one quad as two triangles (a, b, c) + (a, c, d).
+    /// Push quad as (a, b, c) + (a, c, d).
     pub fn push_quad(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3], color: Rgb) {
         self.push_tri(a, b, c, color);
         self.push_tri(a, c, d, color);
     }
 
-    /// Push one unlit textured quad (uvs in corner order a/b/c/d).
+    /// Push unlit textured quad. Uvs in corner order a/b/c/d.
     #[allow(clippy::too_many_arguments)] // same shape as `push_quad_lit_textured`
     pub fn push_quad_textured(
         &mut self,
@@ -286,7 +197,7 @@ impl MeshGroup {
         self.push_tri_textured(a, c, d, color, [uvs[0], uvs[2], uvs[3]]);
     }
 
-    /// Push one lit quad as two `push_tri_lit` triangles.
+    /// Push lit quad as two `push_tri_lit` triangles.
     pub fn push_quad_lit(
         &mut self,
         a: [f32; 3],
@@ -300,8 +211,8 @@ impl MeshGroup {
         self.push_tri_lit(a, c, d, color, normal);
     }
 
-    /// Push one lit + textured quad (uvs in corner order a/b/c/d).
-    #[allow(clippy::too_many_arguments)] // quad spec is position + tint + normal + uvs; one struct would churn call sites
+    /// Push lit textured quad. Uvs in corner order a/b/c/d.
+    #[allow(clippy::too_many_arguments)] // quad spec is position + tint + normal + uvs
     pub fn push_quad_lit_textured(
         &mut self,
         a: [f32; 3],
@@ -316,11 +227,8 @@ impl MeshGroup {
         self.push_tri_lit_textured(a, c, d, color, normal, [uvs[0], uvs[2], uvs[3]]);
     }
 
-    /// Push an axis-aligned shaded box centered at (`cx`, base `y0`, `cz`),
-    /// only emitting camera-facing planes (winding-independent, analytic).
-    /// Matches the resims starter-scene boxes: top at full tint, sides
-    /// shaded (see [`shade_for_dir`]).
-    #[allow(clippy::too_many_arguments)] // box spec is position + size + tint + eye, one struct would churn call sites
+    /// Push axis-aligned shaded box. Emits camera-facing planes only.
+    #[allow(clippy::too_many_arguments)] // box spec is position + size + tint + eye
     pub fn push_box(
         &mut self,
         cx: f32,
@@ -386,8 +294,7 @@ impl MeshGroup {
     }
 }
 
-/// Directional shade baked per face: top full, sides graded, bottom dim.
-/// (No sunlight sim yet; contrast is data, not material hacks.)
+/// Face shade factor: top 1.0, sides graded, bottom dim.
 pub fn shade_for_dir(dir: [i32; 3]) -> f32 {
     if dir == [0, 1, 0] {
         1.0
@@ -418,8 +325,7 @@ mod tests {
         };
         let eye = Vec3::new(0.0, 10.0, 20.0);
         g.push_box(0.0, 0.0, 0.0, 2.0, 2.0, 2.0, [1.0, 1.0, 1.0], eye);
-        // Top + the one facing side (+Z toward the eye at +z); ±X are
-        // edge-on and -Z faces away: 2 quads = 4 tris.
+        // Top + one facing side: 2 quads = 4 tris.
         assert_eq!(g.tri_count(), 4, "got {} tris", g.tri_count());
         assert!(g.positions.iter().all(|p| p.iter().all(|v| v.is_finite())));
     }

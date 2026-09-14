@@ -1,10 +1,6 @@
-//! CPU particles on fixed 100 Hz ticks: spawners plus one-shot
-//! bursts, integrated with gravity/drag, rendered as tinted rects
-//! through [`SpriteInstance`]. (hanabi's spawner + modifier chain and
-//! enoki's CPU-sim/instancing model, flattened for canvas sprites.)
-//!
-//! Step fns take whole ticks (`i32`), not a game clock type, so any
-//! fixed-step game can drive them.
+//! CPU particles on fixed 100 Hz ticks: spawners plus one-shot bursts.
+//! Motion integrates gravity and drag; output is a [`SpriteInstance`] list.
+//! Step fns take tick counts so any fixed-step game can drive them.
 
 use std::collections::HashMap;
 
@@ -16,9 +12,7 @@ use repame_sprite::SpriteInstance;
 
 use super::effect::EffectDef;
 
-/// One live particle. Age/life in 100 Hz ticks; deterministic.
-/// `spawner` tags the emitter for per-spawner caps (see
-/// [`tick_spawners`]); `None` for untracked one-shot bursts.
+/// One live particle. Age and life in 100 Hz ticks.
 #[derive(Clone, Debug)]
 pub struct Particle {
     pub pos: [f32; 2],
@@ -31,8 +25,7 @@ pub struct Particle {
     pub gradient: super::effect::Gradient,
     pub ease: super::effect::EaseKind,
     pub spawner: Option<Entity>,
-    /// Atlas page + sub-rect sampled for this particle, copied from the
-    /// def at spawn (textured sparks/puffs vs solid tinted rects).
+    /// Atlas page and sub-rect copied from the def at spawn.
     pub page: u32,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
@@ -44,8 +37,6 @@ impl Component for Particle {
 }
 
 /// Continuous emitter: rate accumulates into whole particles.
-/// Both caps are enforced by [`tick_spawners`]: the global `max_total`
-/// and the per-spawner [`SpawnerDef::max_alive`](super::effect::SpawnerDef::max_alive).
 #[derive(Clone, Debug)]
 pub struct Spawner {
     pub def: EffectDef,
@@ -59,9 +50,7 @@ impl Component for Spawner {
     type Mutability = Mutable;
 }
 
-/// Spawn one particle from a def at `(x, y)`. Returns the entity so
-/// the game can tag it (cleanup groups, layers). `spawner` tags the
-/// emitter for per-spawner caps; pass `None` for untracked bursts.
+/// Spawn one particle from a def at `(x, y)`. Returns the entity.
 pub fn spawn_particle(
     commands: &mut Commands,
     x: f32,
@@ -91,7 +80,7 @@ pub fn spawn_particle(
         .id()
 }
 
-/// One-shot burst of `count` particles (pea puffs, explosions).
+/// One-shot burst of `count` particles.
 pub fn burst(
     commands: &mut Commands,
     x: f32,
@@ -106,12 +95,9 @@ pub fn burst(
 }
 
 /// Advance emitter clocks; spawn whole particles at the def rate.
-/// `ticks` scales accumulation (0 pauses). Two caps: the global
-/// `max_total` on live count (runaway emitters can't flood the world)
-/// and each def's `spawner.max_alive` per spawner (a lone emitter can
-/// never exceed its own budget). Hitting either cap zeroes that
-/// spawner's accumulator, so emission resumes clean instead of
-/// burst-catching-up.
+/// Caps: global `max_total` plus per-spawner `max_alive`.
+/// A capped spawner resets its accumulator, so emission resumes
+/// at rate instead of catching up in one burst.
 pub fn tick_spawners(
     commands: &mut Commands,
     spawners: &mut Query<(Entity, &mut Spawner)>,
@@ -156,8 +142,8 @@ pub fn tick_spawners(
     }
 }
 
-/// Integrate motion, age, and despawn the spent. Gravity pulls +y
-/// (canvas y-down); drag is exponential per second.
+/// Integrate motion, age, and despawn the spent.
+/// Gravity pulls +y (canvas y-down); drag is exponential per second.
 pub fn step_particles(
     commands: &mut Commands,
     particles: &mut Query<(Entity, &mut Particle)>,
@@ -182,8 +168,7 @@ pub fn step_particles(
 }
 
 /// Map live particles to sprite instances: gradient color at life
-/// fraction, size shrinking along the ease curve. Takes an iterator
-/// so both systems (`query.iter()`) and tests can feed it.
+/// fraction, size shrinking along the ease curve.
 pub fn particle_sprites<'a>(particles: impl Iterator<Item = &'a Particle>) -> Vec<SpriteInstance> {
     particles
         .map(|p| {
@@ -207,10 +192,8 @@ pub fn particle_sprites<'a>(particles: impl Iterator<Item = &'a Particle>) -> Ve
         .collect()
 }
 
-/// Same as [`particle_sprites`], but untextured particles (full-page
-/// `0..1` UV on page 0) sample the shared white texel instead of random
-/// atlas art. Pass the [`Atlas::ensure_white`](repame_atlas::Atlas::ensure_white)
-/// rect; textured particles keep their own UVs.
+/// Same as [`particle_sprites`], but full-page UVs sample the shared
+/// white texel instead of atlas art. Textured particles keep own UVs.
 pub fn particle_sprites_with_white<'a>(
     particles: impl Iterator<Item = &'a Particle>,
     white: repame_atlas::UvRect,

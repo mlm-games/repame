@@ -1,7 +1,7 @@
 //! glTF embedded-image decode: buffer-view bytes in, tight sRGB RGBA8 out.
 //!
-//! The static importer ([`import_slice`](super::gltf::import_slice)) copies
-//! uvs through but leaves `texture_page` at 0 — it cannot decode images
+//! The static importer ([`import_slice`](crate::import_slice)) copies
+//! uvs through but leaves `texture_page` at 0, it cannot decode images
 //! (it only sees buffer data). This module closes that half of the seam
 //! for the common case: `.glb` (and inline-buffer `.gltf`) files whose
 //! base-color images live in buffer views. External URIs and data URIs
@@ -13,7 +13,7 @@
 //! (`image` PNG/JPEG): what the file claims determines the loader, with a
 //! magic-bytes fallback for mislabeled views. Output is always tight
 //! `w * h * 4` sRGB bytes in top-first row-major order, ready for a
-//! [`SceneUpload`](super::render::SceneUpload).
+//! [`SceneUpload`](crate::SceneUpload).
 
 use gltf::image::Source;
 
@@ -39,7 +39,7 @@ pub enum TextureImage {
 /// Why an image produced no pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageSkip {
-    /// The buffer view is out of range (corrupt file — skipped, logged).
+    /// The buffer view is out of range (corrupt file, skipped, logged).
     BadView,
     /// No loader claims these bytes (unknown encoding, empty view).
     UnsupportedEncoding,
@@ -54,7 +54,7 @@ pub enum ImageSkip {
 /// `Image::source()` unwraps the MIME label for buffer views (the spec
 /// requires it, so a MIME-less view is invalid glTF). Rather than panic
 /// the host app on such files, the call runs under `catch_unwind` and a
-/// MIME-less view resolves as undecodable-bytes (`None` MIME → magic-only
+/// MIME-less view resolves as undecodable-bytes (`None` MIME -> magic-only
 /// decode still attempted when the view range itself is readable).
 fn view_bytes<'d, 'b>(
     doc: &'d gltf::Document,
@@ -78,7 +78,7 @@ fn view_bytes<'d, 'b>(
 
 /// Decode one image's bytes to tight sRGB RGBA8. Accepts PNG/JPEG/WebP
 /// by magic bytes (the file's MIME label only selects between them when
-/// all fail to match — mislabeled views still decode). Anything else is
+/// all fail to match, mislabeled views still decode). Anything else is
 /// [`ImageSkip::UnsupportedEncoding`]; loader rejections are
 /// [`ImageSkip::DecodeFailed`]. WebP covers Godot exports that embed
 /// `image/webp` buffer views.
@@ -110,7 +110,7 @@ pub fn decode_image_bytes(
 /// [`gltf::import_slice`] returns, or [`gltf::import_buffers`] over a
 /// [`gltf::Gltf::from_slice_without_validation`] parse). External/data-URI
 /// images surface as [`TextureImage::External`]; undecodable views log a
-/// warning and are skipped (the material keeps its tint — never a panic,
+/// warning and are skipped (the material keeps its tint,
 /// never a hole in the returned order: indices still line up with the
 /// document's list).
 pub fn decode_document_images(
@@ -122,7 +122,7 @@ pub fn decode_document_images(
         // `source()` unwraps the MIME label (spec-required on buffer
         // views); a MIME-less view panics inside the `gltf` crate, so probe
         // it under `catch_unwind` and treat the panic as "not a URI, view
-        // unreadable" — the view-bytes path below still attempts a
+        // unreadable", the view-bytes path below still attempts a
         // magic-only decode when the range itself is readable.
         let is_uri = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             matches!(image.source(), Source::Uri { .. })
@@ -158,7 +158,7 @@ pub fn decode_document_images(
 /// independently here: external/data-URI images surface as
 /// [`TextureImage::External`] and undecodable views skip with a warning, so
 /// one corrupt texture never sinks the file's geometry or its other images.
-/// No filesystem access (slice imports resolve no paths — same rule as the
+/// No filesystem access (slice imports resolve no paths, same rule as the
 /// geometry importer).
 pub fn decode_slice_images(bytes: &[u8]) -> Result<Vec<TextureImage>, gltf::Error> {
     let gltf = gltf::Gltf::from_slice_without_validation(bytes)?;
@@ -179,19 +179,19 @@ pub struct PlacedPage {
 }
 
 /// A fully textured import: geometry with resolved pages, uploads for the
-/// batch array, and the image→page map for skinned meshes (whose pages the
+/// batch array, and the image->page map for skinned meshes (whose pages the
 /// game assigns via
 /// [`SkinnedMesh::assign_page`](super::skin::SkinnedMesh::assign_page)).
 #[derive(Clone, Debug)]
 pub struct TexturedImport {
     /// Meshes with `texture_page` assigned and uvs scaled into the placed
     /// rect. Groups whose base image had no pixels keep their tint with
-    /// uvs stripped (visible, untextured — never an invisible discard).
+    /// uvs stripped (draws untextured with tint).
     pub meshes: Vec<super::gltf::ImportedMesh>,
     /// Uploads for the batch texture array (feed `Frame3d::uploads` once;
     /// the game builds its `BatchDesc` with `layers = pages.len()`).
     pub uploads: Vec<super::render::SceneUpload>,
-    /// Document-image-index → packed page (decoded images only).
+    /// Document-image-index -> packed page (decoded images only).
     pub pages: std::collections::HashMap<usize, PlacedPage>,
     /// Layer edge the pages pack against (echo of the argument).
     pub layer_size: u32,
@@ -199,7 +199,7 @@ pub struct TexturedImport {
 
 /// Import `.glb` (or inline-buffer `.gltf`) bytes with base-color textures:
 /// geometry through the shared scene-graph walk (same output as
-/// [`import_slice`](super::gltf::import_slice), but parsed without image
+/// [`import_slice`](crate::import_slice), but parsed without image
 /// decoding so external/corrupt images never fail the mesh), pixels via
 /// [`decode_slice_images`], linked through each primitive's material.
 ///
@@ -210,9 +210,9 @@ pub struct TexturedImport {
 /// no wasted resampling). `layer_size` 0 falls back to 1 (degenerate, logs).
 ///
 /// Groups whose base image is external, undecodable, or absent keep their
-/// material tint with uvs stripped and a warning — the mesh draws flat
+/// material tint with uvs stripped and a warning, the mesh draws flat
 /// instead of discarding against an empty page (see the hazard note on
-/// [`MeshGroup`](super::mesh::MeshGroup) `uvs`).
+/// [`MeshGroup`](crate::MeshGroup) `uvs`).
 pub fn import_slice_textured(bytes: &[u8], layer_size: u32) -> Result<TexturedImport, gltf::Error> {
     let layer_size = layer_size.max(1);
     if layer_size == 1 {
@@ -273,7 +273,7 @@ pub fn import_slice_textured(bytes: &[u8], layer_size: u32) -> Result<TexturedIm
                 None => {
                     if group.base_image.is_some() && !group.uvs.is_empty() {
                         log::warn!(
-                            "gltf textures: no pixels for image {} — stripping uvs (tint fallback)",
+                            "gltf textures: no pixels for image {}, stripping uvs (tint fallback)",
                             group.base_image.unwrap_or(usize::MAX)
                         );
                         group.uvs.clear();
@@ -291,7 +291,7 @@ pub fn import_slice_textured(bytes: &[u8], layer_size: u32) -> Result<TexturedIm
 }
 
 /// Fit `w`x`h` RGBA into a `layer_size` layer: downscale aspect-preserving
-/// when larger (never upscale — small images upload native and uvs scale
+/// when larger (never upscale, small images upload native and uvs scale
 /// instead, so no resampling blur on pixel-art sources).
 fn fit_to_layer(w: u32, h: u32, rgba: &[u8], layer_size: u32) -> (u32, u32, Vec<u8>) {
     let w = w.max(1);
@@ -533,7 +533,7 @@ mod tests {
         let glb = textured_quad_gltf(&red_green_png(), 0, true);
         let imported = import_slice_textured(&glb, 4).expect("textured import parses");
         assert_eq!(imported.layer_size, 4);
-        // One decoded image → one page, upload 2x1 native (no upscale).
+        // One decoded image -> one page, upload 2x1 native (no upscale).
         assert_eq!(imported.pages.len(), 1);
         let placed = imported.pages[&0];
         assert_eq!((placed.page, placed.placed_w, placed.placed_h), (0, 2, 1));
@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(up.rgba.as_slice(), &[255, 0, 0, 255, 0, 255, 0, 255]);
         // Group: page assigned, uvs scaled into the placed rect
         // (2/4 wide, 1/4 tall), tint kept from the base-color factor.
-        // (Import flips v first, then the pack scales: [1,1] → [1,0] →
+        // (Import flips v first, then the pack scales: [1,1] -> [1,0] ->
         // [0.5,0.0].)
         assert_eq!(imported.meshes.len(), 1);
         let g = &imported.meshes[0].groups[0];
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn texcoord_selects_the_material_set() {
-        // texCoord 1 → the half-quad set: [0.5,0.5] flips to [0.5,0.5]
+        // texCoord 1 -> the half-quad set: [0.5,0.5] flips to [0.5,0.5]
         // (v=0.5 is self-mirroring) then scales to [0.25,0.125].
         let glb = textured_quad_gltf(&red_green_png(), 1, true);
         let imported = import_slice_textured(&glb, 4).expect("parses");
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn oversize_image_downscales_aspect_preserving() {
-        // 2x1 source into a 1px layer: scale 0.5 → 1x1... 1x1 min clamps.
+        // 2x1 source into a 1px layer: scale 0.5 -> 1x1... 1x1 min clamps.
         // Use layer 1 directly: placed must fit and stay proportional.
         let glb = textured_quad_gltf(&red_green_png(), 0, true);
         let imported = import_slice_textured(&glb, 1).expect("parses");

@@ -1,9 +1,6 @@
-//! [`RigAudio`]: renamite rig-event strings -> bank cues.
-//!
-//! Rigs author sound (`EventKey` frames like `footstep`/`bite` in
-//! `zombie.ren`); this maps event names to cues per rig (plus a global
-//! fallback) and forwards each tick's [`events`](https://github.com/mlm-games/renamite)
-//! slice into the bank. Zero game code per animation.
+//! [`RigAudio`]: rig-event strings to bank cues.
+//! Rigs author sound as event frames; this routes event names to cues per
+//! rig plus a global fallback, then forwards each tick into the bank.
 
 use std::collections::HashMap;
 
@@ -21,8 +18,7 @@ impl RigAudio {
         Self::default()
     }
 
-    /// Route one rig event to a cue (`rig` names the animation set,
-    /// e.g. `"zombie"`).
+    /// Route one rig event to a cue.
     pub fn map_event(&mut self, rig: &str, event: &str, cue: &str) {
         self.rigs
             .entry(rig.to_string())
@@ -44,9 +40,7 @@ impl RigAudio {
             .map(String::as_str)
     }
 
-    /// Forward one tick's rig events into cue plays.
-    /// Returns started voice ids (unmapped events and throttled or
-    /// unloaded cues contribute nothing).
+    /// Forward one tick of rig events into cue plays. Returns voices.
     pub fn sync(&mut self, bank: &mut SoundBank, rig: &str, events: &[String]) -> Vec<u64> {
         let cues: Vec<String> = events
             .iter()

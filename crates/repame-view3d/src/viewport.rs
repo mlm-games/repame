@@ -2,8 +2,8 @@
 //!
 //! Same split as `repame-sprite` `Viewport2d` and resims `Viewport3d`:
 //! camera state lives in game signals, never in the renderer. The UI builds
-//! a [`Frame3d`] per frame (plain data, cheap to rebuild during
-//! composition) and mounts [`Viewport3d`], which draws the snapshot through
+//! a [`Frame3d`] per frame (plain data, rebuilt during composition) and
+//! mounts [`Viewport3d`], which draws the snapshot through
 //! a [`SceneBatch`] and reports orbit gestures + ground clicks back.
 
 use std::rc::Rc;
@@ -27,13 +27,13 @@ use super::render::{paint_scene_with_id, prepare_scene_with_id};
 /// Framing contract (single source of truth): the GPU camera uniform is
 /// `cam.view_proj(aspect)` where `aspect = viewport_w / viewport_h` from
 /// the painted rect; picks invert through the same camera via
-/// [`OrbitCamera::screen_ray`]. One camera, two consumers — they cannot
+/// [`OrbitCamera::screen_ray`]. One camera, two consumers, they cannot
 /// disagree.
 ///
 /// Textures ride the same snapshot: [`Frame3d::uploads`] feeds the batch
 /// texture array once per frame (games drain their image/atlas source
 /// here), and each group samples one page (see
-/// [`MeshGroup`](super::mesh::MeshGroup) `texture_page`).
+/// [`MeshGroup`] `texture_page`).
 #[derive(Clone, Debug)]
 pub struct Frame3d {
     pub cam: OrbitCamera,
@@ -45,7 +45,7 @@ pub struct Frame3d {
     pub uploads: Vec<SceneUpload>,
     /// Batch texture shape the groups pack against. Must match the batch
     /// the viewport draws through (`Viewport3d` takes it explicitly, so
-    /// mismatches fail at the call site, not silently on the GPU).
+    /// mismatches fail at the call site).
     pub desc: BatchDesc,
     /// Frame light for groups carrying normals. Flat groups ignore it.
     pub light: SceneLight,
@@ -88,13 +88,13 @@ impl Frame3d {
         self.groups.push(group);
     }
 
-    /// Append cached chunk geometry (see [`ChunkCache`](super::chunk::ChunkCache)):
+    /// Append cached chunk geometry (see [`ChunkCache`](crate::ChunkCache)):
     /// validated groups copy into the snapshot alongside dynamic content.
-    /// Deterministic when the caller passes [`ChunkCache::draws`] order
+    /// Deterministic when the caller passes [`draws`](super::chunk::ChunkCache::draws) order
     /// (chunk-sorted) first.
     ///
     /// Malformed cached groups are dropped with a warning (same validators
-    /// as the batch): a stale or hand-built cache entry can't poison the
+    /// as the batch): a stale or hand-built cache entry fails validation here
     /// frame.
     pub fn extend_chunks<'a>(
         &mut self,
@@ -136,13 +136,13 @@ pub enum View3dEvent {
     MeshClick { pick_id: u32, point: [f32; 3] },
     /// Cursor pick under pointer-move: `Some` when a pickable group is
     /// under the cursor, else the ground-plane fallback. Emitted per move
-    /// event (cheap AABB early-out; unpickable scenes stay free).
+    /// event (AABB early-out; unpickable scenes cost nothing).
     HoverMesh {
         pick_id: Option<u32>,
         x: f32,
         z: f32,
     },
-    /// Cursor ground point on move (cheap hover readout; `None` when the
+    /// Cursor ground point on move (`None` when the
     /// ray misses the plane).
     Hover { x: Option<f32>, z: Option<f32> },
 }
@@ -154,7 +154,7 @@ pub const CLICK_SLOP_PX: f32 = 12.0;
 
 /// Resolve one pointer position to a click: `MeshClick` when a pickable
 /// group is nearest along the ray, else `GroundClick` when the ray reaches
-/// the plane (and the mesh isn't closer). Pure function of the snapshot,
+/// the plane (and the mesh is not closer). Function of the snapshot only,
 /// shared by the pointer-up handler and tests.
 fn resolve_click(
     cam: &OrbitCamera,
@@ -213,11 +213,11 @@ struct DragState {
 /// size ahead of `prepare` (resizes take effect the same frame, like the
 /// 2D viewport); `paint` re-publishes authoritatively from its callback
 /// info. Picks invert through the latest publish at event time, so picks
-/// and content stay glued — including under camera motion.
+/// and content stay glued, including under camera motion.
 ///
 /// `batch_desc` must match `input.desc` (the texture shape the groups
-/// pack against): the batch is keyed on it and rebuilds — dropping
-/// texture contents — when it changes, exactly like the sprite batch.
+/// pack against): the batch is keyed on it and rebuilds, dropping
+/// texture contents, when it changes, exactly like the sprite batch.
 #[allow(non_snake_case)] // Repose view convention (cf. resims `Viewport3d`).
 pub fn Viewport3d(
     input: Frame3d,
@@ -229,7 +229,7 @@ pub fn Viewport3d(
     let batch_id: String = batch_id.into();
     // One shared snapshot: picks and the GPU payload read through the same
     // `Arc`, so per-frame composition clones no geometry (chunked scenes
-    // stay free here; the payload upload is the only copy, on the GPU
+    // no group clones here; the payload upload is the only copy, on the GPU
     // thread). `Rc` would do for the UI closures, but the payload needs
     // `Send + Sync`, so `Arc` serves both.
     let input = std::sync::Arc::new(input);
@@ -240,8 +240,8 @@ pub fn Viewport3d(
     );
     let draw_input = input.clone();
     let draw_id = batch_id.clone();
-    // Picks read through the shared snapshot — no per-frame group clones
-    // (chunked scenes stay free here). Camera + groups for picks are the
+    // Picks read through the shared snapshot, no per-frame group clones
+    // (no per-frame group clones). Camera and groups for picks are the
     // same values the GPU payload uploads, so content and picks stay glued.
     // Geometry still inverts through the latest painted publish at event
     // time (see `ViewportGeom` timing below).
@@ -361,7 +361,7 @@ pub fn Viewport3d(
 
 /// One painted frame's geometry: the viewport size the GPU camera used.
 /// Picks invert through this (same aspect), so content and picks stay
-/// glued — including under camera motion, since picks read the latest
+/// glued, including under camera motion, since picks read the latest
 /// publish at event time.
 ///
 /// Timing: layout publishes a placeholder ahead of `prepare` (resizes
@@ -568,7 +568,7 @@ mod tests {
         };
         // Top edge: with a near-horizontal camera the ray runs parallel
         // to the ground and the slab top is edge-on, so neither mesh nor
-        // plane is reachable there in practice — the resolver returns
+        // plane is reachable there in practice, the resolver returns
         // None instead of inventing a click.
         let event = resolve_click(&cam, [800.0, 600.0], [400.0, 4.0], &[]);
         assert!(

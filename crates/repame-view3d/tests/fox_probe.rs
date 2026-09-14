@@ -73,7 +73,7 @@ fn morph_stress_imports_and_blends() {
     let mid = track.sample(track.duration() / 2.0);
     assert_eq!(mid.len(), 8);
     assert!(mid.iter().all(|w| (0.0..=1.0).contains(w)), "{mid:?}");
-    // Apply the end weights (all zeros here — Pulse returns to rest):
+    // Apply the end weights (all zeros here. Pulse returns to rest):
     // with nonzero weights the blend must move verts. This fixture's
     // deltas are all zeros (min == max == 0), so assert the no-op
     // direction: zero deltas never move verts even at full weight.

@@ -1,4 +1,4 @@
-//! CPU skinning behind [`MeshGroup`](super::mesh::MeshGroup).
+//! CPU skinning behind [`MeshGroup`].
 use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3, Vec4};
@@ -72,7 +72,7 @@ pub enum Interp {
 
 /// Node animation track: timestamped TRS keys sampled per frame.
 /// Times are seconds, ascending; out-of-range samples clamp (hold first /
-/// last — matches `AnimPlayer::Once` hold semantics in `repame-anim`).
+/// last, matches `AnimPlayer::Once` hold semantics in `repame-anim`).
 #[derive(Clone, Debug, Default)]
 pub struct NodePose {
     pub times: Vec<f32>,
@@ -357,7 +357,7 @@ impl Skeleton {
     /// Compose world matrices for every node: `world[node]` is
     /// `world[parent] * local[node]`, where `local` is the animated pose
     /// when present and the bind local otherwise. Missing parents
-    /// (untracked roots) compose from identity — same fallback as the bind
+    /// (untracked roots) compose from identity, same fallback as the bind
     /// pose.
     pub fn world_matrices(&self, locals: &HashMap<usize, JointPose>) -> HashMap<usize, Mat4> {
         let mut world: HashMap<usize, Mat4> = HashMap::new();
@@ -411,7 +411,7 @@ pub enum SkeletonLoop {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SkeletalAdvance {
     /// True when the clock crossed into a new animation time (always true
-    /// on a real advance — the mesh must re-bake; false only on no-ops).
+    /// on a real advance, the mesh must re-bake; false only on no-ops).
     pub pose_changed: bool,
     /// Full laps (Loop) or bounces (PingPong) crossed, even across
     /// hitches, so per-lap effects never drop laps. Once: 1 on finish.
@@ -425,7 +425,7 @@ impl SkeletalAdvance {
 }
 
 /// Playback clock over one [`Animation`]: `pos` seconds, signed
-/// `speed_scale` (sign = direction, like `repame-anim` `AnimPlayer` — no
+/// `speed_scale` (sign = direction, like `repame-anim` `AnimPlayer`, no
 /// separate direction flag), Loop/Once/PingPong, `advance(dt)` with
 /// wraps/ended. The game samples joint matrices + morph weights from the
 /// player each frame and bakes [`MeshGroup`]s via [`SkinnedMesh::pose`]
@@ -620,7 +620,7 @@ impl SkeletonPlayer {
 
 /// One mesh's morph targets: position/normal deltas per target, parsed
 /// once by [`import_morphs`]. [`apply`](MorphSet::apply) blends them onto
-/// a baked [`MeshGroup`] with per-target weights — CPU-side, no GPU morph
+/// a baked [`MeshGroup`] with per-target weights. CPU-side, no GPU morph
 /// path (few targets, few verts, per-frame blend).
 #[derive(Clone, Debug, Default)]
 pub struct MorphSet {
@@ -680,7 +680,7 @@ impl MorphSet {
 
 /// Build the scene-graph skeleton: parent links + bind locals for every
 /// node in every scene of the file. Bind locals come from the node
-/// TRS/matrix exactly as [`gltf`](super::gltf) composes them for static
+/// TRS/matrix exactly as [`gltf`] composes them for static
 /// import, so animated and static paths agree on the bind pose.
 pub fn import_skeleton(bytes: &[u8]) -> Result<Skeleton, gltf::Error> {
     let (doc, _, _) = gltf::import_slice(bytes)?;
@@ -732,7 +732,7 @@ fn collect_skeleton(
 /// composition in [`Animation::joint_matrices`].
 ///
 /// `transparent`/`alpha`/`alpha_cutoff` carry the material's alpha mode
-/// (see [`alpha_mode`](super::gltf::alpha_mode)): [`pose`](SkinnedMesh::pose)
+/// (see [`alpha_mode`](crate::alpha_mode)): [`pose`](SkinnedMesh::pose)
 /// copies them into every baked group, so animated BLEND/MASK materials
 /// fade and cut out exactly like static ones.
 #[derive(Clone, Debug, Default)]
@@ -751,7 +751,7 @@ pub struct SkinnedMesh {
     pub texture_page: u32,
     /// Document image index behind the base-color texture (`None` =
     /// untextured material). Games resolve it through the textured import's
-    /// page map and call [`assign_page`](SkinnedMesh::assign_page) once —
+    /// page map and call [`assign_page`](SkinnedMesh::assign_page) once  -
     /// the baked pose copies `texture_page` per frame, so the bind mesh is
     /// the single place to set it.
     pub base_image: Option<usize>,
@@ -783,7 +783,7 @@ impl SkinnedMesh {
     /// weights) hold bind pose.
     ///
     /// Transparency/alpha/cutoff carry through from the bind mesh (usually
-    /// identity/opaque — see [`SkinnedMesh`] defaults); the group is
+    /// identity/opaque, see [`SkinnedMesh`] defaults); the group is
     /// otherwise rebuilt per frame from the pose.
     pub fn pose(&self, joint_matrices: &[Mat4]) -> MeshGroup {
         let mut group = MeshGroup {
@@ -857,10 +857,10 @@ impl SkinnedMesh {
     /// Assign a packed texture page to the bind mesh: sets `texture_page`
     /// and scales uvs into the placed rect (`placed_w`/`placed_h` inside a
     /// `layer_size` layer at the origin). The baked pose copies both per
-    /// frame, so call once after import — never per frame. Uv-less meshes
+    /// frame, so call once after import, never per frame. Uv-less meshes
     /// only record the page (nothing to scale); callers with no pixels for
     /// this mesh should clear `uvs` instead (see
-    /// [`import_slice_textured`](super::gltf::import_slice_textured)).
+    /// [`import_slice_textured`](crate::import_slice_textured)).
     pub fn assign_page(&mut self, page: u32, placed_w: u32, placed_h: u32, layer_size: u32) {
         self.texture_page = page;
         if self.uvs.is_empty() || layer_size == 0 {
@@ -876,7 +876,7 @@ impl SkinnedMesh {
 }
 
 /// Parse every skinned primitive in `bytes` into [`SkinnedMesh`]s (bind
-/// pose). Unskinned primitives are skipped (the [`gltf`](super::gltf)
+/// pose). Unskinned primitives are skipped (the [`gltf`]
 /// importer owns those). Joint slots follow skin joint order; node indices
 /// map through `node_to_joint` for animation tracks.
 pub fn import_skinned(bytes: &[u8]) -> Result<Vec<SkinnedMesh>, gltf::Error> {
@@ -1018,7 +1018,7 @@ pub fn import_skinned(bytes: &[u8]) -> Result<Vec<SkinnedMesh>, gltf::Error> {
                     }
                 } else {
                     log::warn!(
-                        "gltf skin: COLOR_0 len {} != {} verts — skipping",
+                        "gltf skin: COLOR_0 len {} != {} verts, skipping",
                         rgba.len(),
                         colors.len()
                     );
@@ -1090,7 +1090,7 @@ struct TrackKey {
 /// (in-tangent, value, out-tangent) per key: the middle third drives values,
 /// the outer thirds drive tangents. `weights` (morph) outputs arrive
 /// `target_count`-wide per key and split per mesh. Unknown targets skip
-/// silently — never a panic, never partial tracks.
+/// silently; tracks stay whole.
 pub fn import_animations(bytes: &[u8]) -> Result<Vec<Animation>, gltf::Error> {
     let (doc, buffers, _) = gltf::import_slice(bytes)?;
     let mesh_targets: Vec<usize> = doc
@@ -1476,14 +1476,14 @@ pub fn import_morphs(bytes: &[u8]) -> Result<Vec<MorphSet>, gltf::Error> {
 ///
 /// `group` is baked in mesh-local space (an unskinned prop: a hat, a held
 /// gun, a pickup marker). `node` is the joint-space world matrix of the
-/// attach joint (from [`Skeleton::world_matrices`] — usually animated, so
+/// attach joint (from [`Skeleton::world_matrices`], usually animated, so
 /// call this per frame after sampling the player), and `offset` is the
 /// prop's local transform relative to the bone (identity = prop origin on
 /// the joint). Returns the group moved into world space, in place.
 ///
 /// Attributes (normals rotate, uvs untouched), material, pick id, and
 /// transparency ride along: the prop keeps its look and stays clickable.
-/// The prop must be rigid (no per-vertex skinning) — the whole group takes
+/// The prop must be rigid (no per-vertex skinning), the whole group takes
 /// one matrix.
 pub fn attach_to_joint(group: &mut MeshGroup, node: &Mat4, offset: &Mat4) {
     let m = *node * *offset;

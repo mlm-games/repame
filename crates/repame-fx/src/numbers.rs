@@ -1,5 +1,4 @@
-//! Damage floaters: rising text pops (`+25`, `1800`) rendered by
-//! the game through its canvas text path. Plain data + step fn.
+//! Damage floaters: rising text rendered through the canvas text path.
 
 use repame_sim::bevy_ecs::component::{Mutable, StorageType};
 use repame_sim::bevy_ecs::prelude::*;

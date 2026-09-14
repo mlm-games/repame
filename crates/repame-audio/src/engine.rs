@@ -1,15 +1,8 @@
 //! [`Engine`]: cpal output plus the audio-thread voice mixer.
-//!
-//! The stream callback owns an `EngineCore` (voices + thread link):
-//! each block it drains [`RealtimeCommand`]s with `try_recv`, renders
-//! when [`AudioState::playing`] holds, and reports completions as
-//! [`EngineEvent::Finished`]. Host selection is explicit on wasm
-//! (`AudioWorklet`, the only low-latency web host); elsewhere the
-//! default host covers desktop and Android AAudio. F32 stereo at
-//! 48 kHz is preferred, anything else is adapted, absence bails soft.
-//!
-//! [`render_block`] is a free function so the mixer is unit-testable
-//! without any audio device.
+//! The stream callback owns an `EngineCore`: each block drains commands,
+//! renders while playing, and reports completions. F32 stereo at 48 kHz
+//! is preferred; absence bails without a device.
+//! [`render_block`] is testable without any audio device.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,8 +36,7 @@ struct FadeAnim {
     t: f32,
 }
 
-/// Audio-thread core: voices plus the thread endpoint. Lives inside the
-/// cpal callback; the game thread never touches it.
+/// Audio-thread core: voices plus the thread endpoint.
 pub(crate) struct EngineCore {
     link: ThreadAudioLink,
     voices: HashMap<u64, Voice>,
@@ -65,9 +57,7 @@ fn pan_gains(pan: f32) -> (f32, f32) {
     (angle.cos(), angle.sin())
 }
 
-/// Drain one command batch, then mix all voices into `out` (added, so
-/// zero it first). `out_channels` is 1 or 2; extra device channels are
-/// left silent by the caller.
+/// Drain one command batch, then mix all voices into `out`.
 pub(crate) fn render_block(core: &mut EngineCore, out: &mut [f32], out_channels: usize) {
     while let Ok(cmd) = core.link.rx.try_recv() {
         match cmd {
@@ -135,8 +125,7 @@ pub(crate) fn render_block(core: &mut EngineCore, out: &mut [f32], out_channels:
             finished.push(*id);
             continue;
         }
-        // Gain ramps advance first so the mix below uses this block's gain.
-        // Ramping to zero finishes the voice like a natural end.
+        // Gain ramps advance first so the mix below uses this block gain.
         if let Some(f) = &mut voice.fade {
             f.t += block_secs;
             let k = (f.t / f.secs).min(1.0);
@@ -206,8 +195,7 @@ pub(crate) fn render_block(core: &mut EngineCore, out: &mut [f32], out_channels:
     }
 }
 
-/// cpal stream owner. Dropping stops the callback; the game thread keeps
-/// the [`ThreadAudioLink`]'s game half for commands and events.
+/// cpal stream owner. Dropping stops the callback.
 pub struct Engine {
     _stream: cpal::Stream,
     rate: u32,
@@ -215,9 +203,8 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Open the default output (AudioWorklet host on wasm) and start the
-    /// callback. Bails soft when no device exists  - callers keep going
-    /// silent, never crash.
+    /// Open the default output and start the callback.
+    /// Bails without a device; callers continue silent.
     pub fn open(link: ThreadAudioLink) -> Result<Self> {
         // Wasm: explicit AudioWorklet host when atomics are on (the only
         // low-latency web host); default host otherwise so plain checks
@@ -360,7 +347,7 @@ mod tests {
         }
     }
 
-    /// Flat-envelope sine (no decay): block energies scale exactly with gain.
+    /// Flat-envelope sine so block energies scale with gain.
     fn flat_cmd(voice: u64, freq: f32, pan: f32) -> PlayCmd {
         let frames: Vec<f32> = (0..4410)
             .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / 44100.0).sin() * 0.5)
@@ -530,7 +517,7 @@ mod tests {
     #[test]
     fn open_never_panics_without_device() {
         let (game, thread) = audio_link();
-        // Headless CI has no device: must bail soft, never panic.
+        // Headless CI may lack a device: open must bail, not panic.
         let _ = (game, Engine::open(thread));
     }
 }

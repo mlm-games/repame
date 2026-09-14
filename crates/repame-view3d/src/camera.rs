@@ -1,14 +1,11 @@
-//! Orbit camera: yaw/pitch/distance around a ground target, Y-up right-handed.
-//!
-//! Pure math (glam only), shared by the renderer (view-projection uniform)
-//! and picking ([`screen_ray`][OrbitCamera::screen_ray]). Ported from the
-//! resims `Viewport3d` orbit camera, whose unit tests pinned the behavior.
+//! Orbit camera: yaw/pitch/dist around ground target. Y-up, right-handed.
+//! Math only (glam). Shared by render uniform and picking.
 
 use glam::camera::rh::proj::opengl::perspective as perspective_gl;
 use glam::camera::rh::view::look_at_mat4;
 use glam::{Mat4, Vec2, Vec3};
 
-/// Maps OpenGL-style NDC depth [-1, 1] to wgpu [0, 1] (learn-wgpu pattern).
+/// Maps OpenGL NDC depth [-1, 1] to wgpu [0, 1].
 pub const OPENGL_TO_WGPU: Mat4 = Mat4::from_cols(
     glam::Vec4::new(1.0, 0.0, 0.0, 0.0),
     glam::Vec4::new(0.0, 1.0, 0.0, 0.0),
@@ -16,19 +13,14 @@ pub const OPENGL_TO_WGPU: Mat4 = Mat4::from_cols(
     glam::Vec4::new(0.0, 0.0, 0.5, 1.0),
 );
 
-/// Near-plane distance for CPU-side work. Must match [`OrbitCamera::proj_matrix`].
+/// Near plane. Matches [`OrbitCamera::proj_matrix`].
 pub const NEAR: f32 = 0.5;
 
-/// Far-plane distance for [`OrbitCamera::proj_matrix`].
+/// Far plane for [`OrbitCamera::proj_matrix`].
 pub const FAR: f32 = 2000.0;
 
-/// Orbit camera around a ground target. Angles in radians.
-///
-/// Owned by the game (Repose signals), copied into the [`Frame3d`](crate::Frame3d)
-/// snapshot per frame. Gesture deltas arrive as [`View3dEvent`](crate::View3dEvent)s
-/// from [`Viewport3d`](crate::Viewport3d); the game applies them with
-/// [`orbit`](Self::orbit) / [`pan`](Self::pan) / [`zoom`](Self::zoom) and
-/// rebuilds the snapshot.
+/// Orbit camera around ground target. Angles in radians.
+/// Game owns this in signals and copies it into [`Frame3d`](crate::Frame3d) per frame.
 #[derive(Clone, Copy, Debug)]
 pub struct OrbitCamera {
     pub target: Vec3,
@@ -69,13 +61,13 @@ impl OrbitCamera {
         self.proj_matrix(aspect) * self.view_matrix()
     }
 
-    /// Drag deltas in dp: horizontal orbits, vertical tilts.
+    /// Drag deltas in dp. Horizontal orbits, vertical tilts.
     pub fn orbit(&mut self, dx: f32, dy: f32) {
         self.yaw -= dx * 0.005;
         self.pitch = (self.pitch + dy * 0.005).clamp(0.12, 1.45);
     }
 
-    /// Grab-style pan: content follows the cursor. Deltas in dp.
+    /// Grab pan. Content follows cursor. Deltas in dp.
     pub fn pan(&mut self, dx: f32, dy: f32) {
         let fwd = (self.target - self.eye()).normalize();
         let right = fwd.cross(Vec3::Y).normalize();
@@ -90,9 +82,7 @@ impl OrbitCamera {
         self.dist = (self.dist * factor).clamp(15.0, 600.0);
     }
 
-    /// World-space ray for a viewport pixel. `viewport_px` is (w, h) and
-    /// `px` is viewport-local; both must use the same units (either is
-    /// fine, the division cancels out).
+    /// World ray for viewport pixel. Units cancel in the division.
     pub fn screen_ray(&self, aspect: f32, viewport_px: Vec2, px: Vec2) -> (Vec3, Vec3) {
         let ndc = Vec2::new(
             (px.x / viewport_px.x) * 2.0 - 1.0,
@@ -104,7 +94,7 @@ impl OrbitCamera {
         (p0, (p1 - p0).normalize())
     }
 
-    /// Ground-plane (y = 0) point under a viewport pixel, if the ray hits.
+    /// Ground (y = 0) point under pixel, if ray hits.
     pub fn ground_point(&self, aspect: f32, viewport_px: Vec2, px: Vec2) -> Option<Vec2> {
         let (origin, dir) = self.screen_ray(aspect, viewport_px, px);
         if dir.y > -1e-6 {
@@ -169,8 +159,7 @@ mod tests {
 
     #[test]
     fn screen_ray_through_center_hits_near_target() {
-        // A close-up camera: the center ray must strike the ground within
-        // a few units of the target, proving the unproject math end to end.
+        // Close-up camera pins the unproject math end to end.
         let cam = OrbitCamera {
             dist: 30.0,
             pitch: 0.9,

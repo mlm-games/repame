@@ -5,12 +5,11 @@ use bevy_ecs::prelude::*;
 
 use super::effect::EaseKind;
 
-/// White hit-flash, red damage vignette, gold pickup glow: all the
-/// same struct, different color and duration.
+/// Hit flash, damage tint, pickup glow: one struct, varied by color.
 #[derive(Clone, Copy, Debug, Default, Resource)]
 pub struct Flash {
     pub color: [f32; 4],
-    /// Ticks left / total (100 Hz).
+    /// Ticks left over total (100 Hz).
     pub remaining_ticks: i32,
     pub total_ticks: i32,
     pub ease: EaseKind,
@@ -35,7 +34,7 @@ impl Flash {
     }
 
     /// Current RGBA: full color at trigger, eased to transparent.
-    /// `None` when idle so the game can skip the overlay write.
+    /// `None` while idle so the game can skip the overlay write.
     pub fn rgba(&self) -> Option<[f32; 4]> {
         if !self.active() {
             return None;

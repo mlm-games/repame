@@ -1,10 +1,11 @@
 use bevy_ecs::prelude::*;
 
+/// Chromatic split amount with linear decay. The game maps it to output.
 #[derive(Clone, Debug, Resource)]
 pub struct Chroma {
-    /// Current split amount (bevy `chromatic_intensity` units).
+    /// Current split amount.
     pub strength: f32,
-    /// Linear decay per second (bevy `chromatic_decay`, 2.0).
+    /// Linear decay per second.
     pub decay_per_sec: f32,
 }
 
@@ -22,13 +23,12 @@ impl Chroma {
         }
     }
 
-    /// Fire a pulse; keeps the max so overlapping hits never cancel.
-    /// (NT: 0.04 pickups, 0.08–0.3 hits, 0.4–0.7 kills/throne.)
+    /// Fire a pulse; keeps the max so overlapping pulses do not cancel.
     pub fn pulse(&mut self, strength: f32) {
         self.strength = self.strength.max(strength.max(0.0));
     }
 
-    /// Decay over `ticks` (100 Hz). No-op at 0.
+    /// Decay over `ticks` (100 Hz).
     pub fn tick(&mut self, ticks: i32) {
         if ticks <= 0 {
             return;
@@ -36,8 +36,7 @@ impl Chroma {
         self.strength = (self.strength - self.decay_per_sec * ticks as f32 / 100.0).max(0.0);
     }
 
-    /// Current amount for `FrameInput::chroma`. `0.0` takes the
-    /// zero-cost direct path (no offscreen composite).
+    /// Current amount for `FrameInput::chroma`. 0.0 skips the composite.
     pub fn amount(&self) -> f32 {
         self.strength.max(0.0)
     }

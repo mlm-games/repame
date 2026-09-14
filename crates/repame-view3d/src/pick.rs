@@ -1,18 +1,7 @@
-//! CPU ray picking over mesh snapshots: ray in, nearest pickable hit out.
-//!
-//! The GPU path stays untouched: picking runs on the [`MeshGroup`](super::mesh::MeshGroup)
-//! snapshot the game already built for the frame, through the same
-//! [`OrbitCamera`](super::camera::OrbitCamera) the renderer used, so content
-//! and picks cannot disagree. Groups opt in with
-//! [`MeshGroup::pick_id`](super::mesh::MeshGroup::pick_id) (`0` = skipped:
-//! leave bulk terrain unpickable and use ground-plane picks for it).
-//!
-//! Broadphase is a per-group AABB, recomputed per call. That is linear in
-//! the pickable vertex count per pointer event — fine at starter/editor
-//! scale, and bulk groups stay free by staying unpickable. A cached spatial
-//! index can slot in behind [`pick_ray`] later without changing callers.
-//! Narrow phase is backface-culled Möller–Trumbore, matching the renderer's
-//! `FrontFace::Ccw` + `CullMode::Back`: only drawn faces pick.
+//! CPU ray picking over mesh snapshot.
+//! Uses the same camera as render, so content and picks agree.
+//! Groups opt in with `pick_id` (0 = skipped).
+//! Broadphase is per-group AABB. Narrow phase is backface-culled Moller-Trumbore.
 
 use glam::{Vec2, Vec3};
 
@@ -26,10 +15,9 @@ pub struct MeshHit {
     pub pick_id: u32,
     /// Index into the groups slice (submission order).
     pub group: usize,
-    /// Triangle index within the group (0-based, `indices.len() / 3` space).
+    /// Triangle index within group.
     pub tri: u32,
-    /// Ray distance from the origin to the hit point (in `dir` units —
-    /// world units when `dir` is normalized, as [`pick_screen`] passes).
+    /// Ray distance to hit. World units when dir is normalized.
     pub distance: f32,
     /// World-space hit point.
     pub point: [f32; 3],
@@ -37,15 +25,14 @@ pub struct MeshHit {
     pub normal: [f32; 3],
 }
 
-/// AABB of a group's positions, or `None` when empty or non-finite.
+/// AABB of group positions. None when empty or non-finite.
 pub fn group_bounds(group: &MeshGroup) -> Option<(Vec3, Vec3)> {
     group
         .bounds()
         .map(|(min, max)| (Vec3::from(min), Vec3::from(max)))
 }
 
-/// Slab test: does the ray touch the box? Axis-parallel rays (near-zero
-/// direction components) test containment on that axis instead.
+/// Slab test. Near-zero dir components test containment on that axis.
 pub fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> bool {
     let mut tmin = 0.0f32;
     let mut tmax = f32::INFINITY;
@@ -72,9 +59,7 @@ pub fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> bool {
     true
 }
 
-/// Backface-culled Möller–Trumbore: `Some((t, point, normal))` for a front
-/// face hit with `t >= 0`, else `None`. Degenerate triangles miss; NaN
-/// coordinates miss (every comparison goes false) — never panics.
+/// Backface-culled Moller-Trumbore. Degenerate and NaN tris miss.
 pub fn ray_triangle(
     origin: Vec3,
     dir: Vec3,
@@ -90,15 +75,14 @@ pub fn ray_triangle(
         return None; // degenerate (also rejects NaN: comparison is false)
     }
     let normal = cross / area2;
-    // Match the renderer (CCW front, backfaces culled): front faces oppose
-    // the ray. A coplanar ray (dot == 0) hits nothing.
+    // CCW front, backfaces culled. Coplanar ray hits nothing.
     if normal.dot(dir) >= 0.0 {
         return None;
     }
     let p = dir.cross(e2);
     let det = e1.dot(p);
     if det.abs() < 1e-12 {
-        return None; // parallel (post-cull: grazing)
+        return None;
     }
     let inv = 1.0 / det;
     let to_origin = origin - a;
@@ -118,10 +102,8 @@ pub fn ray_triangle(
     Some((t, origin + dir * t, normal))
 }
 
-/// Nearest pickable hit along `origin` + `dir`. Groups with `pick_id == 0`
-/// are skipped outright (no bounds cost); out-of-range indices are skipped
-/// tri-by-tri, mirroring the batch validator. `depth_test` is ignored: ray
-/// order decides, so overlay gizmos stay clickable.
+/// Nearest pickable hit along ray. Skips pick_id 0 and bad indices.
+/// Ignores depth_test: ray order decides.
 pub fn pick_ray(origin: Vec3, dir: Vec3, groups: &[MeshGroup]) -> Option<MeshHit> {
     let mut best: Option<MeshHit> = None;
     for (gi, group) in groups.iter().enumerate() {
@@ -162,11 +144,8 @@ pub fn pick_ray(origin: Vec3, dir: Vec3, groups: &[MeshGroup]) -> Option<MeshHit
     best
 }
 
-/// Screen-space entry: unproject `px` through `cam` (the same camera the
-/// GPU used: `cam.view_proj(aspect)`) and pick. `viewport_px` and `px` must
-/// use the same units (either is fine, the division cancels out).
-/// The ray starts at the near plane — closer-than-near geometry is clipped
-/// on screen too, so picks and pixels agree.
+/// Screen-space pick: unproject `px` through `cam`, then `pick_ray`.
+/// Ray starts at near plane. Units cancel in the division.
 pub fn pick_screen(
     cam: &OrbitCamera,
     aspect: f32,
@@ -182,7 +161,7 @@ pub fn pick_screen(
 mod tests {
     use super::*;
 
-    /// Up-facing triangle (CCW from above, +Y normal) at the origin.
+    /// Up triangle, CCW from above.
     fn up_tri() -> (Vec3, Vec3, Vec3) {
         (
             Vec3::new(-1.0, 0.0, -1.0),
@@ -204,14 +183,14 @@ mod tests {
     #[test]
     fn backface_misses() {
         let (a, b, c) = up_tri();
-        // Same triangle wound the other way: normal follows the ray.
+        // Reversed winding: normal follows ray.
         assert!(ray_triangle(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y, a, c, b).is_none());
-        // Same winding, ray from below strikes the back: miss.
+        // Ray from below hits back: miss.
         assert!(ray_triangle(Vec3::new(0.0, -5.0, 0.0), Vec3::Y, a, b, c).is_none());
     }
 
     #[test]
-    fn degenerate_and_nan_miss_without_panic() {
+    fn degenerate_and_nan_miss() {
         let (a, b, c) = up_tri();
         let z = Vec3::ZERO;
         assert!(ray_triangle(z, Vec3::NEG_Y, z, z, z).is_none());
@@ -234,8 +213,7 @@ mod tests {
         assert!(ray_aabb(Vec3::ZERO, Vec3::X, min, max));
     }
 
-    /// CCW-from-above quad at height `y` (same corner order as the
-    /// renderer's depth-test fixtures).
+    /// Quad at height y, CCW from above.
     fn sheet(id: u32, y: f32, half: f32) -> MeshGroup {
         let mut g = MeshGroup {
             pick_id: id,
@@ -253,12 +231,8 @@ mod tests {
     }
 
     #[test]
-    fn nearest_pickable_wins_and_zero_id_is_invisible() {
-        let groups = vec![
-            sheet(1, 0.0, 8.0), // far, pushed first
-            sheet(2, 2.0, 8.0), // near
-            sheet(0, 4.0, 8.0), // unpickable, floating between eye and near
-        ];
+    fn nearest_pickable_wins_and_zero_id_skips() {
+        let groups = vec![sheet(1, 0.0, 8.0), sheet(2, 2.0, 8.0), sheet(0, 4.0, 8.0)];
         let hit = pick_ray(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y, &groups).expect("hits near");
         assert_eq!(hit.pick_id, 2);
         assert!((hit.distance - 3.0).abs() < 1e-5, "d = {}", hit.distance);
@@ -270,9 +244,7 @@ mod tests {
     fn empty_and_miss_return_none() {
         assert!(pick_ray(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y, &[]).is_none());
         let groups = vec![sheet(1, 0.0, 8.0)];
-        // Offset ray parallel to Y but outside the sheet: AABB rejects.
         assert!(pick_ray(Vec3::new(50.0, 5.0, 0.0), Vec3::NEG_Y, &groups).is_none());
-        // Upward ray: backfaces, and nothing ahead.
         assert!(pick_ray(Vec3::new(0.0, 5.0, 0.0), Vec3::Y, &groups).is_none());
     }
 

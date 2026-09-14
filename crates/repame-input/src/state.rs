@@ -10,12 +10,9 @@ use super::ActionLike;
 use super::binding::Binding;
 use super::map::ActionMap;
 
-/// Sim-side gameplay input: fed from repose events each frame, read by
-/// fixed-step systems each tick. Edges (`just_pressed`/`just_released`)
-/// clear at the END of each tick ([`end_tick`](Self::end_tick),
-/// registered last), so compose-fed events survive until the tick's
-/// systems run. Frame-scope readers call
-/// [`clear_edges`](Self::clear_edges) after consuming.
+/// Sim-side gameplay input fed from repose events, read per tick.
+/// Edges clear at tick end via `end_tick` (registered last).
+/// Frame-scope readers call `clear_edges` after consuming.
 #[derive(Resource, Debug)]
 pub struct ActionState<A: ActionLike> {
     map: ActionMap<A>,
@@ -25,8 +22,7 @@ pub struct ActionState<A: ActionLike> {
     consumed: HashSet<A>,
     axes: HashMap<GamepadAxis, f32>,
     active_contexts: HashSet<String>,
-    /// Currently-held button bindings (key/mouse/pad). Releases only drop
-    /// the action when *no* binding for it remains down (OR semantics).
+    /// Held button bindings. Releases drop the action when no binding stays down.
     down_buttons: HashSet<Binding>,
 }
 
@@ -48,23 +44,19 @@ impl<A: ActionLike> ActionState<A> {
         &self.map
     }
 
-    /// Edge rollover for the tick end: edges clear, levels persist.
-    /// Frame-scope readers use [`clear_edges`](Self::clear_edges) instead.
+    /// Edge rollover for tick end: edges clear, levels persist.
     pub fn end_tick(&mut self) {
         self.just_pressed.clear();
         self.just_released.clear();
     }
 
-    /// Clear edges outside the schedule (after frame-scope consumption).
+    /// Clear edges outside the schedule.
     pub fn clear_edges(&mut self) {
         self.end_tick();
     }
 
-    /// Switch the active context set (phase gating, e.g. menu vs play).
-    /// Empty set with contexts defined means only context-free actions fire.
-    /// Pending edges drop only when the set actually changes: re-setting
-    /// the same contexts every frame (the normal pump pattern) keeps them.
-    /// Levels (`pressed`) always track hardware truthfully.
+    /// Switch the active context set. Pending edges drop on change;
+    /// re-setting the same set keeps them. Levels track hardware.
     pub fn set_contexts(&mut self, contexts: &[&str]) {
         let next: HashSet<String> = contexts.iter().map(|s| s.to_string()).collect();
         if next != self.active_contexts {
@@ -134,7 +126,7 @@ impl<A: ActionLike> ActionState<A> {
             .any(|b| self.binding_down(b))
     }
 
-    /// Feed a keyboard chord press/release from the runner.
+    /// Feed a keyboard chord press/release.
     pub fn key(&mut self, chord: &KeyChord, down: bool) {
         self.fire_binding(&Binding::Key(chord.clone()), down);
     }
@@ -150,8 +142,6 @@ impl<A: ActionLike> ActionState<A> {
     }
 
     /// Feed an axis value; threshold bindings flip on crossing.
-    /// Re-evaluates every action bound to this axis with OR semantics, so
-    /// a second binding holding the action keeps it pressed.
     pub fn axis(&mut self, axis: GamepadAxis, value: f32) {
         self.axes.insert(axis, value);
         let actions: Vec<A> = self
@@ -174,88 +164,50 @@ impl<A: ActionLike> ActionState<A> {
         }
     }
 
-    /// Latest raw value fed for an axis (`0.0` if never fed).
+    /// Latest raw value fed for an axis (`0.0` if not fed).
     ///
-    /// This is the raw deflection in `-1..1` (sticks) or `0..1` (triggers),
-    /// with no threshold or deadzone applied. Use [`ActionState::strength`]
-    /// for the per-action intensity with thresholds applied.
+    /// Raw deflection in `-1..1` (sticks) or `0..1` (triggers), no threshold applied.
     pub fn axis_value(&self, axis: GamepadAxis) -> f32 {
         self.axes.get(&axis).copied().unwrap_or(0.0)
     }
 
-    /// Intensity of an action, from `0.0` (inactive) to `1.0` (fully held).
-    ///
-    /// For button bindings (key, mouse, pad) the value is `0` or `1`. For
-    /// axis bindings it is the stick deflection remapped from
-    /// `threshold..1` to `0..1` (radial deadzone, leafwing feel), so the
-    /// further the stick is pushed past its threshold, the closer the
-    /// value is to `1`. When several bindings drive one action,
-    /// the strongest active binding wins.
-    ///
-    /// Returns `0.0` while the action is gated out by its context or has
-    /// been [`consumed`](ActionState::consume), matching
-    /// [`pressed`](ActionState::pressed).
-    ///
-    /// In most cases where you need a direction (twin-stick movement,
-    /// menus), use [`vector`](ActionState::vector) instead of combining
-    /// strengths by hand.
+    /// Intensity from `0.0` (inactive) to `1.0` (held). Buttons read `0`/`1`;
+    /// axes remap `threshold..1` to `0..1`. Strongest binding wins.
+    /// Gated or consumed actions read `0.0`.
     pub fn strength(&self, action: &A) -> f32 {
         if !self.live(action) {
             return 0.0;
         }
         let mut best = 0.0f32;
         for b in self.map.bindings_for(action) {
-            let s = match b {
-                Binding::Key(_) | Binding::Mouse(_) | Binding::Pad(_) => {
-                    if self.binding_down(b) {
-                        1.0
-                    } else {
-                        0.0
+            let s =
+                match b {
+                    Binding::Key(_) | Binding::Mouse(_) | Binding::Pad(_) => {
+                        if self.binding_down(b) { 1.0 } else { 0.0 }
                     }
-                }
-                Binding::Axis { axis, threshold } => {
-                    let v = self.axis_value(*axis);
-                    if !Binding::axis_active(*threshold, v) {
-                        0.0
-                    } else {
-                        // Radial deadzone remap t..1 → 0..1 (leafwing feel).
-                        let t = threshold.abs().clamp(0.0, 0.95);
-                        let a = v.abs();
-                        if a <= t {
+                    Binding::Axis { axis, threshold } => {
+                        let v = self.axis_value(*axis);
+                        if !Binding::axis_active(*threshold, v) {
                             0.0
                         } else {
-                            ((a - t) / (1.0 - t)).clamp(0.0, 1.0).max(1e-6)
+                            // Radial deadzone remap t..1 to 0..1.
+                            let t = threshold.abs().clamp(0.0, 0.95);
+                            let a = v.abs();
+                            if a <= t {
+                                0.0
+                            } else {
+                                ((a - t) / (1.0 - t)).clamp(0.0, 1.0).max(1e-6)
+                            }
                         }
                     }
-                }
-            };
+                };
             best = best.max(s);
         }
         best.clamp(0.0, 1.0)
     }
 
-    /// Movement vector from four actions: `(x, y)` with
-    /// `x = strength(pos_x) - strength(neg_x)` and
-    /// `y = strength(pos_y) - strength(neg_y)`.
-    ///
-    /// This is useful for vector input such as a joystick, d-pad, arrows,
-    /// or WASD driving movement. The result has a circular deadzone and its
-    /// length limited to `1`, so diagonal input never moves faster than
-    /// axis-aligned input:
-    ///
-    /// - Lengths below `deadzone` (range `0..1`) snap to `(0, 0)`, which
-    ///   keeps a resting stick from drifting the player. Use `0.2` for a
-    ///   standard stick feel, `0.0` to disable.
-    /// - Lengths above `1` (opposite pairs can't exceed this, but two
-    ///   full-strength diagonals can in theory) are normalized back to `1`.
-    ///
-    /// **Note:** `y` follows screen convention (`pos_y` is down-positive).
-    /// For world-up movement, negate `y` or swap the pair at the call site.
-    ///
-    /// ```ignore
-    /// let (x, y) = state.vector(&MoveLeft, &MoveRight, &MoveUp, &MoveDown, 0.2);
-    /// player.vel = Vec2::new(x, y) * SPEED;
-    /// ```
+    /// Movement vector from four actions. Lengths below `deadzone` snap to zero;
+    /// lengths above `1` normalize back. `y` is screen convention (down-positive).
     pub fn vector(&self, neg_x: &A, pos_x: &A, neg_y: &A, pos_y: &A, deadzone: f32) -> (f32, f32) {
         let mut x = self.strength(pos_x) - self.strength(neg_x);
         let mut y = self.strength(pos_y) - self.strength(neg_y);
@@ -270,43 +222,22 @@ impl<A: ActionLike> ActionState<A> {
         (x, y)
     }
 
-    /// Held (and live in the active context, not consumed).
-    ///
-    /// Returns `true` for every tick while any of the action's bindings is
-    /// held down. Actions gated out by [`set_contexts`](ActionState::set_contexts)
-    /// or hidden by [`consume`](ActionState::consume) read as released here
-    /// even while the hardware is held. The level below keeps tracking the
-    /// hardware truthfully, so re-entering the context (or
-    /// [`clear_consumed`](ActionState::clear_consumed)) reports held again
-    /// without a new press.
+    /// Held, live, and not consumed. True each tick a binding is down.
     pub fn pressed(&self, action: &A) -> bool {
         self.pressed.contains(action) && self.live(action)
     }
 
-    /// Started this tick (and live in the active context, not consumed).
-    ///
-    /// Returns `true` only on the tick the action was pressed: the edge is
-    /// set by the press event and cleared at the end of the tick by
-    /// [`end_tick`](ActionState::end_tick), so holding the button does not
-    /// re-trigger it. If several ticks run in one frame, only systems in
-    /// the first tick observe the edge.
+    /// Started this tick. Edge set on press, cleared at `end_tick`.
     pub fn just_pressed(&self, action: &A) -> bool {
         self.just_pressed.contains(action) && self.live(action)
     }
 
-    /// Released this tick (and live in the active context, not consumed).
-    /// Same gating as `pressed`/`just_pressed`, so context-gated and
-    /// UI-consumed releases never leak to late readers.
-    ///
-    /// Returns `true` only on the tick the last held binding was released
-    /// (see the OR release rule in the module docs). Like `just_pressed`,
-    /// the edge clears at [`end_tick`](ActionState::end_tick).
+    /// Released this tick. Clears at `end_tick` like `just_pressed`.
     pub fn just_released(&self, action: &A) -> bool {
         self.just_released.contains(action) && self.live(action)
     }
 
-    /// Swallow an action so later readers skip it (UI consumed the click).
-    /// Returns true while the action is held.
+    /// Mark consumed so later readers skip it. Returns true while held.
     pub fn consume(&mut self, action: &A) -> bool {
         let held = self.pressed.contains(action);
         self.consumed.insert(action.clone());
@@ -317,7 +248,7 @@ impl<A: ActionLike> ActionState<A> {
         self.consumed.extend(self.pressed.iter().cloned());
     }
 
-    /// Drive an action without hardware (cutscenes, AI, tests).
+    /// Drive an action without hardware.
     pub fn mock(&mut self, action: &A, down: bool) {
         if down {
             self.press(action);
@@ -326,7 +257,7 @@ impl<A: ActionLike> ActionState<A> {
         }
     }
 
-    /// Clear consumption (fresh frame handoff from UI).
+    /// Clear consumption.
     pub fn clear_consumed(&mut self) {
         self.consumed.clear();
     }
@@ -356,17 +287,17 @@ mod tests {
         let mut st = ActionState::new(jump_map());
         st.key(&space(), true);
         assert!(st.just_pressed(&"jump"));
-        assert!(st.pressed(&"jump"));
-        // Edge survives (no schedule ran yet); systems read, then clear.
+        assert!(st.pressed(&"jump"), "South still held");
+        // Edges persist until tick end; systems read, then clear.
         assert!(st.just_pressed(&"jump"));
         st.end_tick();
         assert!(!st.just_pressed(&"jump"));
-        assert!(st.pressed(&"jump"));
+        assert!(st.pressed(&"jump"), "South still held");
         st.key(&space(), false);
         assert!(st.just_released(&"jump"));
         assert!(!st.pressed(&"jump"));
         st.end_tick();
-        assert!(!st.just_released(&"jump"));
+        assert!(!st.just_released(&"jump"), "no release while OR-held");
     }
 
     #[test]
@@ -409,7 +340,7 @@ mod tests {
         assert!(!st.pressed(&"jump"));
         assert!(!st.just_pressed(&"jump"));
         st.clear_consumed();
-        assert!(st.pressed(&"jump"));
+        assert!(st.pressed(&"jump"), "South still held");
     }
 
     #[test]
@@ -422,7 +353,7 @@ mod tests {
         assert!(!st.pressed(&"jump"));
         st.set_contexts(&["gameplay"]);
         st.key(&space(), true);
-        assert!(st.pressed(&"jump"));
+        assert!(st.pressed(&"jump"), "South still held");
     }
 
     #[test]
@@ -438,7 +369,7 @@ mod tests {
         assert!(!st.pressed(&"jump"));
         st.key(&space(), false);
         st.set_contexts(&["gameplay"]);
-        assert!(!st.just_released(&"jump"));
+        assert!(!st.just_released(&"jump"), "no release while OR-held");
     }
 
     #[test]
@@ -455,7 +386,7 @@ mod tests {
         let mut st = ActionState::new(jump_map());
         st.key(&space(), true);
         st.pad(GamepadButton::South, true);
-        assert!(st.pressed(&"jump"));
+        assert!(st.pressed(&"jump"), "South still held");
         st.end_tick();
         st.key(&space(), false);
         assert!(st.pressed(&"jump"), "South still held");
@@ -473,7 +404,7 @@ mod tests {
         st.key(&space(), false);
         assert!(st.just_released(&"jump"));
         st.consume(&"jump");
-        assert!(!st.just_released(&"jump"));
+        assert!(!st.just_released(&"jump"), "no release while OR-held");
     }
 
     #[test]
@@ -499,21 +430,27 @@ mod tests {
             Binding::Key(KeyChord::new(Key::Space, Modifiers::default())),
         );
         let mut st = ActionState::new(map);
-        // Rest: all zero.
+        // Rest reads zero.
         assert_eq!(st.strength(&"right"), 0.0);
-        assert_eq!(st.vector(&"left", &"right", &"jump", &"jump", 0.2), (0.0, 0.0));
-        // Half deflection right: deadzone-remapped strength.
+        assert_eq!(
+            st.vector(&"left", &"right", &"jump", &"jump", 0.2),
+            (0.0, 0.0)
+        );
+        // Half deflection right, deadzone remapped.
         st.axis(GamepadAxis::LeftStickX, 0.5);
         assert!((st.strength(&"right") - 0.375).abs() < 1e-6);
         assert_eq!(st.strength(&"left"), 0.0);
         let (x, y) = st.vector(&"left", &"right", &"jump", &"jump", 0.2);
         assert!((x - 0.375).abs() < 1e-6 && y.abs() < 1e-6);
-        // Vector deadzone snaps small-but-active sticks to zero.
-        assert_eq!(st.vector(&"left", &"right", &"jump", &"jump", 0.6), (0.0, 0.0));
-        // Below deadzone the vector snaps to zero even if bound.
+        // Deadzone snaps small sticks to zero.
+        assert_eq!(
+            st.vector(&"left", &"right", &"jump", &"jump", 0.6),
+            (0.0, 0.0)
+        );
+        // Below threshold the strength reads zero.
         st.axis(GamepadAxis::LeftStickX, 0.1);
         assert_eq!(st.strength(&"right"), 0.0);
-        // Button: full strength.
+        // Buttons read full strength.
         st.key(&space(), true);
         assert_eq!(st.strength(&"jump"), 1.0);
     }

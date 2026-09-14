@@ -1,10 +1,6 @@
-//! Command + event channels between the game thread and the audio thread.
-//!
-//! Game -> audio: [`RealtimeCommand`], sent with `send_spin` (never parks),
-//! drained with `try_recv` on the callback. Audio -> game: [`EngineEvent`]
-//! (voice completions for reaping and music handoff). Queues are unbounded;
-//! game command rates are tiny, and overflow policy is the caller's
-//! (banks enforce polyphony before sending).
+//! Command plus event channels between the game thread and audio thread.
+//! Game to audio uses `send_spin`; audio to game reports completions.
+//! Queues are unbounded; banks enforce polyphony before sending.
 
 use std::sync::Arc;
 
@@ -13,8 +9,7 @@ use web_workers::sync::mpsc::{Receiver, Sender, channel};
 use crate::AudioChannel;
 use crate::state::AudioState;
 
-/// Decoded PCM shared with the audio thread. Interleaved f32,
-/// mono (`channels == 1`) or stereo (`channels == 2`).
+/// Decoded PCM shared with the audio thread. Interleaved f32.
 #[derive(Debug, Clone)]
 pub struct SharedFrames {
     pub sample_rate: u32,
@@ -52,7 +47,7 @@ pub struct PlayCmd {
     pub looping: bool,
 }
 
-/// Game -> audio commands. Never blocks; unknown voice ids are ignored.
+/// Game to audio commands. Unknown voice ids are ignored.
 #[derive(Debug, Clone)]
 pub enum RealtimeCommand {
     Play(PlayCmd),
@@ -63,8 +58,7 @@ pub enum RealtimeCommand {
         gain: f32,
     },
     Pause(bool),
-    /// Ramp a voice's gain to `target` over `secs` (linear). Completing
-    /// at `0.0` finishes the voice like a natural end.
+    /// Ramp a voice gain to `target` over `secs` (linear).
     Fade {
         voice: u64,
         target: f32,
@@ -75,8 +69,7 @@ pub enum RealtimeCommand {
 /// Audio -> game events, drained in [`crate::Audio::update`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineEvent {
-    /// A non-looping voice ran to completion (reap accounting,
-    /// music-track handoff).
+    /// A non-looping voice ran to completion.
     Finished(u64),
 }
 

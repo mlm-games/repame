@@ -1,11 +1,6 @@
-//! [`decode_bytes`]: encoded bytes -> [`SharedFrames`] via symphonia.
-//!
-//! Registry symphonia 0.6 (same pin as the shipping DAW): Vorbis/Ogg,
-//! MP3, FLAC, WAV/PCM, AAC and the rest of the `all` feature set. Kenney
-//! packs ship Vorbis Ogg  - no conversion step needed. Deliberately out:
-//! Opus (needs the LGPL `symphonia-adapter-oporus`; Vorbis covers the
-//! game asset pipeline). Also hosts [`resample_linear`], the device-rate
-//! matcher the engine uses per voice.
+//! [`decode_bytes`]: encoded bytes to [`SharedFrames`] via symphonia.
+//! Supports the Vorbis, MP3, FLAC, WAV, and AAC inputs in the pin.
+//! Also hosts [`resample_linear`], the device-rate matcher per voice.
 
 use std::io::Cursor;
 
@@ -20,13 +15,11 @@ use symphonia::default::get_codecs;
 
 use crate::command::SharedFrames;
 
-/// Decoded-output safety cap (frames, all channels counted once).
-/// ~12 min of mono at 44.1 kHz; music tracks pass, accidents do not.
+/// Decoded-output cap in frames. Music tracks pass; accidents do not.
 const MAX_FRAMES: usize = 32_000_000;
 
 /// Decode a whole sound file into interleaved f32 frames.
 /// Stereo stays stereo; mono stays mono; 3+ channels keep L/R.
-/// Returns the file's native rate (the engine resamples to the device).
 pub fn decode_bytes(bytes: &[u8]) -> Result<SharedFrames> {
     if bytes.is_empty() {
         anyhow::bail!("cannot decode empty input");
@@ -102,8 +95,7 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<SharedFrames> {
     })
 }
 
-/// Linear-interpolation resample to `target_hz`. No-op when rates match.
-/// Pure (no device) so banks can pre-match the engine rate at load time.
+/// Linear resample to `target_hz`. No-op when rates match.
 pub fn resample_linear(sound: &SharedFrames, target_hz: u32) -> SharedFrames {
     if sound.sample_rate == target_hz || sound.sample_rate == 0 || target_hz == 0 {
         return sound.clone();

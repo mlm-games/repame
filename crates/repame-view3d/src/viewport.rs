@@ -17,7 +17,8 @@ use repose_ui::Embedded;
 
 use super::camera::OrbitCamera;
 use super::mesh::MeshGroup;
-use super::render::{SceneBatch, SceneLight, paint_scene_with_id, prepare_scene_with_id};
+use super::render::{BatchDesc, SceneBatch, SceneLight, SceneUpload};
+use super::render::{paint_scene_with_id, prepare_scene_with_id};
 
 /// Everything the viewport draws this frame. Plain data, snapshot per frame.
 ///
@@ -26,12 +27,24 @@ use super::render::{SceneBatch, SceneLight, paint_scene_with_id, prepare_scene_w
 /// the painted rect; picks invert through the same camera via
 /// [`OrbitCamera::screen_ray`]. One camera, two consumers — they cannot
 /// disagree.
+///
+/// Textures ride the same snapshot: [`Frame3d::uploads`] feeds the batch
+/// texture array once per frame (games drain their image/atlas source
+/// here), and each group samples one page (see
+/// [`MeshGroup`](super::mesh::MeshGroup) `texture_page`).
 #[derive(Clone, Debug)]
 pub struct Frame3d {
     pub cam: OrbitCamera,
     /// World-space mesh groups. Depth-tested groups occlude; groups with
     /// `depth_test = false` always draw (ground decals, editor gizmos).
     pub groups: Vec<MeshGroup>,
+    /// Per-frame texture uploads into the batch array. Applied exactly
+    /// once (sprite-batch `AtlasUpload` contract).
+    pub uploads: Vec<SceneUpload>,
+    /// Batch texture shape the groups pack against. Must match the batch
+    /// the viewport draws through (`Viewport3d` takes it explicitly, so
+    /// mismatches fail at the call site, not silently on the GPU).
+    pub desc: BatchDesc,
     /// Frame light for groups carrying normals. Flat groups ignore it.
     pub light: SceneLight,
     /// Offscreen clear color (linear 0..1 RGBA). The shared UI pass this
@@ -49,6 +62,8 @@ impl Default for Frame3d {
         Self {
             cam: OrbitCamera::default(),
             groups: Vec::new(),
+            uploads: Vec::new(),
+            desc: BatchDesc::default(),
             light: SceneLight::default(),
             background: None,
             viewport_px: [1600.0, 900.0],
@@ -123,11 +138,16 @@ struct DragState {
 /// 2D viewport); `paint` re-publishes authoritatively from its callback
 /// info. Picks invert through the latest publish at event time, so picks
 /// and content stay glued — including under camera motion.
+///
+/// `batch_desc` must match `input.desc` (the texture shape the groups
+/// pack against): the batch is keyed on it and rebuilds — dropping
+/// texture contents — when it changes, exactly like the sprite batch.
 #[allow(non_snake_case)] // Repose view convention (cf. resims `Viewport3d`).
 pub fn Viewport3d(
     input: Frame3d,
     geom_out: GeomHandle,
     batch_id: impl Into<String>,
+    batch_desc: BatchDesc,
     on_event: impl Fn(View3dEvent) + 'static,
 ) -> View {
     let batch_id: String = batch_id.into();
@@ -231,6 +251,7 @@ pub fn Viewport3d(
         input: Arc::new(draw_input.as_ref().clone()),
         geom: geom_out.arc(),
         batch_id: draw_id,
+        batch_desc,
     };
     Embedded(modifier, Callback::new(payload))
 }
@@ -287,6 +308,7 @@ struct GpuViewport3d {
     input: Arc<Frame3d>,
     geom: Arc<Mutex<ViewportGeom>>,
     batch_id: String,
+    batch_desc: BatchDesc,
 }
 
 impl WgpuCallback for GpuViewport3d {
@@ -306,15 +328,16 @@ impl WgpuCallback for GpuViewport3d {
         let w = vp[0].max(1.0) as u32;
         let h = vp[1].max(1.0) as u32;
         let aspect = Frame3d::aspect(vp);
-        let mut batch = SceneBatch::with_id(self.batch_id.clone());
+        let mut batch = SceneBatch::with_desc(self.batch_id.clone(), self.batch_desc);
         batch.set_camera(self.input.cam.view_proj(aspect));
         batch.set_light(self.input.light);
         for g in &self.input.groups {
             batch.push_group(g);
         }
+        batch.extend_uploads(self.input.uploads.iter().cloned());
         batch.finish();
         batch.ensure_resources(device, screen, resources);
-        batch.upload(device, queue, resources);
+        batch.upload_all(device, queue, resources);
         prepare_scene_with_id(
             self.batch_id.as_str(),
             device,

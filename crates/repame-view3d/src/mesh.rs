@@ -2,13 +2,19 @@
 //!
 //! Long-term containers (glTF import, skinning, chunk meshing with dirty
 //! tracking) plug in behind these types; the renderer only ever sees
-//! vertex/index/tint/normal lists, so the GPU path stays stable while the
-//! asset side grows.
+//! vertex/index/tint/normal/uv lists, so the GPU path stays stable while
+//! the asset side grows.
 //!
 //! Lighting is opt-in per group: groups without normals draw flat
 //! (backwards-compatible with the original flat path); groups with normals
 //! are shaded by the frame's [`SceneLight`](crate::SceneLight) as
 //! `base * (ambient + diffuse * max(dot(N, L), 0))`.
+//!
+//! Textures are opt-in the same way: groups without uvs sample nothing
+//! (tint only); groups with uvs sample the batch texture array at
+//! [`MeshGroup::texture_page`], and the sample multiplies the tint before
+//! lighting. One page per group; multi-material scenes submit one group
+//! per material.
 
 use glam::Vec3;
 
@@ -23,6 +29,11 @@ pub type Rgb = [f32; 3];
 /// Normals are optional: when `normals` is empty the group draws flat
 /// (legacy path). When present it must match `positions` in length, and
 /// the frame's [`SceneLight`](crate::SceneLight) shades the group.
+///
+/// UVs are optional too: when `uvs` is empty the tint is the final color.
+/// When present it must match `positions` in length and `texture_page`
+/// selects the batch texture array layer; the texel multiplies the tint
+/// (then lighting applies to the product).
 #[derive(Clone, Debug, Default)]
 pub struct MeshGroup {
     /// World-space positions, Y-up right-handed.
@@ -30,11 +41,16 @@ pub struct MeshGroup {
     /// Per-vertex tint (linear RGB). Without normals this is the final
     /// color (shading already baked per face by the producer, see
     /// [`shade_for_dir`]); with normals it is the albedo the light
-    /// modulates.
+    /// modulates. With uvs the texture sample multiplies this first.
     pub colors: Vec<[f32; 3]>,
     /// Per-vertex normals (unit length, world space). Empty = unlit.
     pub normals: Vec<[f32; 3]>,
-    /// Triangle indices into `positions` / `colors` / `normals`.
+    /// Per-vertex texture coords (0..1, y-down like `repame-atlas` uvs).
+    /// Empty = untextured.
+    pub uvs: Vec<[f32; 2]>,
+    /// Texture array layer sampled when `uvs` is non-empty.
+    pub texture_page: u32,
+    /// Triangle indices into `positions` / `colors` / `normals` / `uvs`.
     pub indices: Vec<u32>,
     /// Opaque geometry occludes (`true`) or always draws (`false`, e.g.
     /// flat ground overlays and editor gizmo quads that must stay visible
@@ -52,10 +68,34 @@ impl MeshGroup {
     }
 
     /// Push one triangle (counter-clockwise when viewed from outside).
+    ///
+    /// Adds no normals and no uvs: only use this on groups that stay
+    /// unlit and untextured. Mixing `push_tri` with `push_tri_lit` or
+    /// textured pushes desyncs the attribute lists and the group is
+    /// dropped whole at batch time — pick one style per group.
     pub fn push_tri(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], color: Rgb) {
         let base = self.positions.len() as u32;
         self.positions.extend_from_slice(&[a, b, c]);
         self.colors.extend_from_slice(&[color, color, color]);
+        self.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
+    /// Push one textured triangle (counter-clockwise when viewed from
+    /// outside). Adds uvs but no normals: for unlit textured groups.
+    /// Mixing with untextured or lit pushes desyncs the attribute lists
+    /// and the group is dropped whole at batch time.
+    pub fn push_tri_textured(
+        &mut self,
+        a: [f32; 3],
+        b: [f32; 3],
+        c: [f32; 3],
+        color: Rgb,
+        uvs: [[f32; 2]; 3],
+    ) {
+        let base = self.positions.len() as u32;
+        self.positions.extend_from_slice(&[a, b, c]);
+        self.colors.extend_from_slice(&[color, color, color]);
+        self.uvs.extend_from_slice(&uvs);
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
@@ -77,10 +117,46 @@ impl MeshGroup {
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
+    /// Push one triangle with a face normal and uvs (unit-length world
+    /// normal, 0..1 y-down uvs). For lit + textured groups. Mixing push
+    /// styles desyncs the attribute lists and the group is dropped whole
+    /// at batch time — pick one style per group.
+    pub fn push_tri_lit_textured(
+        &mut self,
+        a: [f32; 3],
+        b: [f32; 3],
+        c: [f32; 3],
+        color: Rgb,
+        normal: [f32; 3],
+        uvs: [[f32; 2]; 3],
+    ) {
+        let base = self.positions.len() as u32;
+        self.positions.extend_from_slice(&[a, b, c]);
+        self.colors.extend_from_slice(&[color, color, color]);
+        self.normals.extend_from_slice(&[normal, normal, normal]);
+        self.uvs.extend_from_slice(&uvs);
+        self.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
     /// Push one quad as two triangles (a, b, c) + (a, c, d).
     pub fn push_quad(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3], color: Rgb) {
         self.push_tri(a, b, c, color);
         self.push_tri(a, c, d, color);
+    }
+
+    /// Push one unlit textured quad (uvs in corner order a/b/c/d).
+    #[allow(clippy::too_many_arguments)] // same shape as `push_quad_lit_textured`
+    pub fn push_quad_textured(
+        &mut self,
+        a: [f32; 3],
+        b: [f32; 3],
+        c: [f32; 3],
+        d: [f32; 3],
+        color: Rgb,
+        uvs: [[f32; 2]; 4],
+    ) {
+        self.push_tri_textured(a, b, c, color, [uvs[0], uvs[1], uvs[2]]);
+        self.push_tri_textured(a, c, d, color, [uvs[0], uvs[2], uvs[3]]);
     }
 
     /// Push one lit quad as two `push_tri_lit` triangles.
@@ -95,6 +171,22 @@ impl MeshGroup {
     ) {
         self.push_tri_lit(a, b, c, color, normal);
         self.push_tri_lit(a, c, d, color, normal);
+    }
+
+    /// Push one lit + textured quad (uvs in corner order a/b/c/d).
+    #[allow(clippy::too_many_arguments)] // quad spec is position + tint + normal + uvs; one struct would churn call sites
+    pub fn push_quad_lit_textured(
+        &mut self,
+        a: [f32; 3],
+        b: [f32; 3],
+        c: [f32; 3],
+        d: [f32; 3],
+        color: Rgb,
+        normal: [f32; 3],
+        uvs: [[f32; 2]; 4],
+    ) {
+        self.push_tri_lit_textured(a, b, c, color, normal, [uvs[0], uvs[1], uvs[2]]);
+        self.push_tri_lit_textured(a, c, d, color, normal, [uvs[0], uvs[2], uvs[3]]);
     }
 
     /// Push an axis-aligned shaded box centered at (`cx`, base `y0`, `cz`),
@@ -229,5 +321,48 @@ mod tests {
         assert_eq!(g.tri_count(), 2);
         assert_eq!(g.normals.len(), g.positions.len());
         assert!(g.normals.iter().all(|n| *n == [0.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn textured_tris_carry_matching_uvs_and_page() {
+        let mut g = MeshGroup {
+            texture_page: 2,
+            depth_test: true,
+            ..Default::default()
+        };
+        g.push_quad_textured(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        );
+        assert_eq!(g.tri_count(), 2);
+        assert_eq!(g.uvs.len(), g.positions.len());
+        assert_eq!(g.normals.len(), 0);
+        assert_eq!(g.texture_page, 2);
+        assert_eq!(g.uvs[0], [0.0, 0.0]);
+        assert_eq!(g.uvs[2], [1.0, 1.0]);
+    }
+
+    #[test]
+    fn lit_textured_tris_carry_both() {
+        let mut g = MeshGroup {
+            depth_test: true,
+            ..Default::default()
+        };
+        g.push_quad_lit_textured(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        );
+        assert_eq!(g.tri_count(), 2);
+        assert_eq!(g.uvs.len(), g.positions.len());
+        assert_eq!(g.normals.len(), g.positions.len());
     }
 }

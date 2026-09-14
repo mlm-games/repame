@@ -7,10 +7,20 @@
 //! [`DepthComposite`](repose_render_wgpu::DepthComposite): the shared UI
 //! pass carries no depth ops, so depth-tested content renders into a
 //! viewport-owned target during `prepare` and composites back in `paint`.
+//!
+//! Lit/texture plumbing mirrors `repame-sprite` `SpriteBatch`: the batch
+//! owns a texture array fed from [`SceneUpload`]s (games drain their
+//! image/atlas source once per frame), and each group carries one page.
+//! Groups without uvs sample nothing; groups with uvs multiply the texel
+//! into the tint before lighting. `BatchDesc` matches the sprite batch
+//! shape (layer count + size + filter) so asset code reads the same.
 
 //! Flat-shaded 3D pass: world-space pos+color through a view-projection uniform.
 //! Lit groups add per-vertex normals and sample the frame light from the
 //! same uniform block (ambient + one directional, linear space).
+//! Textured groups add uvs + a page and sample the batch texture array;
+//! the texel multiplies the tint before lighting (untextured vertices
+//! carry a dummy uv and page 0 with weight 0, so one pipeline fits all).
 const SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -21,12 +31,17 @@ struct Camera {
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
+@group(1) @binding(0) var scene_tex: texture_2d_array<f32>;
+@group(1) @binding(1) var scene_smp: sampler;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) lit_flag: f32,
+    @location(3) uv: vec2<f32>,
+    @location(4) tex_mix: f32,
+    @location(5) page: f32,
 };
 
 @vertex
@@ -35,24 +50,35 @@ fn vs_main(
     @location(1) color: vec3<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) lit: f32,
+    @location(4) uv: vec2<f32>,
+    @location(5) tex_mix: f32,
+    @location(6) page: f32,
 ) -> VsOut {
     var out: VsOut;
     out.pos = camera.view_proj * vec4<f32>(pos, 1.0);
     out.color = color;
     out.normal = normal;
     out.lit_flag = lit;
+    out.uv = uv;
+    out.tex_mix = tex_mix;
+    out.page = page;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // `light_dir` points from the surface toward the light (Godot
-    // DirectionalLight3D convention). Flat groups carry lit_flag 0 and
-    // pass their baked color through untouched.
+    var base = in.color;
+    if (in.tex_mix > 0.5) {
+        let tex = textureSample(scene_tex, scene_smp, in.uv, i32(in.page + 0.5));
+        if (tex.a < 0.001) {
+            discard;
+        }
+        base = in.color * tex.rgb;
+    }
     let n = normalize(in.normal);
     let ndl = max(dot(n, camera.light_dir), 0.0);
-    let lit = in.color * (camera.ambient + camera.light_color * (camera.diffuse * ndl));
-    return vec4<f32>(mix(in.color, lit, in.lit_flag), 1.0);
+    let lit = base * (camera.ambient + camera.light_color * (camera.diffuse * ndl));
+    return vec4<f32>(mix(base, lit, in.lit_flag), 1.0);
 }
 "#;
 
@@ -104,11 +130,11 @@ impl Default for SceneLight {
     }
 }
 
-/// One vertex: position + albedo + normal + lit flag in a single
-/// layout, so flat and lit groups share one buffer and one pipeline.
-/// Flat vertices carry a dummy up-normal and `lit = 0.0` (their baked
-/// color passes through untouched); lit vertices carry the true normal
-/// and `lit = 1.0`.
+/// One vertex: position + albedo + normal + lit flag + uv/page in a
+/// single layout, so flat, lit, and textured groups share one buffer and
+/// one pipeline. Flat vertices carry a dummy up-normal and `lit = 0.0`
+/// (their baked color passes through untouched); untextured vertices
+/// carry a dummy uv and `tex_mix = 0.0` (no sampling, tint only).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vert {
@@ -116,6 +142,53 @@ struct Vert {
     color: [f32; 3],
     normal: [f32; 3],
     lit: f32,
+    uv: [f32; 2],
+    tex_mix: f32,
+    page: f32,
+}
+
+/// Texture sampling for batch layers (same shape as `repame-sprite`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SceneFilter {
+    /// Pixel-art crisp (nt default).
+    #[default]
+    Nearest,
+    Linear,
+}
+
+/// Batch construction parameters. Layers map 1:1 onto array layers; one
+/// page per mesh group, same as sprite atlas pages.
+#[derive(Clone, Copy, Debug)]
+pub struct BatchDesc {
+    /// Square texture layer edge in pixels.
+    pub layer_size: u32,
+    /// Array layer count (= max texture pages).
+    pub layers: u32,
+    pub filter: SceneFilter,
+}
+
+impl Default for BatchDesc {
+    fn default() -> Self {
+        Self {
+            layer_size: 1024,
+            layers: 4,
+            filter: SceneFilter::Nearest,
+        }
+    }
+}
+
+/// One pending texture upload: blit `rgba` (tight `w`*`h`*4 bytes) into
+/// `page` at (`x`, `y`). Games fill these from their image source (atlas
+/// drain, decoded PNG, procedural texel) once per frame; mismatches are
+/// dropped with a warning at upload time, never a panic.
+#[derive(Clone, Debug)]
+pub struct SceneUpload {
+    pub page: u32,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub rgba: Vec<u8>,
 }
 
 /// One validated group awaiting [`SceneBatch::finish`].
@@ -123,6 +196,8 @@ struct Pending {
     positions: Vec<[f32; 3]>,
     colors: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    texture_page: u32,
     indices: Vec<u32>,
     depth_test: bool,
 }
@@ -140,14 +215,17 @@ struct DrawRange {
 /// Per-frame snapshot batch. `Send + Sync` so it can cross into the
 /// compositor thread via [`repose_render_wgpu::Callback`].
 ///
-/// Each `id` owns its pipelines in `CallbackResources` (the
-/// `repame-sprite` `SpriteBatch` pattern): viewports coexist. Rebuilding on
-/// format/sample change drops nothing game-side — the snapshot rebuilds
-/// the buffers from the next frame's groups anyway.
+/// Each `id` owns its pipelines + texture in `CallbackResources` (the
+/// `repame-sprite` `SpriteBatch` pattern): viewports coexist. Rebuilding
+/// on format/sample/desc change drops texture contents (logged) — the
+/// game re-uploads from its next frame's [`SceneUpload`]s, same as the
+/// sprite batch's atlas contract.
 pub struct SceneBatch {
     id: String,
+    desc: BatchDesc,
     camera: CameraUniform,
     pending: Vec<Pending>,
+    uploads: Vec<SceneUpload>,
     verts: Vec<Vert>,
     indices: Vec<u32>,
     ranges: Vec<DrawRange>,
@@ -155,8 +233,13 @@ pub struct SceneBatch {
 
 impl SceneBatch {
     pub fn with_id(id: impl Into<String>) -> Self {
+        Self::with_desc(id, BatchDesc::default())
+    }
+
+    pub fn with_desc(id: impl Into<String>, desc: BatchDesc) -> Self {
         Self {
             id: id.into(),
+            desc,
             camera: CameraUniform {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 light_dir: [0.0, 1.0, 0.0],
@@ -165,6 +248,7 @@ impl SceneBatch {
                 diffuse: 0.9,
             },
             pending: Vec::new(),
+            uploads: Vec::new(),
             verts: Vec::new(),
             indices: Vec::new(),
             ranges: Vec::new(),
@@ -198,6 +282,7 @@ impl SceneBatch {
 
     pub fn clear(&mut self) {
         self.pending.clear();
+        self.uploads.clear();
         self.verts.clear();
         self.indices.clear();
         self.ranges.clear();
@@ -211,9 +296,21 @@ impl SceneBatch {
         self.indices.is_empty()
     }
 
+    /// Queue texture uploads, applied in the next `prepare`.
+    pub fn upload(&mut self, upload: SceneUpload) {
+        self.uploads.push(upload);
+    }
+
+    /// Queue several uploads at once (per-frame texture drains).
+    pub fn extend_uploads(&mut self, uploads: impl IntoIterator<Item = SceneUpload>) {
+        self.uploads.extend(uploads);
+    }
+
     /// Append one group. Malformed groups (index out of range, or
-    /// position/color length mismatch, or partial normals) are dropped
-    /// with a warning — never a panic, never partial draws.
+    /// position/color length mismatch, or partial normals/uvs) are
+    /// dropped with a warning — never a panic, never partial draws.
+    /// Normals and uvs are all-or-nothing per group: a group with some
+    /// normals (or some uvs) but not one per vertex is malformed.
     pub fn push_group(&mut self, group: &MeshGroup) {
         if group.is_empty() {
             return;
@@ -236,6 +333,24 @@ impl SceneBatch {
             );
             return;
         }
+        if !group.uvs.is_empty() && group.uvs.len() != group.positions.len() {
+            log::warn!(
+                "scene_batch[{}]: dropping group ({} positions vs {} uvs)",
+                self.id,
+                group.positions.len(),
+                group.uvs.len()
+            );
+            return;
+        }
+        if !group.uvs.is_empty() && group.texture_page >= self.desc.layers {
+            log::warn!(
+                "scene_batch[{}]: dropping group (page {} >= {} layers)",
+                self.id,
+                group.texture_page,
+                self.desc.layers
+            );
+            return;
+        }
         if group
             .indices
             .iter()
@@ -251,6 +366,8 @@ impl SceneBatch {
             positions: group.positions.clone(),
             colors: group.colors.clone(),
             normals: group.normals.clone(),
+            uvs: group.uvs.clone(),
+            texture_page: group.texture_page,
             indices: group.indices.clone(),
             depth_test: group.depth_test,
         });
@@ -263,6 +380,8 @@ impl SceneBatch {
     ///
     /// Flat vertices (no normals) carry a dummy up-normal and `lit = 0.0`
     /// so the shader passes their baked color through untouched.
+    /// Untextured vertices carry a dummy uv and `tex_mix = 0.0` so the
+    /// shader skips the sample.
     pub fn finish(&mut self) {
         self.verts.clear();
         self.indices.clear();
@@ -271,28 +390,24 @@ impl SceneBatch {
         for g in self.pending.drain(..) {
             let base = self.verts.len() as u32;
             let lit = !g.normals.is_empty();
-            if lit {
-                self.verts.extend(
+            let textured = !g.uvs.is_empty();
+            let page = g.texture_page as f32;
+            self.verts
+                .extend(
                     g.positions
                         .iter()
                         .zip(g.colors.iter())
-                        .zip(g.normals.iter())
-                        .map(|((p, c), n)| Vert {
+                        .enumerate()
+                        .map(|(i, (p, c))| Vert {
                             pos: *p,
                             color: *c,
-                            normal: *n,
-                            lit: 1.0,
+                            normal: if lit { g.normals[i] } else { [0.0, 1.0, 0.0] },
+                            lit: if lit { 1.0 } else { 0.0 },
+                            uv: if textured { g.uvs[i] } else { [0.0, 0.0] },
+                            tex_mix: if textured { 1.0 } else { 0.0 },
+                            page,
                         }),
                 );
-            } else {
-                self.verts
-                    .extend(g.positions.iter().zip(g.colors.iter()).map(|(p, c)| Vert {
-                        pos: *p,
-                        color: *c,
-                        normal: [0.0, 1.0, 0.0],
-                        lit: 0.0,
-                    }));
-            }
             let start = self.indices.len() as u32;
             self.indices.extend(g.indices.iter().map(|i| i + base));
             self.ranges.push(DrawRange {
@@ -309,7 +424,13 @@ impl SceneBatch {
         screen: &ScreenDescriptor,
         resources: &mut CallbackResources,
     ) {
-        let key = (screen.target_format, screen.sample_count);
+        let key = (
+            screen.target_format,
+            screen.sample_count,
+            self.desc.layer_size,
+            self.desc.layers,
+            self.desc.filter as u32,
+        );
         let fresh = resources
             .get::<SceneResources>()
             .is_none_or(|all| !all.batches.contains_key(self.id.as_str()));
@@ -322,7 +443,7 @@ impl SceneBatch {
         }
         if stale {
             log::warn!(
-                "scene_batch[{}]: rebuilding pipeline (format/sample changed)",
+                "scene_batch[{}]: rebuilding pipeline/texture (format/sample/desc changed); texture contents dropped, re-upload required",
                 self.id
             );
         }
@@ -335,6 +456,50 @@ impl SceneBatch {
             size: size_of::<CameraUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+        let (mag, min, mipmap) = match self.desc.filter {
+            SceneFilter::Nearest => (
+                wgpu::FilterMode::Nearest,
+                wgpu::FilterMode::Nearest,
+                wgpu::MipmapFilterMode::Nearest,
+            ),
+            SceneFilter::Linear => (
+                wgpu::FilterMode::Linear,
+                wgpu::FilterMode::Linear,
+                wgpu::MipmapFilterMode::Linear,
+            ),
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("repame_view3d_tex"),
+            size: wgpu::Extent3d {
+                width: self.desc.layer_size,
+                height: self.desc.layer_size,
+                depth_or_array_layers: self.desc.layers,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let tex_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("repame_view3d_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: mag,
+            min_filter: min,
+            mipmap_filter: mipmap,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 1.0,
+            compare: None,
+            anisotropy_clamp: 1,
+            border_color: None,
         });
         let cam_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_cam_bgl"),
@@ -357,9 +522,44 @@ impl SceneBatch {
                 resource: camera.as_entire_binding(),
             }],
         });
+        let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("repame_view3d_tex_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let tex_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("repame_view3d_tex_bg"),
+            layout: &tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
         let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("repame_view3d_pl"),
-            bind_group_layouts: &[Some(&cam_layout)],
+            bind_group_layouts: &[Some(&cam_layout), Some(&tex_layout)],
             immediate_size: 0,
         });
         let buffers = [Some(wgpu::VertexBufferLayout {
@@ -385,6 +585,21 @@ impl SceneBatch {
                     format: wgpu::VertexFormat::Float32,
                     offset: 36,
                     shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 40,
+                    shader_location: 4,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 48,
+                    shader_location: 5,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 52,
+                    shader_location: 6,
                 },
             ],
         })];
@@ -467,6 +682,8 @@ impl SceneBatch {
             index_cap: 0,
             camera,
             cam_bind,
+            tex_bind,
+            texture,
             camera_mat: self.camera,
             last_ranges: Vec::new(),
         };
@@ -484,10 +701,13 @@ impl SceneBatch {
         }
     }
 
-    /// Upload camera + geometry after [`finish`]. No-op when the id has no
-    /// prepared entry (call [`ensure_resources`](Self::ensure_resources)
-    /// first — [`prepare_scene_with_id`] + the viewport do).
-    pub(crate) fn upload(
+    /// Upload camera + geometry + texture uploads after [`finish`].
+    /// No-op when the id has no prepared entry (call
+    /// [`ensure_resources`](Self::ensure_resources) first —
+    /// [`prepare_scene_with_id`] + the viewport do). Out-of-range or
+    /// mis-sized uploads are dropped with a warning, never a panic
+    /// (sprite-batch contract).
+    pub(crate) fn upload_all(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -527,6 +747,52 @@ impl SceneBatch {
         if !self.indices.is_empty() {
             queue.write_buffer(&res.indices, 0, bytemuck::cast_slice(&self.indices));
         }
+        // Texture uploads straight into array layers. `desc` lives on the
+        // CPU batch (not the GPU entry) so validation matches what the
+        // game packed against, even right after a pipeline rebuild.
+        for up in &self.uploads {
+            let expected = up.w as usize * up.h as usize * 4;
+            if up.page >= self.desc.layers
+                || up.x + up.w > self.desc.layer_size
+                || up.y + up.h > self.desc.layer_size
+                || up.rgba.len() != expected
+            {
+                log::warn!(
+                    "scene_batch[{}]: dropping out-of-range upload page={} {}x{}+{}+{} ({} bytes)",
+                    self.id,
+                    up.page,
+                    up.w,
+                    up.h,
+                    up.x,
+                    up.y,
+                    up.rgba.len()
+                );
+                continue;
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &res.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: up.x,
+                        y: up.y,
+                        z: up.page,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &up.rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(up.w * 4),
+                    rows_per_image: Some(up.h),
+                },
+                wgpu::Extent3d {
+                    width: up.w,
+                    height: up.h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         res.last_ranges = self.ranges.clone();
     }
 
@@ -544,10 +810,19 @@ impl SceneBatch {
     pub(crate) fn test_vert_lighting(&self) -> Vec<([f32; 3], f32)> {
         self.verts.iter().map(|v| (v.normal, v.lit)).collect()
     }
+
+    /// Test-only vertex readout after [`finish`]: (uv, tex_mix, page).
+    #[cfg(test)]
+    pub(crate) fn test_vert_texture(&self) -> Vec<([f32; 2], f32, f32)> {
+        self.verts
+            .iter()
+            .map(|v| (v.uv, v.tex_mix, v.page))
+            .collect()
+    }
 }
 
 struct SceneEntry {
-    key: (wgpu::TextureFormat, u32),
+    key: (wgpu::TextureFormat, u32, u32, u32, u32),
     pipeline_depth: wgpu::RenderPipeline,
     pipeline_flat: wgpu::RenderPipeline,
     verts: wgpu::Buffer,
@@ -556,6 +831,8 @@ struct SceneEntry {
     index_cap: usize,
     camera: wgpu::Buffer,
     cam_bind: wgpu::BindGroup,
+    tex_bind: wgpu::BindGroup,
+    texture: wgpu::Texture,
     camera_mat: CameraUniform,
     last_ranges: Vec<DrawRange>,
 }
@@ -589,6 +866,7 @@ pub fn prepare_scene_with_id(
     // before beginning the mutable scene pass.
     struct Snapshot {
         cam_bind: wgpu::BindGroup,
+        tex_bind: wgpu::BindGroup,
         verts: wgpu::Buffer,
         indices: wgpu::Buffer,
         pipeline_depth: wgpu::RenderPipeline,
@@ -608,6 +886,7 @@ pub fn prepare_scene_with_id(
         }
         Some(Snapshot {
             cam_bind: res.cam_bind.clone(),
+            tex_bind: res.tex_bind.clone(),
             verts: res.verts.clone(),
             indices: res.indices.clone(),
             pipeline_depth: res.pipeline_depth.clone(),
@@ -621,6 +900,7 @@ pub fn prepare_scene_with_id(
         return;
     };
     pass.set_bind_group(0, &snap.cam_bind, &[]);
+    pass.set_bind_group(1, &snap.tex_bind, &[]);
     pass.set_vertex_buffer(0, snap.verts.slice(..));
     pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
     for r in &snap.ranges {
@@ -677,6 +957,8 @@ mod tests {
         assert_eq!(batch.entry_ranges(), vec![(0, 3, true)]);
         // Flat vertices pass through: dummy up-normal, lit 0.
         assert_eq!(batch.test_vert_lighting(), vec![([0.0, 1.0, 0.0], 0.0); 3]);
+        // Untextured vertices skip the sample: dummy uv, mix 0.
+        assert_eq!(batch.test_vert_texture(), vec![([0.0, 0.0], 0.0, 0.0); 3]);
     }
 
     #[test]
@@ -701,6 +983,82 @@ mod tests {
         let got = batch.test_vert_lighting();
         assert_eq!(got.len(), 6);
         assert!(got.iter().all(|(n, l)| *n == [0.0, 1.0, 0.0] && *l == 1.0));
+        // Lit but untextured: still skips the sample.
+        assert!(
+            batch
+                .test_vert_texture()
+                .iter()
+                .all(|(uv, m, _)| *uv == [0.0, 0.0] && *m == 0.0)
+        );
+    }
+
+    #[test]
+    fn textured_group_flattens_with_uvs_and_page() {
+        let mut batch = SceneBatch::with_id("test.textured");
+        batch.set_camera(Mat4::IDENTITY);
+        let mut g = MeshGroup {
+            texture_page: 2,
+            depth_test: true,
+            ..Default::default()
+        };
+        g.push_quad_textured(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        );
+        batch.push_group(&g);
+        batch.finish();
+        assert_eq!(batch.len_tris(), 2);
+        let got = batch.test_vert_texture();
+        assert_eq!(got.len(), 6);
+        assert!(got.iter().all(|(_, m, p)| *m == 1.0 && *p == 2.0));
+        assert_eq!(got[0].0, [0.0, 0.0]);
+        assert_eq!(got[2].0, [1.0, 1.0]);
+        // Unlit textured: flat color path still passes through.
+        assert!(
+            batch
+                .test_vert_lighting()
+                .iter()
+                .all(|(n, l)| *n == [0.0, 1.0, 0.0] && *l == 0.0)
+        );
+    }
+
+    #[test]
+    fn lit_textured_group_flattens_with_both() {
+        let mut batch = SceneBatch::with_id("test.lit.textured");
+        batch.set_camera(Mat4::IDENTITY);
+        let mut g = MeshGroup {
+            texture_page: 1,
+            depth_test: true,
+            ..Default::default()
+        };
+        g.push_quad_lit_textured(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        );
+        batch.push_group(&g);
+        batch.finish();
+        assert_eq!(batch.len_tris(), 2);
+        assert!(
+            batch
+                .test_vert_lighting()
+                .iter()
+                .all(|(n, l)| *n == [0.0, 0.0, 1.0] && *l == 1.0)
+        );
+        assert!(
+            batch
+                .test_vert_texture()
+                .iter()
+                .all(|(_, m, p)| *m == 1.0 && *p == 1.0)
+        );
     }
 
     #[test]
@@ -724,6 +1082,8 @@ mod tests {
             positions: vec![[0.0, 0.0, 0.0]],
             colors: vec![],
             normals: vec![],
+            uvs: vec![],
+            texture_page: 0,
             indices: vec![0, 0, 0],
             depth_test: true,
         });
@@ -732,6 +1092,8 @@ mod tests {
             positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
             colors: vec![[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
             normals: vec![],
+            uvs: vec![],
+            texture_page: 0,
             indices: vec![0, 1, 9],
             depth_test: true,
         });
@@ -740,9 +1102,26 @@ mod tests {
             positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             colors: vec![[1.0, 0.0, 0.0]; 3],
             normals: vec![[0.0, 1.0, 0.0]],
+            uvs: vec![],
+            texture_page: 0,
             indices: vec![0, 1, 2],
             depth_test: true,
         });
+        // Partial uvs.
+        batch.push_group(&MeshGroup {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            colors: vec![[1.0, 0.0, 0.0]; 3],
+            normals: vec![],
+            uvs: vec![[0.0, 0.0]],
+            texture_page: 0,
+            indices: vec![0, 1, 2],
+            depth_test: true,
+        });
+        // Page past the batch layers.
+        let mut bad_page = solid_box();
+        bad_page.uvs = vec![[0.0, 0.0]; 3];
+        bad_page.texture_page = 99;
+        batch.push_group(&bad_page);
         batch.push_group(&solid_box());
         batch.finish();
         assert_eq!(batch.len_tris(), 1, "only the valid group draws");
@@ -797,7 +1176,7 @@ mod tests {
                 batch.push_group(&self.near);
                 batch.finish();
                 batch.ensure_resources(device, screen, resources);
-                batch.upload(device, queue, resources);
+                batch.upload_all(device, queue, resources);
                 prepare_scene_with_id(
                     "test.depth",
                     device,
@@ -920,7 +1299,7 @@ mod tests {
                 batch.push_group(&self.group);
                 batch.finish();
                 batch.ensure_resources(device, screen, resources);
-                batch.upload(device, queue, resources);
+                batch.upload_all(device, queue, resources);
                 prepare_scene_with_id(
                     "test.lit",
                     device,
@@ -1032,5 +1411,245 @@ mod tests {
             return;
         };
         assert_eq!(flat, [188, 188, 188, 255], "flat ignores light");
+    }
+
+    /// End-to-end GPU proof for the texture path: a 2x2 page (R G / B W)
+    /// behind a screen-filling textured quad reads back the right texel
+    /// per quadrant; a second page selects independently; lit x textured
+    /// multiplies before lighting; transparent texels discard. Skips
+    /// gracefully where no GPU exists.
+    #[test]
+    fn offscreen_textured_samples_pages() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+
+        struct Textured {
+            cam: OrbitCamera,
+            group: MeshGroup,
+            uploads: Vec<SceneUpload>,
+            light: SceneLight,
+        }
+
+        impl WgpuCallback for Textured {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_desc(
+                    "test.textured",
+                    BatchDesc {
+                        layer_size: 2,
+                        layers: 2,
+                        ..BatchDesc::default()
+                    },
+                );
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.set_light(self.light);
+                batch.extend_uploads(self.uploads.iter().cloned());
+                batch.push_group(&self.group);
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.textured",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut wgpu::RenderPass<'static>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_id("test.textured", rpass, resources);
+            }
+        }
+
+        // Page 0 (2x2, row-major top first): R G / B W. Page 1: magenta.
+        fn uploads() -> Vec<SceneUpload> {
+            vec![
+                SceneUpload {
+                    page: 0,
+                    x: 0,
+                    y: 0,
+                    w: 2,
+                    h: 2,
+                    rgba: vec![
+                        255, 0, 0, 255, //
+                        0, 255, 0, 255, //
+                        0, 0, 255, 255, //
+                        255, 255, 255, 255,
+                    ],
+                },
+                SceneUpload {
+                    page: 1,
+                    x: 0,
+                    y: 0,
+                    w: 2,
+                    h: 2,
+                    rgba: [255, 0, 255, 255].repeat(4),
+                },
+            ]
+        }
+
+        // Screen-filling quad with full 0..1 uvs (CCW-from-above).
+        fn full_quad(page: u32, lit: bool, tint: [f32; 3]) -> MeshGroup {
+            let mut g = MeshGroup {
+                texture_page: page,
+                depth_test: true,
+                ..Default::default()
+            };
+            let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+            if lit {
+                g.push_quad_lit_textured(
+                    [-5.0, 5.0, 5.0],
+                    [5.0, 5.0, 5.0],
+                    [5.0, 5.0, -5.0],
+                    [-5.0, 5.0, -5.0],
+                    tint,
+                    [0.0, 1.0, 0.0],
+                    uvs,
+                );
+            } else {
+                g.push_quad_textured(
+                    [-5.0, 5.0, 5.0],
+                    [5.0, 5.0, 5.0],
+                    [5.0, 5.0, -5.0],
+                    [-5.0, 5.0, -5.0],
+                    tint,
+                    uvs,
+                );
+            }
+            g
+        }
+
+        fn render_case(group: MeshGroup, light: SceneLight) -> Option<Vec<u8>> {
+            let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("SKIP textured test (no GPU): {e}");
+                    return None;
+                }
+            };
+            // High steep pitch: the ground-parallel quad fills the frame
+            // instead of foreshortening into a top band.
+            let cam = OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: 0.0,
+                pitch: 1.45,
+                dist: 12.0,
+                fov_y_deg: 30.0,
+            };
+            let scene = Scene {
+                clear_color: Color::from_rgba(0, 0, 0, 255),
+                nodes: vec![SceneNode::Callback {
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 64.0,
+                        h: 64.0,
+                    },
+                    payload: Callback::new(Textured {
+                        cam,
+                        group,
+                        uploads: uploads(),
+                        light,
+                    }),
+                }],
+            };
+            Some(
+                renderer
+                    .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+                    .expect("offscreen render"),
+            )
+        }
+
+        // Unlit white tint: raw texels. Orientation is camera-dependent
+        // (here screen-right is world -Z, screen-top is far -X): corner
+        // a=(-5,+5) top-left, d=(-5,-5) top-right, b=(+5,+5)
+        // bottom-left, c=(+5,-5) bottom-right. The pin is texel-per-quadrant
+        // consistency, not sprite-batch top-left order.
+        let neutral = SceneLight {
+            direction: [0.0, 1.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            diffuse: 0.0,
+            ambient: [1.0, 1.0, 1.0],
+        };
+        let Some(px) = render_case(full_quad(0, false, [1.0, 1.0, 1.0]), neutral) else {
+            return;
+        };
+        let at = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * 64 + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+        // Orientation (pinned by probe grid): under this orbit screen
+        // x runs against +u (right-to-left) and screen y runs against +v
+        // (top-to-bottom is v=1->0), so the visible mapping is:
+        // (8,8)=red (0,0), (24,24)=green (1,0), (56,8)=blue (0,1),
+        // (40,24)=white (1,1). Sampling is exact (Nearest, interior).
+        assert_eq!(at(8, 8), [255, 0, 0, 255], "uv (0,0) red");
+        assert_eq!(at(24, 24), [0, 255, 0, 255], "uv (1,0) green");
+        assert_eq!(at(56, 8), [0, 0, 255, 255], "uv (0,1) blue");
+        assert_eq!(at(40, 24), [255, 255, 255, 255], "uv (1,1) white");
+
+        // Page select: same quad on page 1 is all magenta.
+        let Some(px) = render_case(full_quad(1, false, [1.0, 1.0, 1.0]), neutral) else {
+            return;
+        };
+        let at = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * 64 + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+        assert_eq!(at(32, 32), [255, 0, 255, 255], "page 1 magenta");
+
+        // Tint multiplies the texel: gray halves the white corner at
+        // (40,24). Linear 0.5 over linear 1.0 reads back as sRGB 188.
+        let Some(px) = render_case(full_quad(0, false, [0.5, 0.5, 0.5]), neutral) else {
+            return;
+        };
+        let i = ((24 * 64 + 40) * 4) as usize;
+        assert_eq!([px[i], px[i + 1], px[i + 2]], [188, 188, 188]);
+
+        // Lit x textured: face-on light keeps white; back light kills it.
+        let face_light = SceneLight {
+            direction: [0.0, 1.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            diffuse: 1.0,
+            ambient: [0.0, 0.0, 0.0],
+        };
+        let Some(px) = render_case(full_quad(0, true, [1.0, 1.0, 1.0]), face_light) else {
+            return;
+        };
+        // White texel under face-on light stays white; probe the white
+        // corner pinned above (40,24).
+        let i = ((24 * 64 + 40) * 4) as usize;
+        assert_eq!(
+            [px[i], px[i + 1], px[i + 2], px[i + 3]],
+            [255, 255, 255, 255]
+        );
+        let back_light = SceneLight {
+            direction: [0.0, -1.0, 0.0],
+            ..face_light
+        };
+        let Some(px) = render_case(full_quad(0, true, [1.0, 1.0, 1.0]), back_light) else {
+            return;
+        };
+        let i = ((24 * 64 + 40) * 4) as usize;
+        assert_eq!([px[i], px[i + 1], px[i + 2], px[i + 3]], [0, 0, 0, 255]);
     }
 }

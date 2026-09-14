@@ -31,12 +31,14 @@
 //! ```
 
 pub mod camera;
+pub mod chunk;
 pub mod mesh;
 pub mod pick;
 pub mod render;
 pub mod viewport;
 
 pub use camera::{FAR, NEAR, OPENGL_TO_WGPU, OrbitCamera};
+pub use chunk::{ChunkCache, ChunkDraw, ChunkEntry};
 pub use mesh::{MeshGroup, Rgb, shade, shade_for_dir};
 pub use pick::{MeshHit, group_bounds, pick_ray, pick_screen, ray_aabb, ray_triangle};
 pub use render::{BatchDesc, SceneBatch, SceneFilter, SceneLight, SceneUpload};

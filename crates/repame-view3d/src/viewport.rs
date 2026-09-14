@@ -88,6 +88,19 @@ impl Frame3d {
     pub fn push(&mut self, group: MeshGroup) {
         self.groups.push(group);
     }
+
+    /// Append cached chunk geometry (see [`ChunkCache`](super::chunk::ChunkCache)):
+    /// validated groups copy into the snapshot alongside dynamic content.
+    /// Deterministic when the caller passes [`ChunkCache::draws`] order
+    /// (chunk-sorted) first.
+    pub fn extend_chunks<'a>(
+        &mut self,
+        draws: impl IntoIterator<Item = super::chunk::ChunkDraw<'a>>,
+    ) {
+        for draw in draws {
+            self.groups.push(draw.group.clone());
+        }
+    }
 }
 
 /// UI-facing viewport events. Gestures arrive as deltas; the game applies

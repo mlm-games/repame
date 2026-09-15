@@ -780,13 +780,20 @@ impl SpriteBatch {
         }
     }
 
+    /// Painter's order within one blend range: `z` ascending, with the
+    /// push index breaking ties (stable for the producer's draw order).
+    /// `page` must NEVER participate: atlas page is a packing accident,
+    /// and sorting on it reorders same-z sprites (bandit guns under
+    /// bodies, bullet layers misaligned, camp floors over the vortex).
     fn sorted_instances(&self) -> (Vec<BatchInstance>, u32, u32) {
-        let mut v = self.instances.clone();
-        v.sort_by(|a, b| {
+        let mut v: Vec<(usize, BatchInstance)> =
+            self.instances.iter().copied().enumerate().collect();
+        v.sort_by(|(ia, a), (ib, b)| {
             Self::blend_group(a.flags)
                 .cmp(&Self::blend_group(b.flags))
-                .then_with(|| a.z.total_cmp(&b.z).then_with(|| a.page.total_cmp(&b.page)))
+                .then_with(|| a.z.total_cmp(&b.z).then_with(|| ia.cmp(ib)))
         });
+        let v: Vec<BatchInstance> = v.into_iter().map(|(_, inst)| inst).collect();
         let alpha = v
             .iter()
             .take_while(|i| Self::blend_group(i.flags) == 0)
@@ -1078,6 +1085,28 @@ mod tests {
         assert_eq!([sorted[2].z, sorted[3].z], [0.0, 3.0]);
         assert_eq!(sorted[4].z, 1.0);
         assert_eq!(sorted[4].flags, 1);
+    }
+
+    /// Atlas page is a packing accident, not a draw key: same-z
+    /// same-blend sprites keep push order regardless of page (bandit
+    /// guns over bodies, bullet layers aligned, camp floors under the
+    /// vortex — all same-z pairs the old page tiebreak reordered).
+    #[test]
+    fn same_z_keeps_push_order_across_pages() {
+        use super::super::SpriteBlend;
+        let mut batch = SpriteBatch::with_id("test.pages", BatchDesc::default());
+        let quad = |page: u32| SpriteInstance {
+            center: glam::Vec2::new(0.0, 0.0),
+            size: glam::Vec2::new(1.0, 1.0),
+            z: 0.0,
+            blend: SpriteBlend::Alpha,
+            page,
+            ..Default::default()
+        };
+        batch.push_sprite(&quad(1));
+        batch.push_sprite(&quad(0));
+        let (sorted, _, _) = batch.sorted_instances();
+        assert_eq!([sorted[0].page, sorted[1].page], [1.0, 0.0]);
     }
 
     #[test]

@@ -70,6 +70,19 @@ pub fn run_android(
     )
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PolledInput {
+    /// Window focus. `false` drops every held key: no key-ups arrive
+    /// across an alt-tab.
+    pub focused: bool,
+    /// Physical key names currently down (`KeyW`, `Digit1`, `Space`,
+    /// `Backquote`, ... — winit `KeyCode` debug names).
+    pub keys: Vec<String>,
+    pub mouse_primary: bool,
+    pub mouse_secondary: bool,
+    pub mouse_middle: bool,
+}
+
 /// Gamepad polling on the shared platform backend. Events feed
 /// `ReposeRuntime::handle_gamepad` (UI nav) and `rt.gamepads` (gameplay).
 pub struct GamepadPoller {

@@ -3256,7 +3256,7 @@ checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "renamite-animation"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "glam 0.33.7",
  "renamite-geometry",
@@ -3265,9 +3265,10 @@ dependencies = [
 
 [[package]]
 name = "renamite-behavior-common"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "glam 0.33.7",
+ "kurbo",
  "renamite-animation",
  "renamite-history",
  "renamite-machine",
@@ -3279,7 +3280,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-geometry"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "glam 0.33.7",
  "kurbo",
@@ -3290,7 +3291,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-history"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "glam 0.33.7",
  "renamite-animation",
@@ -3305,7 +3306,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-io-ren"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "renamite-machine",
  "renamite-model",
@@ -3316,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-machine"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "glam 0.33.7",
  "renamite-animation",
@@ -3329,7 +3330,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-model"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "glam 0.33.7",
  "kurbo",
@@ -3344,7 +3345,7 @@ dependencies = [
 
 [[package]]
 name = "renamite-player"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "glam 0.33.7",
  "kurbo",
@@ -3358,20 +3359,20 @@ dependencies = [
 
 [[package]]
 name = "renamite-player-ui"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "glam 0.33.7",
  "renamite-behavior-common",
  "renamite-player",
  "renamite-render-bridge",
- "repose-canvas",
- "repose-core",
+ "repose-canvas 0.30.8",
+ "repose-core 0.30.8",
  "web-time",
 ]
 
 [[package]]
 name = "renamite-render-bridge"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "glam 0.33.7",
  "kurbo",
@@ -3380,15 +3381,15 @@ dependencies = [
  "renamite-behavior-common",
  "renamite-geometry",
  "renamite-model",
- "repose-canvas",
- "repose-core",
+ "repose-canvas 0.30.8",
+ "repose-core 0.30.8",
  "rustc-hash 2.1.3",
  "slotmap",
 ]
 
 [[package]]
 name = "renamite-text"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "kurbo",
  "serde",
@@ -3413,8 +3414,8 @@ dependencies = [
  "renamite-player",
  "renamite-player-ui",
  "renamite-render-bridge",
- "repose-canvas",
- "repose-core",
+ "repose-canvas 0.30.10",
+ "repose-core 0.30.10",
 ]
 
 [[package]]
@@ -3457,7 +3458,7 @@ dependencies = [
  "repame-sim",
  "repame-sprite",
  "repame-view3d",
- "repose-core",
+ "repose-core 0.30.10",
  "serde",
 ]
 
@@ -3467,7 +3468,8 @@ version = "0.2.0"
 dependencies = [
  "bevy_ecs",
  "repame-sim",
- "repose-core",
+ "repose-core 0.30.10",
+ "serde",
 ]
 
 [[package]]
@@ -3489,9 +3491,9 @@ dependencies = [
  "repame-sim",
  "repame-sprite",
  "repose-app",
- "repose-core",
+ "repose-core 0.30.10",
  "repose-platform",
- "repose-ui",
+ "repose-ui 0.30.10",
  "wasm-bindgen",
  "web-time",
  "winit",
@@ -3516,10 +3518,10 @@ dependencies = [
  "glam 0.33.7",
  "log",
  "repame-atlas",
- "repose-canvas",
- "repose-core",
+ "repose-canvas 0.30.10",
+ "repose-core 0.30.10",
  "repose-render-wgpu",
- "repose-ui",
+ "repose-ui 0.30.10",
  "wgpu",
 ]
 
@@ -3532,40 +3534,66 @@ dependencies = [
  "gltf",
  "image",
  "log",
- "repose-core",
+ "repose-core 0.30.10",
  "repose-render-wgpu",
- "repose-ui",
+ "repose-ui 0.30.10",
  "serde",
  "wgpu",
 ]
 
 [[package]]
 name = "repose-app"
-version = "0.30.4"
+version = "0.30.10"
 dependencies = [
  "log",
- "repose-core",
- "repose-text",
- "repose-ui",
+ "repose-core 0.30.10",
+ "repose-text 0.30.10",
+ "repose-ui 0.30.10",
  "web-time",
 ]
 
 [[package]]
 name = "repose-canvas"
-version = "0.30.4"
+version = "0.30.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fad6080755a69dbd6d9ac20c2e59bed1923d97135c6374e7ed76448486377f67"
 dependencies = [
- "repose-core",
- "repose-ui",
+ "repose-core 0.30.8",
+ "repose-ui 0.30.8",
+]
+
+[[package]]
+name = "repose-canvas"
+version = "0.30.10"
+dependencies = [
+ "lyon_path",
+ "lyon_tessellation",
+ "repose-core 0.30.10",
+ "repose-ui 0.30.10",
 ]
 
 [[package]]
 name = "repose-core"
-version = "0.30.4"
+version = "0.30.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "533986cf183c8b819f83cf1ab7127deab7d22fa669b0e9cb82931c805bcbd00e"
+dependencies = [
+ "log",
+ "parking_lot",
+ "repose-macros 0.30.8",
+ "rustc-hash 2.1.3",
+ "taffy",
+ "web-time",
+]
+
+[[package]]
+name = "repose-core"
+version = "0.30.10"
 dependencies = [
  "accesskit",
  "log",
  "parking_lot",
- "repose-macros",
+ "repose-macros 0.30.10",
  "rustc-hash 2.1.3",
  "serde",
  "taffy",
@@ -3574,15 +3602,26 @@ dependencies = [
 
 [[package]]
 name = "repose-devtools"
-version = "0.30.4"
+version = "0.30.10"
 dependencies = [
- "repose-core",
+ "repose-core 0.30.10",
  "web-time",
 ]
 
 [[package]]
 name = "repose-macros"
-version = "0.30.4"
+version = "0.30.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36e5dc18b69a1a2d8e87da73aeee0ccaee05bb11a74feb7abc865cefae0ae24c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "repose-macros"
+version = "0.30.10"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3591,18 +3630,18 @@ dependencies = [
 
 [[package]]
 name = "repose-navigation"
-version = "0.30.4"
+version = "0.30.10"
 dependencies = [
  "log",
- "repose-core",
- "repose-ui",
+ "repose-core 0.30.10",
+ "repose-ui 0.30.10",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "repose-platform"
-version = "0.30.4"
+version = "0.30.10"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -3615,12 +3654,12 @@ dependencies = [
  "log",
  "pollster 1.0.1",
  "repose-app",
- "repose-core",
+ "repose-core 0.30.10",
  "repose-devtools",
  "repose-navigation",
  "repose-render-wgpu",
- "repose-text",
- "repose-ui",
+ "repose-text 0.30.10",
+ "repose-ui 0.30.10",
  "rustc-hash 2.1.3",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -3632,7 +3671,7 @@ dependencies = [
 
 [[package]]
 name = "repose-render-wgpu"
-version = "0.30.4"
+version = "0.30.10"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3641,8 +3680,8 @@ dependencies = [
  "lyon_path",
  "lyon_tessellation",
  "pollster 1.0.1",
- "repose-core",
- "repose-text",
+ "repose-core 0.30.10",
+ "repose-text 0.30.10",
  "web-workers",
  "wgpu",
  "winit",
@@ -3650,7 +3689,26 @@ dependencies = [
 
 [[package]]
 name = "repose-text"
-version = "0.30.4"
+version = "0.30.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a68bebc9162647a7dfda069d360ed0347c459eb8e116dda93f3a32aca4046357"
+dependencies = [
+ "font-awl",
+ "js-sys",
+ "log",
+ "parley",
+ "rapidhash",
+ "skrifa",
+ "swash",
+ "unicode-segmentation",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "repose-text"
+version = "0.30.10"
 dependencies = [
  "font-awl",
  "js-sys",
@@ -3667,11 +3725,26 @@ dependencies = [
 
 [[package]]
 name = "repose-tree"
-version = "0.30.4"
+version = "0.30.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "032be07c43432f17bcd68053a9720839de145843609ee4eed84d89dabb25d915"
 dependencies = [
  "log",
  "rapidhash",
- "repose-core",
+ "repose-core 0.30.8",
+ "rustc-hash 2.1.3",
+ "slotmap",
+ "smallvec",
+ "taffy",
+]
+
+[[package]]
+name = "repose-tree"
+version = "0.30.10"
+dependencies = [
+ "log",
+ "rapidhash",
+ "repose-core 0.30.10",
  "rustc-hash 2.1.3",
  "slotmap",
  "smallvec",
@@ -3680,12 +3753,29 @@ dependencies = [
 
 [[package]]
 name = "repose-ui"
-version = "0.30.4"
+version = "0.30.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9cfec1c1e0ba87563da4d6a3365ef6866eb3b1aa92e07efbee75a5867c26d5e"
 dependencies = [
  "log",
- "repose-core",
- "repose-text",
- "repose-tree",
+ "repose-core 0.30.8",
+ "repose-text 0.30.8",
+ "repose-tree 0.30.8",
+ "rustc-hash 2.1.3",
+ "taffy",
+ "unicode-segmentation",
+ "web-time",
+ "webbrowser",
+]
+
+[[package]]
+name = "repose-ui"
+version = "0.30.10"
+dependencies = [
+ "log",
+ "repose-core 0.30.10",
+ "repose-text 0.30.10",
+ "repose-tree 0.30.10",
  "rustc-hash 2.1.3",
  "taffy",
  "unicode-segmentation",

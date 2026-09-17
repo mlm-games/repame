@@ -265,6 +265,12 @@ pub enum PickEvent {
     },
     Hover {
         world: Vec2,
+        /// Window-physical px (y-down), same space as `Press.screen`.
+        /// Games stage this raw and unproject through the live camera
+        /// each frame (screen-anchored aim); the `world` point is baked
+        /// through the camera at event time and goes stale as the
+        /// camera moves.
+        screen: [f32; 2],
     },
     /// Touch/pen contact began: pointer id + window-physical px.
     /// Mouse does not emit these; taps still emit `Click` too.
@@ -285,6 +291,9 @@ pub enum PickEvent {
 
 /// Touch/pen pointers drive game touch zones;
 /// mouse stays on the click/hover path.
+/// All `screen` fields below are window-physical px (y-down)
+/// (`position_in_window`): region-local `position` would offset picks
+/// by the region origin on any non-fullscreen viewport.
 fn is_touch(ev: &repose_core::input::PointerEvent) -> bool {
     matches!(
         ev.kind,
@@ -636,9 +645,10 @@ pub fn Viewport2d(
             let g = pick_geom.get();
             let world = pick_world([p.x, p.y], g, world_size);
             press_down.set(Some([p.x, p.y]));
+            let w = ev.position_in_window();
             on_down(PickEvent::Press {
                 world: Vec2::new(world[0], world[1]),
-                screen: [p.x, p.y],
+                screen: [w.x, w.y],
             });
             if is_touch(&ev) {
                 on_touch_down(PickEvent::TouchDown {
@@ -651,8 +661,10 @@ pub fn Viewport2d(
             let p = ev.position;
             let g = move_geom.get();
             let world = pick_world([p.x, p.y], g, world_size);
+            let w = ev.position_in_window();
             on_move(PickEvent::Hover {
                 world: Vec2::new(world[0], world[1]),
+                screen: [w.x, w.y],
             });
             if is_touch(&ev) {
                 on_touch_move(PickEvent::TouchMove {
@@ -668,9 +680,10 @@ pub fn Viewport2d(
             {
                 let g = release_geom.get();
                 let world = pick_world([p.x, p.y], g, world_size);
+                let w = ev.position_in_window();
                 on_up_click(PickEvent::Click {
                     world: Vec2::new(world[0], world[1]),
-                    screen: [p.x, p.y],
+                    screen: [w.x, w.y],
                 });
             }
             if is_touch(&ev) {
@@ -882,9 +895,10 @@ pub fn Viewport2dGpuWithId(
             if let Ok(mut slot) = press_down.lock() {
                 *slot = Some([p.x, p.y]);
             }
+            let w = ev.position_in_window();
             on_down(PickEvent::Press {
                 world: Vec2::new(world[0], world[1]),
-                screen: [p.x, p.y],
+                screen: [w.x, w.y],
             });
             if is_touch(&ev) {
                 on_touch_down(PickEvent::TouchDown {
@@ -897,8 +911,10 @@ pub fn Viewport2dGpuWithId(
             let p = ev.position;
             let g = move_geom.get();
             let world = pick_world([p.x, p.y], g, world_size);
+            let w = ev.position_in_window();
             on_move(PickEvent::Hover {
                 world: Vec2::new(world[0], world[1]),
+                screen: [w.x, w.y],
             });
             if is_touch(&ev) {
                 on_touch_move(PickEvent::TouchMove {
@@ -915,9 +931,10 @@ pub fn Viewport2dGpuWithId(
             {
                 let g = release_geom.get();
                 let world = pick_world([p.x, p.y], g, world_size);
+                let w = ev.position_in_window();
                 on_up_click(PickEvent::Click {
                     world: Vec2::new(world[0], world[1]),
-                    screen: [p.x, p.y],
+                    screen: [w.x, w.y],
                 });
             }
             if is_touch(&ev) {

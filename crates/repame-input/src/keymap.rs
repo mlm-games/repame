@@ -221,6 +221,8 @@ fn encode_key(key: &Key) -> String {
         Key::PageUp => "PageUp".to_string(),
         Key::PageDown => "PageDown".to_string(),
         Key::Space => "Space".to_string(),
+        Key::ShiftLeft => "ShiftLeft".to_string(),
+        Key::ShiftRight => "ShiftRight".to_string(),
         Key::F(n) => format!("F{n}"),
         Key::Unknown => String::new(),
     }
@@ -266,6 +268,8 @@ fn decode_key(text: &str) -> Option<Key> {
         "PageUp" => Some(Key::PageUp),
         "PageDown" => Some(Key::PageDown),
         "Space" => Some(Key::Space),
+        "ShiftLeft" => Some(Key::ShiftLeft),
+        "ShiftRight" => Some(Key::ShiftRight),
         _ => {
             if let Some(n) = text.strip_prefix('F').and_then(|n| n.parse::<u8>().ok())
                 && (1..=12).contains(&n)

@@ -258,10 +258,12 @@ pub enum PickEvent {
     Press {
         world: Vec2,
         screen: [f32; 2],
+        button: repose_core::input::PointerButton,
     },
     Click {
         world: Vec2,
         screen: [f32; 2],
+        button: repose_core::input::PointerButton,
     },
     Hover {
         world: Vec2,
@@ -305,6 +307,16 @@ fn is_touch(ev: &repose_core::input::PointerEvent) -> bool {
 fn screen_of(ev: &repose_core::input::PointerEvent) -> [f32; 2] {
     let p = ev.position_in_window();
     [p.x, p.y]
+}
+
+/// Button carried by a down/up pointer event; move/hover/leave have no
+/// button, so they report Primary (callers ignore it there).
+fn button_of(ev: &repose_core::input::PointerEvent) -> repose_core::input::PointerButton {
+    match ev.event {
+        repose_core::input::PointerEventKind::Down(b)
+        | repose_core::input::PointerEventKind::Up(b) => b,
+        _ => repose_core::input::PointerButton::Primary,
+    }
 }
 
 /// Clamp helper: finite positive values pass through, the rest fall
@@ -646,9 +658,11 @@ pub fn Viewport2d(
             let world = pick_world([p.x, p.y], g, world_size);
             press_down.set(Some([p.x, p.y]));
             let w = ev.position_in_window();
+            let button = button_of(&ev);
             on_down(PickEvent::Press {
                 world: Vec2::new(world[0], world[1]),
                 screen: [w.x, w.y],
+                button,
             });
             if is_touch(&ev) {
                 on_touch_down(PickEvent::TouchDown {
@@ -681,9 +695,11 @@ pub fn Viewport2d(
                 let g = release_geom.get();
                 let world = pick_world([p.x, p.y], g, world_size);
                 let w = ev.position_in_window();
+                let button = button_of(&ev);
                 on_up_click(PickEvent::Click {
                     world: Vec2::new(world[0], world[1]),
                     screen: [w.x, w.y],
+                    button,
                 });
             }
             if is_touch(&ev) {
@@ -896,9 +912,11 @@ pub fn Viewport2dGpuWithId(
                 *slot = Some([p.x, p.y]);
             }
             let w = ev.position_in_window();
+            let button = button_of(&ev);
             on_down(PickEvent::Press {
                 world: Vec2::new(world[0], world[1]),
                 screen: [w.x, w.y],
+                button,
             });
             if is_touch(&ev) {
                 on_touch_down(PickEvent::TouchDown {
@@ -932,9 +950,11 @@ pub fn Viewport2dGpuWithId(
                 let g = release_geom.get();
                 let world = pick_world([p.x, p.y], g, world_size);
                 let w = ev.position_in_window();
+                let button = button_of(&ev);
                 on_up_click(PickEvent::Click {
                     world: Vec2::new(world[0], world[1]),
                     screen: [w.x, w.y],
+                    button,
                 });
             }
             if is_touch(&ev) {

@@ -20,6 +20,10 @@ pub trait ShellHooks {
 
 /// Desktop entry point. Mounts `root` with title and size.
 /// The root closure owns stepping and requests frames for continuity.
+/// The closure receives the live [`Scheduler`] each frame, whose
+/// `held_keys` / `window_focused` / `mouse_*` fields are the single
+/// polled hardware snapshot (GML `keyboard_check` /
+/// `mouse_check_button` parity).
 #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
 pub fn run_desktop(
     title: &str,
@@ -68,19 +72,6 @@ pub fn run_android(
         root,
         repose_app::AndroidOptions::default(),
     )
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct PolledInput {
-    /// Window focus. `false` drops every held key: no key-ups arrive
-    /// across an alt-tab.
-    pub focused: bool,
-    /// Physical key names currently down (`KeyW`, `Digit1`, `Space`,
-    /// `Backquote`, ... — winit `KeyCode` debug names).
-    pub keys: Vec<String>,
-    pub mouse_primary: bool,
-    pub mouse_secondary: bool,
-    pub mouse_middle: bool,
 }
 
 /// Gamepad polling on the shared platform backend. Events feed

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
-use repose_core::input::{GamepadAxis, GamepadButton, PointerButton};
+use repose_core::input::{GamepadAxis, GamepadButton, PhysicalKey, PointerButton};
 use repose_core::shortcuts::KeyChord;
 
 use super::ActionLike;
@@ -84,7 +84,7 @@ impl<A: ActionLike> ActionState<A> {
 
     fn fire_binding(&mut self, binding: &Binding, down: bool) {
         match binding {
-            Binding::Key(_) | Binding::Mouse(_) | Binding::Pad(_) => {
+            Binding::Key(_) | Binding::Physical(_) | Binding::Mouse(_) | Binding::Pad(_) => {
                 if down {
                     self.down_buttons.insert(binding.clone());
                 } else {
@@ -110,7 +110,7 @@ impl<A: ActionLike> ActionState<A> {
 
     fn binding_down(&self, binding: &Binding) -> bool {
         match binding {
-            Binding::Key(_) | Binding::Mouse(_) | Binding::Pad(_) => {
+            Binding::Key(_) | Binding::Physical(_) | Binding::Mouse(_) | Binding::Pad(_) => {
                 self.down_buttons.contains(binding)
             }
             Binding::Axis { axis, threshold } => {
@@ -129,6 +129,11 @@ impl<A: ActionLike> ActionState<A> {
     /// Feed a keyboard chord press/release.
     pub fn key(&mut self, chord: &KeyChord, down: bool) {
         self.fire_binding(&Binding::Key(chord.clone()), down);
+    }
+
+    /// Feed a physical key position press/release.
+    pub fn physical(&mut self, key: PhysicalKey, down: bool) {
+        self.fire_binding(&Binding::Physical(key), down);
     }
 
     /// Feed a mouse button press/release.
@@ -182,7 +187,7 @@ impl<A: ActionLike> ActionState<A> {
         for b in self.map.bindings_for(action) {
             let s =
                 match b {
-                    Binding::Key(_) | Binding::Mouse(_) | Binding::Pad(_) => {
+                    Binding::Key(_) | Binding::Physical(_) | Binding::Mouse(_) | Binding::Pad(_) => {
                         if self.binding_down(b) { 1.0 } else { 0.0 }
                     }
                     Binding::Axis { axis, threshold } => {

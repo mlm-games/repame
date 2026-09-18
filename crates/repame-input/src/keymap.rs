@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use repose_core::input::{GamepadAxis, GamepadButton, Key, Modifiers, PointerButton};
+use repose_core::input::{GamepadAxis, GamepadButton, Key, Modifiers, PhysicalKey, PointerButton};
 use repose_core::shortcuts::KeyChord;
 
 /// One side of a remappable control: what the keyboard/mouse entry or
@@ -11,6 +11,7 @@ use repose_core::shortcuts::KeyChord;
 pub enum KeymapEntry {
     None,
     Key(KeyChord),
+    Physical(PhysicalKey),
     Mouse(PointerButton),
     Pad(GamepadButton),
     Axis { axis: GamepadAxis, threshold: f32 },
@@ -28,6 +29,7 @@ impl std::hash::Hash for KeymapEntry {
         match self {
             KeymapEntry::None => {}
             KeymapEntry::Key(chord) => chord.hash(state),
+            KeymapEntry::Physical(key) => key.hash(state),
             KeymapEntry::Mouse(button) => {
                 (*button as u8).hash(state);
             }
@@ -142,6 +144,7 @@ pub fn encode_keymap_entry(entry: &KeymapEntry) -> String {
     match entry {
         KeymapEntry::None => String::new(),
         KeymapEntry::Key(chord) => encode_chord(chord),
+        KeymapEntry::Physical(key) => key.name().to_string(),
         KeymapEntry::Mouse(PointerButton::Primary) => "MouseLeft".to_string(),
         KeymapEntry::Mouse(PointerButton::Secondary) => "MouseRight".to_string(),
         KeymapEntry::Mouse(PointerButton::Tertiary) => "MouseMiddle".to_string(),
@@ -172,6 +175,10 @@ pub fn decode_keymap_entry(text: &str) -> KeymapEntry {
         && let Ok(threshold) = threshold.parse::<f32>()
     {
         return KeymapEntry::Axis { axis, threshold };
+    }
+    let physical = PhysicalKey::from_name(text);
+    if !matches!(physical, PhysicalKey::Unidentified) || text == "Unidentified" {
+        return KeymapEntry::Physical(physical);
     }
     if let Some(chord) = decode_chord(text) {
         return KeymapEntry::Key(chord);

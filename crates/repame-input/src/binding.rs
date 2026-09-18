@@ -1,6 +1,6 @@
 //! Physical input bindings: one action fires from many inputs.
 
-use repose_core::input::{GamepadAxis, GamepadButton, PointerButton};
+use repose_core::input::{GamepadAxis, GamepadButton, PhysicalKey, PointerButton};
 use repose_core::shortcuts::KeyChord;
 
 /// One physical source that can drive an action: keyboard, pad, or axis.
@@ -8,7 +8,12 @@ use repose_core::shortcuts::KeyChord;
 #[derive(Clone, Debug)]
 pub enum Binding {
     /// Keyboard chord (key + modifiers), same shape as repose shortcuts.
+    /// Logical meaning: shortcuts, text entry, glyph-bound actions.
     Key(KeyChord),
+    /// Physical key position, layout-independent. Movement and other
+    /// position-bound actions: `PhysicalKey::KeyW` is the US W position
+    /// (AZERTY Z), so non-US layouts move the same.
+    Physical(PhysicalKey),
     /// Mouse button press.
     Mouse(PointerButton),
     /// Gamepad button press.
@@ -24,6 +29,7 @@ impl PartialEq for Binding {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Binding::Key(a), Binding::Key(b)) => a == b,
+            (Binding::Physical(a), Binding::Physical(b)) => a == b,
             (Binding::Mouse(a), Binding::Mouse(b)) => {
                 std::mem::discriminant(a) == std::mem::discriminant(b)
             }
@@ -50,6 +56,7 @@ impl std::hash::Hash for Binding {
         std::mem::discriminant(self).hash(state);
         match self {
             Binding::Key(chord) => chord.hash(state),
+            Binding::Physical(key) => key.hash(state),
             Binding::Mouse(b) => std::mem::discriminant(b).hash(state),
             Binding::Pad(b) => b.hash(state),
             Binding::Axis { axis, threshold } => {

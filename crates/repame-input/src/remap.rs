@@ -1,5 +1,5 @@
 use bevy_ecs::prelude::*;
-use super::keymap::{Keymap, KeymapCapture, KeymapDevice, KeymapEntry, chord_for_physical};
+use super::keymap::{Keymap, KeymapCapture, KeymapDevice, KeymapEntry};
 use repose_core::input::{Key, Modifiers};
 use repose_core::shortcuts::KeyChord;
 
@@ -41,10 +41,7 @@ impl<A: Clone + Eq + std::hash::Hash> RemapSession<A> {
     }
 
     pub fn resolve_physical(&mut self, key: repose_core::input::PhysicalKey) -> bool {
-        let Some(chord) = chord_for_physical(key) else {
-            return false;
-        };
-        self.resolve(Some(KeymapEntry::Key(chord)))
+        self.resolve(Some(KeymapEntry::Physical(key)))
     }
 
     pub fn resolve_key(&mut self, key: &Key) -> bool {

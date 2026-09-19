@@ -44,6 +44,20 @@ impl<A: ActionLike> ActionState<A> {
         &self.map
     }
 
+    pub fn replace_map(&mut self, map: ActionMap<A>) {
+        self.map = map;
+        let live: Vec<Binding> = self
+            .map
+            .actions()
+            .flat_map(|a| self.map.bindings_for(a).iter().cloned())
+            .collect();
+        self.down_buttons.retain(|b| live.contains(b));
+        self.pressed.retain(|a| !self.map.bindings_for(a).is_empty());
+        self.just_pressed
+            .retain(|a| !self.map.bindings_for(a).is_empty());
+        self.just_released.clear();
+    }
+
     /// Edge rollover for tick end: edges clear, levels persist.
     pub fn end_tick(&mut self) {
         self.just_pressed.clear();

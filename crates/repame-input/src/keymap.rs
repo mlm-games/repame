@@ -140,6 +140,21 @@ impl<A: Clone + Eq + Hash> Keymap<A> {
         }
         out
     }
+
+    pub fn to_action_map_contexts(
+        &self,
+        gameplay: &[A],
+        menu: &[A],
+    ) -> super::map::ActionMap<A> {
+        let mut out = self.to_action_map();
+        for action in gameplay {
+            out.in_context("gameplay", action.clone());
+        }
+        for action in menu {
+            out.in_context("menu", action.clone());
+        }
+        out
+    }
 }
 
 /// Serializable row: one action name plus both entries as strings.

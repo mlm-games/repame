@@ -186,6 +186,62 @@ pub fn decode_keymap_entry(text: &str) -> KeymapEntry {
     KeymapEntry::None
 }
 
+/// REMAP capture helper: every physical key position maps to a
+/// plain (no-modifier) [`KeyChord`] so ANY key is capturable.
+pub fn chord_for_physical(key: PhysicalKey) -> Option<KeyChord> {
+    use repose_core::input::Key;
+    let chord_key = match key {
+        PhysicalKey::Space => Key::Space,
+        PhysicalKey::Tab => Key::Tab,
+        PhysicalKey::ShiftLeft => Key::ShiftLeft,
+        PhysicalKey::ShiftRight => Key::ShiftRight,
+        PhysicalKey::ArrowUp => Key::ArrowUp,
+        PhysicalKey::ArrowDown => Key::ArrowDown,
+        PhysicalKey::ArrowLeft => Key::ArrowLeft,
+        PhysicalKey::ArrowRight => Key::ArrowRight,
+        PhysicalKey::Enter => Key::Enter,
+        PhysicalKey::Escape => Key::Escape,
+        PhysicalKey::Backspace => Key::Backspace,
+        PhysicalKey::Delete => Key::Delete,
+        PhysicalKey::Insert => Key::Insert,
+        PhysicalKey::Home => Key::Home,
+        PhysicalKey::End => Key::End,
+        PhysicalKey::PageUp => Key::PageUp,
+        PhysicalKey::PageDown => Key::PageDown,
+        _ => Key::Character(glyph_for_physical(key)?),
+    };
+    Some(KeyChord::new(chord_key, Modifiers::default()))
+}
+
+/// Physical-position -> glyph table.
+pub fn glyph_for_physical(key: PhysicalKey) -> Option<char> {
+    let name = key.name();
+    if let Some(tail) = name
+        .strip_prefix("Key")
+        .or_else(|| name.strip_prefix("Digit"))
+    {
+        let mut chars = tail.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => return Some(c.to_ascii_lowercase()),
+            _ => return None,
+        }
+    }
+    Some(match key {
+        PhysicalKey::Backquote => '`',
+        PhysicalKey::Minus => '-',
+        PhysicalKey::Equal => '=',
+        PhysicalKey::BracketLeft => '[',
+        PhysicalKey::BracketRight => ']',
+        PhysicalKey::Backslash => '\\',
+        PhysicalKey::Semicolon => ';',
+        PhysicalKey::Quote => '\'',
+        PhysicalKey::Comma => ',',
+        PhysicalKey::Period => '.',
+        PhysicalKey::Slash => '/',
+        _ => return None,
+    })
+}
+
 fn encode_chord(chord: &KeyChord) -> String {
     let mut out = String::new();
     if chord.modifiers.ctrl {
@@ -331,6 +387,40 @@ mod tests {
 
     fn chord(c: char) -> KeymapEntry {
         KeymapEntry::Key(KeyChord::new(Key::Character(c), Modifiers::default()))
+    }
+
+    #[test]
+    fn chord_covers_full_physical_alphabet() {
+        use repose_core::input::PhysicalKey;
+        assert_eq!(
+            chord_for_physical(PhysicalKey::KeyW),
+            Some(KeyChord::new(Key::Character('w'), Modifiers::default()))
+        );
+        assert_eq!(
+            chord_for_physical(PhysicalKey::Digit1),
+            Some(KeyChord::new(Key::Character('1'), Modifiers::default()))
+        );
+        assert_eq!(
+            chord_for_physical(PhysicalKey::Minus),
+            Some(KeyChord::new(Key::Character('-'), Modifiers::default()))
+        );
+        assert_eq!(
+            chord_for_physical(PhysicalKey::Space),
+            Some(KeyChord::new(Key::Space, Modifiers::default()))
+        );
+        assert_eq!(chord_for_physical(PhysicalKey::F5), None);
+        assert_eq!(chord_for_physical(PhysicalKey::Unidentified), None);
+    }
+
+    #[test]
+    fn glyph_covers_letters_digits_punctuation() {
+        use repose_core::input::PhysicalKey;
+        assert_eq!(glyph_for_physical(PhysicalKey::KeyQ), Some('q'));
+        assert_eq!(glyph_for_physical(PhysicalKey::Digit7), Some('7'));
+        assert_eq!(glyph_for_physical(PhysicalKey::Minus), Some('-'));
+        assert_eq!(glyph_for_physical(PhysicalKey::Slash), Some('/'));
+        assert_eq!(glyph_for_physical(PhysicalKey::Space), None);
+        assert_eq!(glyph_for_physical(PhysicalKey::F1), None);
     }
 
     #[test]

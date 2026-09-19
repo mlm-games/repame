@@ -1855,3 +1855,52 @@ pub fn cursor_frame(
         key,
     })
 }
+
+/// Unproject one window-physical px point through this frame's camera.
+pub fn unproject_px(
+    px: Vec2,
+    viewport_dp: [f32; 2],
+    world_size: [f32; 2],
+    density: f32,
+    cam: &Camera2d,
+) -> Vec2 {
+    let d = if density.is_finite() && density > 1e-6 {
+        density
+    } else {
+        1.0
+    };
+    let dp = [px.x / d, px.y / d];
+    cam.dp_to_world_pt(viewport_dp, world_size, dp)
+}
+
+#[cfg(test)]
+mod unproject_tests {
+    use super::*;
+
+    #[test]
+    fn px_round_trips_through_fit() {
+        let cam = Camera2d {
+            center: Vec2::new(213.0, 120.0),
+            offset: Vec2::ZERO,
+            units_per_pixel: 1.0 / 3.0,
+            zoom: 1.0,
+            roll: 0.0,
+        };
+        let world = Vec2::new(100.0, 60.0);
+        let viewport_dp = [1024.0, 600.0];
+        let world_size = [1024.0, 600.0];
+        let (s, ox, oy) = effective_fit(viewport_dp, world_size, &cam);
+        let [dx, dy] = world_to_dp(
+            [world.x, world.y],
+            world_size,
+            cam.effective_center(),
+            (s, ox, oy),
+        );
+        let px = Vec2::new(dx * 1.25, dy * 1.25);
+        let back = unproject_px(px, viewport_dp, world_size, 1.25, &cam);
+        assert!(
+            (back - world).length() < 0.01,
+            "round trip, got {back:?} for {world:?}"
+        );
+    }
+}

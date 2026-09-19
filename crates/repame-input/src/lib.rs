@@ -7,17 +7,19 @@ use std::hash::Hash;
 use repame_sim::bevy_ecs::prelude::*;
 use repose_core::input::GamepadAxis;
 
+mod aim;
 mod binding;
 mod held;
 mod keymap;
 mod map;
 mod state;
 
+pub use aim::{AimTracker, StagedClick};
 pub use binding::Binding;
 pub use held::reconcile_held;
 pub use keymap::{
-    Keymap, KeymapCapture, KeymapDevice, KeymapEntry, KeymapRow, decode_keymap_entry,
-    encode_keymap_entry,
+    Keymap, KeymapCapture, KeymapDevice, KeymapEntry, KeymapRow, chord_for_physical,
+    decode_keymap_entry, encode_keymap_entry, glyph_for_physical,
 };
 pub use map::ActionMap;
 pub use state::ActionState;

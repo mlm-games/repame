@@ -10,5 +10,6 @@ description = "sim-side action map, edge state, and contexts for all games"
 [dependencies]
 repame-sim.workspace = true
 bevy_ecs.workspace = true
+glam.workspace = true
 repose-core.workspace = true
 serde.workspace = true

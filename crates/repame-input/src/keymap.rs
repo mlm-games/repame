@@ -128,6 +128,18 @@ impl<A: Clone + Eq + Hash> Keymap<A> {
     pub fn actions(&self) -> impl Iterator<Item = &A> {
         self.keyboard.keys().chain(self.gamepad.keys())
     }
+
+    pub fn to_action_map(&self) -> super::map::ActionMap<A> {
+        let mut out = super::map::ActionMap::new();
+        for action in self.actions() {
+            for entry in [self.keyboard(action), self.gamepad(action)] {
+                if let Some(binding) = super::binding::Binding::from_entry(&entry) {
+                    out.bind(action.clone(), binding);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Serializable row: one action name plus both entries as strings.

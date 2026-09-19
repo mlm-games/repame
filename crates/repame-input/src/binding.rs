@@ -69,6 +69,21 @@ impl std::hash::Hash for Binding {
 }
 
 impl Binding {
+    pub fn from_entry(entry: &super::keymap::KeymapEntry) -> Option<Self> {
+        use super::keymap::KeymapEntry;
+        Some(match entry {
+            KeymapEntry::None => return None,
+            KeymapEntry::Key(chord) => Binding::Key(chord.clone()),
+            KeymapEntry::Physical(key) => Binding::Physical(*key),
+            KeymapEntry::Mouse(button) => Binding::Mouse(*button),
+            KeymapEntry::Pad(button) => Binding::Pad(*button),
+            KeymapEntry::Axis { axis, threshold } => Binding::Axis {
+                axis: *axis,
+                threshold: *threshold,
+            },
+        })
+    }
+
     /// True while the latest axis value holds past the threshold.
     /// Zero threshold means any non-zero deflection; rest at 0.0 reads inactive.
     pub fn axis_active(threshold: f32, value: f32) -> bool {

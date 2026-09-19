@@ -7,6 +7,7 @@ mod audio;
 mod bank;
 mod channels;
 mod command;
+mod cue;
 mod decode;
 mod engine;
 mod music;
@@ -20,6 +21,7 @@ pub use channels::{AudioChannel, AudioChannels, db_to_linear, linear_to_db};
 pub use command::{
     EngineEvent, GameAudioLink, PlayCmd, RealtimeCommand, SharedFrames, ThreadAudioLink, audio_link,
 };
+pub use cue::Cue;
 pub use decode::{decode_bytes, resample_linear};
 pub use engine::Engine;
 pub use music::{Music, StemDef};

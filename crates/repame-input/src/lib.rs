@@ -12,6 +12,8 @@ mod binding;
 mod held;
 mod keymap;
 mod map;
+mod remap;
+mod snapshot;
 mod state;
 
 pub use aim::{AimTracker, StagedClick};
@@ -22,6 +24,8 @@ pub use keymap::{
     decode_keymap_entry, encode_keymap_entry, glyph_for_physical,
 };
 pub use map::ActionMap;
+pub use remap::RemapSession;
+pub use snapshot::{GamepadState, MouseState, TouchContact, apply_stick, dead_zone};
 pub use state::ActionState;
 
 /// Action key. Games use their own enums (`Clone + Eq + Hash`);

@@ -10,6 +10,19 @@ pub use repame_sprite::{Camera2d, FrameInput, PickEvent, SpriteInstance};
 pub use repose_core::input::{GamepadEvent, GamepadId};
 use repose_platform::gamepad::{GamepadBackend, create_backend};
 
+mod audio;
+mod levels;
+mod pads;
+mod shortcuts;
+mod staging;
+mod store;
+pub use audio::drain_cues;
+pub use levels::apply_scheduler_levels;
+pub use pads::{PadBank, PadBridge, TRIGGER_HELD};
+pub use shortcuts::{SharedEdges, ShortcutEdges, game_shortcut_map, install_into, shared_edges, take as take_shortcut_edges};
+pub use staging::Staging;
+pub use store::{load_json, save_file_path, store_json};
+
 /// Per-frame hooks the game implements.
 pub trait ShellHooks {
     /// Build this frame's viewport snapshot from sim and UI state.

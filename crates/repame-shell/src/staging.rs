@@ -18,6 +18,9 @@ pub struct Staging {
     pub lmb_held: bool,
     pub rmb_held: bool,
     pub rmb_down_edge: bool,
+    pub capture_pending_physical: Option<PhysicalKey>,
+    pub capture_pending_key: Option<Key>,
+    pub capture_pending_mouse: Option<bool>,
     pub touch_active: HashMap<u64, (Vec2, Vec2)>,
     pub touch_new: HashSet<u64>,
     pub pads: Vec<GamepadState>,
@@ -99,6 +102,7 @@ impl Staging {
     }
 
     pub fn pick_down(&mut self, button: PointerButton) {
+        self.capture_pending_mouse = Some(button == PointerButton::Primary);
         self.mouse_edges.push((button, true));
         if button == PointerButton::Primary {
             self.lmb_held = true;
@@ -115,6 +119,18 @@ impl Staging {
         } else {
             self.rmb_held = false;
         }
+    }
+
+    pub fn take_capture_physical(&mut self) -> Option<PhysicalKey> {
+        self.capture_pending_physical.take()
+    }
+
+    pub fn take_capture_key(&mut self) -> Option<Key> {
+        self.capture_pending_key.take()
+    }
+
+    pub fn take_capture_mouse(&mut self) -> Option<bool> {
+        self.capture_pending_mouse.take()
     }
 
     pub fn take_rmb_down(&mut self) -> bool {

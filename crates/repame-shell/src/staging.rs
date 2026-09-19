@@ -12,6 +12,7 @@ pub struct Staging {
     pub held: HashSet<PhysicalKey>,
     pub edges: Vec<PhysicalKey>,
     pub window_focused: bool,
+    pub capture_armed: bool,
     pub clicks: Vec<StagedClick>,
     pub aim: AimTracker,
     pub mouse_edges: Vec<(PointerButton, bool)>,
@@ -39,6 +40,26 @@ impl Staging {
 
     pub fn handle_key(&mut self, ke: &KeyEvent) {
         let down = matches!(ke.event_type, KeyEventType::Down);
+        if down && !ke.is_repeat {
+            match &ke.key {
+                Key::Backspace => {
+                    self.capture_pending_key = Some(Key::Backspace);
+                    return;
+                }
+                _ => {}
+            }
+            if self.capture_armed {
+                if let Some(key) = ke.physical {
+                    self.capture_pending_physical = Some(key);
+                } else {
+                    self.capture_pending_key = Some(ke.key.clone());
+                }
+                return;
+            }
+            if matches!(ke.key, Key::Escape | Key::Enter) {
+                return;
+            }
+        }
         match &ke.key {
             Key::Escape | Key::Enter => {}
             Key::Character(_) => {
@@ -81,6 +102,9 @@ impl Staging {
         if !focused {
             self.held.clear();
             self.edges.clear();
+            self.capture_pending_physical = None;
+            self.capture_pending_key = None;
+            self.capture_pending_mouse = None;
             self.lmb_held = false;
             self.rmb_held = false;
         }
@@ -98,10 +122,17 @@ impl Staging {
         );
         if !self.window_focused {
             self.edges.clear();
+            self.capture_pending_physical = None;
+            self.capture_pending_key = None;
+            self.capture_pending_mouse = None;
         }
     }
 
     pub fn pick_down(&mut self, button: PointerButton) {
+        if self.capture_armed {
+            self.capture_pending_mouse = Some(button == PointerButton::Primary);
+            return;
+        }
         self.mouse_edges.push((button, true));
         if button == PointerButton::Primary {
             self.lmb_held = true;
@@ -245,5 +276,24 @@ mod tests {
         s.handle_key(&key(PhysicalKey::KeyW));
         s.set_window_focused(false);
         assert!(s.held.is_empty());
+    }
+
+    #[test]
+    fn capture_stashes_physical_and_skips_edges() {
+        let mut s = Staging::default();
+        s.capture_armed = true;
+        s.handle_key(&key(PhysicalKey::KeyZ));
+        assert_eq!(s.capture_pending_physical, Some(PhysicalKey::KeyZ));
+        assert!(s.take_edges().is_empty());
+    }
+
+    #[test]
+    fn capture_click_stashes_button_not_click_edge() {
+        let mut s = Staging::default();
+        s.capture_armed = true;
+        s.pick_down(PointerButton::Primary);
+        assert_eq!(s.capture_pending_mouse, Some(true));
+        assert!(s.take_clicks().is_empty());
+        assert!(!s.lmb_held);
     }
 }

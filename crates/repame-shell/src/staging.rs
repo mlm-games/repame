@@ -102,7 +102,6 @@ impl Staging {
     }
 
     pub fn pick_down(&mut self, button: PointerButton) {
-        self.capture_pending_mouse = Some(button == PointerButton::Primary);
         self.mouse_edges.push((button, true));
         if button == PointerButton::Primary {
             self.lmb_held = true;

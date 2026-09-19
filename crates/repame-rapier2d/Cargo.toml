@@ -1,0 +1,15 @@
+[package]
+name = "repame-rapier2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "rapier2d backend for repame-sim: one-clock rigid bodies, revolute puppet joints, intent-in snapshot-out"
+
+[dependencies]
+bevy_ecs.workspace = true
+glam.workspace = true
+log.workspace = true
+repame-sim.workspace = true
+rapier2d = { version = "=0.34.0", default-features = false, features = ["dim2", "f32", "std", "enhanced-determinism"] }

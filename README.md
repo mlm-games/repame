@@ -5,7 +5,7 @@ custom wgpu viewports, and a repose UI shell. Bevy renderer is not used here, ma
 1. wgpu internal version rivalry.
 2. more dogfooding.
 
-Pattern initially tested using [resims](https://github.com/mlm-games/resims)'s old branch, which used sim snapshot out, pixels in through a `repose_render_wgpu::Callback` viewport view, everything else should be Repose views (including debug panels).
+Pattern initially tested using [resims](https://github.com/mlm-games/resims)'s old branch, which used sim snapshot out, pixels in through a `repose_render_wgpu::Callback` viewport view, everything else was Repose views (including debug panels).
 
 ## Crates
 

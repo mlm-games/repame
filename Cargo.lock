@@ -3678,8 +3678,8 @@ dependencies = [
  "renamite-player",
  "renamite-player-ui",
  "renamite-render-bridge",
- "repose-canvas 0.30.16",
- "repose-core 0.30.16",
+ "repose-canvas 0.30.17",
+ "repose-core 0.30.17",
 ]
 
 [[package]]
@@ -3722,7 +3722,7 @@ dependencies = [
  "repame-sim",
  "repame-sprite",
  "repame-view3d",
- "repose-core 0.30.16",
+ "repose-core 0.30.17",
  "serde",
 ]
 
@@ -3733,7 +3733,7 @@ dependencies = [
  "bevy_ecs",
  "glam 0.33.7",
  "repame-sim",
- "repose-core 0.30.16",
+ "repose-core 0.30.17",
  "serde",
 ]
 
@@ -3781,9 +3781,9 @@ dependencies = [
  "repame-sim",
  "repame-sprite",
  "repose-app",
- "repose-core 0.30.16",
+ "repose-core 0.30.17",
  "repose-platform",
- "repose-ui 0.30.16",
+ "repose-ui 0.30.17",
  "wasm-bindgen",
  "web-time",
  "winit",
@@ -3808,10 +3808,10 @@ dependencies = [
  "glam 0.33.7",
  "log",
  "repame-atlas",
- "repose-canvas 0.30.16",
- "repose-core 0.30.16",
+ "repose-canvas 0.30.17",
+ "repose-core 0.30.17",
  "repose-render-wgpu",
- "repose-ui 0.30.16",
+ "repose-ui 0.30.17",
  "wgpu",
 ]
 
@@ -3824,21 +3824,21 @@ dependencies = [
  "gltf",
  "image",
  "log",
- "repose-core 0.30.16",
+ "repose-core 0.30.17",
  "repose-render-wgpu",
- "repose-ui 0.30.16",
+ "repose-ui 0.30.17",
  "serde",
  "wgpu",
 ]
 
 [[package]]
 name = "repose-app"
-version = "0.30.16"
+version = "0.30.17"
 dependencies = [
  "log",
- "repose-core 0.30.16",
- "repose-text 0.30.16",
- "repose-ui 0.30.16",
+ "repose-core 0.30.17",
+ "repose-text 0.30.17",
+ "repose-ui 0.30.17",
  "web-time",
 ]
 
@@ -3856,12 +3856,12 @@ dependencies = [
 
 [[package]]
 name = "repose-canvas"
-version = "0.30.16"
+version = "0.30.17"
 dependencies = [
  "lyon_path",
  "lyon_tessellation",
- "repose-core 0.30.16",
- "repose-ui 0.30.16",
+ "repose-core 0.30.17",
+ "repose-ui 0.30.17",
 ]
 
 [[package]]
@@ -3880,12 +3880,12 @@ dependencies = [
 
 [[package]]
 name = "repose-core"
-version = "0.30.16"
+version = "0.30.17"
 dependencies = [
  "accesskit",
  "log",
  "parking_lot",
- "repose-macros 0.30.16",
+ "repose-macros 0.30.17",
  "rustc-hash 2.1.3",
  "serde",
  "taffy",
@@ -3894,9 +3894,9 @@ dependencies = [
 
 [[package]]
 name = "repose-devtools"
-version = "0.30.16"
+version = "0.30.17"
 dependencies = [
- "repose-core 0.30.16",
+ "repose-core 0.30.17",
  "web-time",
 ]
 
@@ -3913,7 +3913,7 @@ dependencies = [
 
 [[package]]
 name = "repose-macros"
-version = "0.30.16"
+version = "0.30.17"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3922,18 +3922,18 @@ dependencies = [
 
 [[package]]
 name = "repose-navigation"
-version = "0.30.16"
+version = "0.30.17"
 dependencies = [
  "log",
- "repose-core 0.30.16",
- "repose-ui 0.30.16",
+ "repose-core 0.30.17",
+ "repose-ui 0.30.17",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "repose-platform"
-version = "0.30.16"
+version = "0.30.17"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -3947,12 +3947,12 @@ dependencies = [
  "log",
  "pollster 1.0.1",
  "repose-app",
- "repose-core 0.30.16",
+ "repose-core 0.30.17",
  "repose-devtools",
  "repose-navigation",
  "repose-render-wgpu",
- "repose-text 0.30.16",
- "repose-ui 0.30.16",
+ "repose-text 0.30.17",
+ "repose-ui 0.30.17",
  "rustc-hash 2.1.3",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -3964,7 +3964,7 @@ dependencies = [
 
 [[package]]
 name = "repose-render-wgpu"
-version = "0.30.16"
+version = "0.30.17"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3973,8 +3973,8 @@ dependencies = [
  "lyon_path",
  "lyon_tessellation",
  "pollster 1.0.1",
- "repose-core 0.30.16",
- "repose-text 0.30.16",
+ "repose-core 0.30.17",
+ "repose-text 0.30.17",
  "web-workers",
  "wgpu",
  "winit",
@@ -4001,7 +4001,7 @@ dependencies = [
 
 [[package]]
 name = "repose-text"
-version = "0.30.16"
+version = "0.30.17"
 dependencies = [
  "font-awl",
  "js-sys",
@@ -4033,11 +4033,11 @@ dependencies = [
 
 [[package]]
 name = "repose-tree"
-version = "0.30.16"
+version = "0.30.17"
 dependencies = [
  "log",
  "rapidhash",
- "repose-core 0.30.16",
+ "repose-core 0.30.17",
  "rustc-hash 2.1.3",
  "slotmap",
  "smallvec",
@@ -4063,12 +4063,12 @@ dependencies = [
 
 [[package]]
 name = "repose-ui"
-version = "0.30.16"
+version = "0.30.17"
 dependencies = [
  "log",
- "repose-core 0.30.16",
- "repose-text 0.30.16",
- "repose-tree 0.30.16",
+ "repose-core 0.30.17",
+ "repose-text 0.30.17",
+ "repose-tree 0.30.17",
  "rustc-hash 2.1.3",
  "taffy",
  "unicode-segmentation",

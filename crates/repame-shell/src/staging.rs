@@ -107,24 +107,36 @@ impl Staging {
             self.capture_pending_mouse = None;
             self.lmb_held = false;
             self.rmb_held = false;
+            self.clicks.clear();
+            self.mouse_edges.clear();
+            self.rmb_down_edge = false;
+            self.touch_active.clear();
+            self.touch_new.clear();
+            self.pads.clear();
+            self.pad_live = false;
         }
     }
 
     pub fn feed_polled(&mut self, sched: &Scheduler) {
-        super::apply_scheduler_levels(
-            &mut self.held,
-            &mut self.lmb_held,
-            &mut self.rmb_held,
-            &mut self.window_focused,
-            sched,
-            |k| Some(k),
-            |_| None,
-        );
-        if !self.window_focused {
-            self.edges.clear();
-            self.capture_pending_physical = None;
-            self.capture_pending_key = None;
-            self.capture_pending_mouse = None;
+        if !sched.window_focused {
+            self.set_window_focused(false);
+            return;
+        }
+        self.window_focused = true;
+        // Identity-key repair: the polled set IS the reverse map here,
+        // so missed releases drop without synthesizing press edges.
+        // `reconcile_held` cannot express this (its `None` reverse means
+        // "leave alone"), so compare directly.
+        self.held.retain(|key| sched.held_keys.contains(key));
+        if !sched.mouse_primary {
+            self.lmb_held = false;
+        }
+        if !sched.mouse_secondary {
+            self.rmb_held = false;
+        }
+        if !sched.mouse_middle {
+            self.mouse_edges
+                .retain(|(button, _)| *button != PointerButton::Tertiary);
         }
     }
 

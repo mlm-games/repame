@@ -62,6 +62,7 @@ impl<A: ActionLike> ActionState<A> {
     pub fn end_tick(&mut self) {
         self.just_pressed.clear();
         self.just_released.clear();
+        self.consumed.clear();
     }
 
     /// Clear edges outside the schedule.
@@ -360,6 +361,16 @@ mod tests {
         assert!(!st.just_pressed(&"jump"));
         st.clear_consumed();
         assert!(st.pressed(&"jump"), "South still held");
+    }
+
+    #[test]
+    fn tick_end_clears_consumption() {
+        let mut st = ActionState::new(jump_map());
+        st.key(&space(), true);
+        assert!(st.consume(&"jump"));
+        assert!(!st.pressed(&"jump"));
+        st.end_tick();
+        assert!(st.pressed(&"jump"), "consume must not leak past tick end");
     }
 
     #[test]

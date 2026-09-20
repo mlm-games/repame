@@ -171,7 +171,10 @@ pub fn encode_keymap_entry(entry: &KeymapEntry) -> String {
     match entry {
         KeymapEntry::None => String::new(),
         KeymapEntry::Key(chord) => encode_chord(chord),
-        KeymapEntry::Physical(key) => key.name().to_string(),
+        // Explicit prefix: bare physical names ("Space", "Tab", arrows,
+        // ...) collide with logical chord spellings, so physical
+        // positions never serialize bare.
+        KeymapEntry::Physical(key) => format!("phys:{}", key.name()),
         KeymapEntry::Mouse(PointerButton::Primary) => "MouseLeft".to_string(),
         KeymapEntry::Mouse(PointerButton::Secondary) => "MouseRight".to_string(),
         KeymapEntry::Mouse(PointerButton::Tertiary) => "MouseMiddle".to_string(),
@@ -203,12 +206,27 @@ pub fn decode_keymap_entry(text: &str) -> KeymapEntry {
     {
         return KeymapEntry::Axis { axis, threshold };
     }
+    // Physical positions carry an explicit prefix (see the encoder).
+    if let Some(name) = text.strip_prefix("phys:") {
+        let name = name.trim();
+        let physical = PhysicalKey::from_name(name);
+        if !matches!(physical, PhysicalKey::Unidentified) || name == "Unidentified" {
+            return KeymapEntry::Physical(physical);
+        }
+        return KeymapEntry::None;
+    }
+    // Logical chords next: letters, digits, modifiers, and the named
+    // keys ("Space", "Tab", arrows, ...). This also claims legacy bare
+    // saves of those names as logical — the defaults are logical, so a
+    // bare "Space" must stay the NT Swap binding, never flip physical.
+    if let Some(chord) = decode_chord(text) {
+        return KeymapEntry::Key(chord);
+    }
+    // Legacy bare physical positions ("KeyW", "Digit1", "Minus", ...):
+    // no logical spelling collides with them, so they stay physical.
     let physical = PhysicalKey::from_name(text);
     if !matches!(physical, PhysicalKey::Unidentified) || text == "Unidentified" {
         return KeymapEntry::Physical(physical);
-    }
-    if let Some(chord) = decode_chord(text) {
-        return KeymapEntry::Key(chord);
     }
     KeymapEntry::None
 }

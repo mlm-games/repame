@@ -17,16 +17,16 @@ bevy_ecs = "0.19"
 gltf = { version = "1.4", default-features = false, features = ["utils", "import", "names", "KHR_materials_unlit", "KHR_materials_emissive_strength", "KHR_texture_transform"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # Repose UI shell (incl. the `gamepad` backend).
-repose-core = { path = "../repose/crates/repose-core", version = "0.30", features = ["serde"] }
-repose-ui = { path = "../repose/crates/repose-ui", version = "0.30" }
-repose-material = { path = "../repose/crates/repose-material", version = "0.30" }
-repose-canvas = { path = "../repose/crates/repose-canvas", version = "0.30" }
-repose-docking = { path = "../repose/crates/repose-docking", version = "0.30" }
-repose-platform = { path = "../repose/crates/repose-platform", version = "0.30" }
-repose-render-wgpu = { path = "../repose/crates/repose-render-wgpu", version = "0.30" }
-repose-text = { path = "../repose/crates/repose-text", version = "0.30" }
-repose-app = { path = "../repose/crates/repose-app", version = "0.30" }
-repose-tree = { path = "../repose/crates/repose-tree", version = "0.30" }
+repose-core = { version = "0.30", features = ["serde"] }
+repose-ui = { version = "0.30" }
+repose-material = { version = "0.30" }
+repose-canvas = { version = "0.30" }
+repose-docking = { version = "0.30" }
+repose-platform = { version = "0.30" }
+repose-render-wgpu = { version = "0.30" }
+repose-text = { version = "0.30" }
+repose-app = { version = "0.30" }
+repose-tree = { version = "0.30" }
 wgpu = "30"
 glam = "0.33"
 bytemuck = { version = "1", features = ["derive"] }

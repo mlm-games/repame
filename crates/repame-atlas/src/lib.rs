@@ -1,6 +1,24 @@
 //! Texture atlas: CPU rectangle packing plus upload queue.
 //! Shelf packing per square page. Page index maps to sprite layer.
 //!
+//! Filtering contract: packed UVs cover the inner content rect only, so a
+//! `padding: 0` atlas with `TextureFilter::Linear` samples neighbor texels
+//! at sprite edges (bleed, worst between animation frames). Either keep the
+//! default `padding: 1` (or more) with linear filtering, or use `Nearest`.
+//! The default is `padding: 1`; the `padding: 0` in the example below packs
+//! tighter for pixel art and relies on `Nearest`.
+//!
+//! Hash keys: [`atlas_id`] is FNV-1a `u64`. Same key twice is
+//! [`AllocError::Duplicate`]; two *distinct* names colliding to one hash
+//! silently alias (no second-string check). At NT scale (~12k frame keys)
+//! that is a ~1e-8 event: keep a debug build-list asserting
+//! `name -> uv` stability if you distrust it.
+//!
+//! Invalidation: [`Atlas::clear`] bulk-invalidates pages for the backend to
+//! drop or re-upload wholesale. Fence it to the snapshot boundary (clear +
+//! repack + drain between frames, never mid-frame): a frame in flight that
+//! references old UVs draws one frame of garbage otherwise.
+//!
 //! ```rust
 //! use repame_atlas::{Atlas, AtlasDesc};
 //!
@@ -20,7 +38,11 @@ pub use upload::{AtlasWrite, PageClear, UploadQueue};
 use std::collections::HashMap;
 
 /// Opaque sprite key. Hash asset names with `atlas_id`.
-/// Ids must be unique per atlas.
+/// Ids must be unique per atlas. Distinct names hashing to one id alias
+/// silently (no second-string check): random-collision odds are ~1e-8 at
+/// 12k keys, and sequential frame keys (`name#0..N`) hash distinctly in
+/// practice, but adversarial/structured inputs are not analyzed. The
+/// duplicate check below only fires on exact key reuse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AtlasId(pub u64);
 
@@ -128,8 +150,15 @@ impl Atlas {
     /// Place a `w`x`h` sprite under `key`. Queues one `AtlasWrite`.
     ///
     /// UV covers the inner content rect. Queued write is the inner rect.
+    /// `debug_assert`s on key reuse with distinct dimensions (hash-collision
+    /// tripwire): release builds return [`AllocError::Duplicate`].
     pub fn alloc(&mut self, key: AtlasId, w: u32, h: u32) -> Result<UvRect, AllocError> {
-        if self.entries.contains_key(&key) {
+        if let Some((_, p)) = self.entries.get(&key) {
+            debug_assert!(
+                p.w.saturating_sub(self.desc.padding.saturating_mul(2)) == w
+                    && p.h.saturating_sub(self.desc.padding.saturating_mul(2)) == h,
+                "atlas key reused with distinct dimensions (hash collision?)"
+            );
             return Err(AllocError::Duplicate);
         }
         if w == 0 || h == 0 || w > self.desc.size || h > self.desc.size {
@@ -231,6 +260,8 @@ impl Atlas {
 
     /// Drop all entries. Queues one `PageClear` per page.
     /// Pending writes are discarded with the placements they name.
+    /// Fence to the snapshot boundary: clear + repack + drain between
+    /// frames, never mid-frame, or a frame in flight draws stale UVs.
     pub fn clear(&mut self) {
         for page in 0..self.pages.len() as u32 {
             self.queue.push_clear(PageClear { page });

@@ -1,6 +1,17 @@
 //! Headless sim: `bevy_ecs` world stepped without a renderer.
 //! Game owns `Sim`, feeds wall time via `Sim::step`,
 //! then reads a snapshot for the viewport.
+//!
+//! Determinism stance: `bevy_ecs` query iteration follows entity allocation
+//! history, so a replay with an identical spawn history iterates
+//! identically. The sim does NOT sort systems' iteration for you: any
+//! gameplay outcome that depends on iteration order (damage application,
+//! projectile-vs-multiple-enemies resolution) must sort explicitly in the
+//! affected system, or replays diverge the moment allocation history does.
+//! Cross-platform float equality (notably `Perlin`/`sin`/`powf` in fx) is
+//! additionally *not* guaranteed between native libm and wasm; same-binary
+//! replay is the supported claim, cross-target equality needs a harness
+//! (run one trace twice, hash the world per tick, diff).
 
 use web_time::Duration;
 
@@ -110,7 +121,10 @@ impl Sim {
     }
 
     /// Blend factor `accumulator / step`, clamped to `0..1`.
-    /// Zero step returns `0.0`. For render blending between snapshots.
+    /// Zero step returns `0.0`. For render blending between snapshots: keep
+    /// the previous snapshot and lerp toward the current one by this alpha
+    /// (NT motion at 30 Hz sim on 144 Hz display needs it; without it every
+    /// fast mover judders on 4-5 identical frames then jumps).
     pub fn alpha(&self) -> f32 {
         let step = self.step.as_secs_f64();
         if step <= 0.0 {

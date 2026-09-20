@@ -13,9 +13,14 @@
 //!
 //! NOTE: World space is y-down (canvas/snapshot convention). Instance rows map
 //! quad corners to world coords; the camera uniform maps world to clip.
-//! Draw order is `z`-sorted stable (Bevy `z` semantics), alpha first then
-//! additive. Each batch id owns its pipelines in `CallbackResources`
-//! (like `FullscreenPass`'s id map), so viewports + minimaps coexist.
+//! Draw order is `z`-sorted stable (Bevy `z` semantics) *within* each blend
+//! range, then ranges draw alpha, multiply, additive: push order across
+//! blend modes is NOT preserved (an additive muzzle flash pushed under an
+//! alpha smoke sprite still composites over it). Budget `z` knowing the
+//! ranges reorder: interleaved alpha/additive scenes cannot rely on push
+//! order across the blend boundary. Each batch id owns its pipelines in
+//! `CallbackResources` (like `FullscreenPass`'s id map), so viewports +
+//! minimaps coexist.
 
 use std::collections::HashMap;
 
@@ -782,6 +787,9 @@ impl SpriteBatch {
 
     /// Painter's order within one blend range: `z` ascending, with the
     /// push index breaking ties (stable for the producer's draw order).
+    /// Across ranges the blend group dominates: all alpha draws before any
+    /// multiply, all multiply before any additive, regardless of `z` or
+    /// push order.
     /// `page` must NEVER participate: atlas page is a packing accident,
     /// and sorting on it reorders same-z sprites (bandit guns under
     /// bodies, bullet layers misaligned, camp floors over the vortex).

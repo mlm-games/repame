@@ -1,11 +1,29 @@
-//! State transitions: fade cover, hold, uncover with input blocking.
-//! Fade runs 0.4 s cover plus 0.4 s uncover at 100 Hz.
-//! Custom visuals drive their own pass from cover amount.
+//! State transitions: fade cover and uncover with input blocking.
+//!
+//! Timebase is **seconds**: [`HALF_SECS`] per half, [`TransitionFx::step_secs`]
+//! advancing on the caller's clock. `step`/`HALF_TICKS` are 100 Hz shims for
+//! legacy games.
+//!
+//! Clock rule: step the transition on the *ungated* clock (before the
+//! `blocking` gate) every frame. Gating the fx step on `blocking` deadlocks:
+//! nothing advances the transition, so it never unblocks. Gate gameplay
+//! systems and input edges on [`TransitionFx::blocking`], never the fx step.
 
-/// Ticks per half (0.4 s at 100 Hz).
+/// Seconds per transition half.
+pub const HALF_SECS: f32 = 0.4;
+/// Legacy ticks per half (0.4 s at 100 Hz).
 pub const HALF_TICKS: i32 = 40;
 /// Custom id convention for spiral-vortex wipes.
 pub const VORTEX_CUSTOM_ID: u8 = 1;
+/// Legacy 100 Hz quantum helpers (one mapping: `ticks / 100.0` s).
+pub fn ticks_to_secs(ticks: i32) -> f32 {
+    super::driver::ticks_to_secs_100hz(ticks)
+}
+
+/// Legacy seconds-to-quanta helper.
+pub fn secs_to_ticks(dt_secs: f32) -> i32 {
+    super::driver::secs_to_ticks_100hz(dt_secs)
+}
 
 use bevy_ecs::prelude::*;
 
@@ -31,7 +49,7 @@ enum Phase {
 #[derive(Clone, Copy, Debug, Default, Resource)]
 pub struct TransitionFx {
     phase: Phase,
-    t: i32,
+    t_secs: f32,
     kind: TransitionVisual,
     /// Kind used by [`Self::begin`] unless the consumer overrides it.
     pub default_kind: TransitionVisual,
@@ -50,7 +68,7 @@ impl TransitionFx {
     /// Start a cover and uncover cycle with an explicit visual.
     pub fn begin_with(&mut self, kind: TransitionVisual) {
         self.phase = Phase::Cover;
-        self.t = 0;
+        self.t_secs = 0.0;
         self.kind = kind;
     }
 
@@ -88,8 +106,8 @@ impl TransitionFx {
     pub fn alpha(&self) -> f32 {
         match self.phase {
             Phase::Idle => 0.0,
-            Phase::Cover => (self.t as f32 / HALF_TICKS as f32).clamp(0.0, 1.0),
-            Phase::Uncover => 1.0 - (self.t as f32 / HALF_TICKS as f32).clamp(0.0, 1.0),
+            Phase::Cover => (self.t_secs / HALF_SECS).clamp(0.0, 1.0),
+            Phase::Uncover => 1.0 - (self.t_secs / HALF_SECS).clamp(0.0, 1.0),
         }
     }
 
@@ -98,27 +116,33 @@ impl TransitionFx {
         self.alpha()
     }
 
-    pub fn step(&mut self, ticks: i32) {
-        if ticks <= 0 {
+    /// Advance on the ungated clock. Non-positive or non-finite dt holds.
+    pub fn step_secs(&mut self, dt_secs: f32) {
+        if !dt_secs.is_finite() || dt_secs <= 0.0 {
             return;
         }
         match self.phase {
             Phase::Idle => {}
             Phase::Cover => {
-                self.t += ticks;
-                if self.t >= HALF_TICKS {
+                self.t_secs += dt_secs;
+                if self.t_secs >= HALF_SECS {
                     self.phase = Phase::Uncover;
-                    self.t = 0;
+                    self.t_secs = 0.0;
                 }
             }
             Phase::Uncover => {
-                self.t += ticks;
-                if self.t >= HALF_TICKS {
+                self.t_secs += dt_secs;
+                if self.t_secs >= HALF_SECS {
                     self.phase = Phase::Idle;
-                    self.t = 0;
+                    self.t_secs = 0.0;
                 }
             }
         }
+    }
+
+    /// Legacy 100 Hz shim: `step_secs(ticks / 100)`.
+    pub fn step(&mut self, ticks: i32) {
+        self.step_secs(super::driver::ticks_to_secs_100hz(ticks));
     }
 }
 
@@ -133,14 +157,35 @@ mod tests {
         assert_eq!(fx.alpha(), 0.0);
         fx.begin();
         assert!(fx.blocking());
-        fx.step(20);
+        fx.step_secs(0.2);
         assert!((fx.alpha() - 0.5).abs() < 1e-5);
-        fx.step(20);
+        fx.step_secs(0.2);
         assert!(fx.blocking());
         assert_eq!(fx.alpha(), 1.0);
-        fx.step(40);
+        fx.step_secs(0.4);
         assert!(!fx.blocking());
         assert_eq!(fx.alpha(), 0.0);
+    }
+
+    #[test]
+    fn tick_shim_matches_seconds() {
+        let mut a = TransitionFx::new();
+        let mut b = TransitionFx::new();
+        a.begin();
+        b.begin();
+        a.step(20);
+        b.step_secs(0.2);
+        assert!((a.alpha() - b.alpha()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn non_positive_dt_holds() {
+        let mut fx = TransitionFx::new();
+        fx.begin();
+        fx.step_secs(0.0);
+        fx.step_secs(f32::NAN);
+        assert!((fx.alpha() - 0.0).abs() < 1e-6);
+        assert!(fx.blocking());
     }
 
     #[test]

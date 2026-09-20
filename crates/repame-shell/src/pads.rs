@@ -110,6 +110,10 @@ impl PadBank {
             match ev {
                 GamepadEvent::Connected { .. } => {}
                 GamepadEvent::Disconnected { id } => {
+                    // Drop the bridge: a stale handle never aliases a new
+                    // device, and held buttons do not strand (the entry is
+                    // gone, so no snapshot reports them held). Reconnect
+                    // starts from a released zero state.
                     self.pads.remove(&id);
                 }
                 GamepadEvent::Button { id, button, pressed } => {

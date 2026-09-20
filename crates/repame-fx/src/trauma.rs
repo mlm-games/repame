@@ -1,6 +1,8 @@
 //! Trauma shake: 0..1 impact memory with decay and squared response.
 //! Perlin-noise offsets apply to rendering only, not sim positions.
 //! Default decay 1.5 drains full trauma in about 0.67 s.
+//!
+//! Timebase is seconds: [`Trauma::decay_secs`]. `decay` is the 100 Hz shim.
 
 use bevy_ecs::prelude::*;
 use noise::{NoiseFn, Perlin};
@@ -57,12 +59,17 @@ impl Trauma {
         self.amount = (self.amount + amount).clamp(0.0, 1.0);
     }
 
-    /// Decay over `ticks` (100 Hz).
-    pub fn decay(&mut self, ticks: i32) {
-        if ticks <= 0 {
+    /// Decay over `dt_secs` seconds. Non-positive or non-finite dt holds.
+    pub fn decay_secs(&mut self, dt_secs: f32) {
+        if !dt_secs.is_finite() || dt_secs <= 0.0 {
             return;
         }
-        self.amount = (self.amount - self.decay_per_sec * ticks as f32 / 100.0).max(0.0);
+        self.amount = (self.amount - self.decay_per_sec * dt_secs).max(0.0);
+    }
+
+    /// Legacy decay over `ticks` 100 Hz quanta.
+    pub fn decay(&mut self, ticks: i32) {
+        self.decay_secs(super::driver::ticks_to_secs_100hz(ticks));
     }
 
     /// `(dx_px, dy_px, roll_rad)` at `time_secs`. Squared response:
@@ -113,8 +120,19 @@ mod tests {
         assert_eq!(tr.amount, 0.4);
         tr.add(0.9);
         assert_eq!(tr.amount, 1.0);
-        tr.decay(100);
+        tr.decay_secs(1.0);
         assert!(tr.amount <= 0.0, "1.5/s drains full trauma in a second");
+    }
+
+    #[test]
+    fn tick_shim_matches_seconds() {
+        let mut a = Trauma::new();
+        let mut b = Trauma::new();
+        a.add(1.0);
+        b.add(1.0);
+        a.decay(50);
+        b.decay_secs(0.5);
+        assert!((a.amount - b.amount).abs() < 1e-6);
     }
 
     #[test]

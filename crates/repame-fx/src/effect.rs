@@ -109,7 +109,14 @@ impl Default for SpawnerDef {
 pub struct EffectDef {
     pub spawner: SpawnerDef,
     pub speed_pps: Jittered,
-    pub lifetime_ticks: Jittered,
+    /// Particle life in seconds. Accepts the legacy `lifetime_ticks` name
+    /// (100 Hz quanta) on load and converts it. Heuristic boundary: values
+    /// above 5.0 are treated as ticks (a 5 s particle is already absurdly
+    /// long; a 5-tick life is common), values at or below as seconds.
+    /// Ambiguous inputs (`base: 4.0` meaning 4 ticks = 0.04 s) misconvert:
+    /// prefer writing new files with `lifetime_secs`.
+    #[serde(alias = "lifetime_ticks", deserialize_with = "de_lifetime_secs")]
+    pub lifetime_secs: Jittered,
     pub size_px: Jittered,
     pub gravity_pps2: f32,
     pub drag_per_sec: f32,
@@ -125,6 +132,33 @@ pub struct EffectDef {
     pub uv_max: [f32; 2],
 }
 
+fn de_lifetime_secs<'de, D>(d: D) -> Result<Jittered, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TicksOrSecs {
+        Map { base: f32, range: f32 },
+        Raw(f32),
+    }
+    let v = TicksOrSecs::deserialize(d)?;
+    let conv = |base: f32, range: f32| {
+        if base > 5.0 || range > 5.0 {
+            Jittered {
+                base: base / 100.0,
+                range: range / 100.0,
+            }
+        } else {
+            Jittered { base, range }
+        }
+    };
+    match v {
+        TicksOrSecs::Map { base, range } => Ok(conv(base, range)),
+        TicksOrSecs::Raw(f) => Ok(Jittered::exact(if f > 5.0 { f / 100.0 } else { f })),
+    }
+}
+
 fn uv_min_default() -> [f32; 2] {
     [0.0, 0.0]
 }
@@ -138,7 +172,7 @@ impl Default for EffectDef {
         Self {
             spawner: SpawnerDef::default(),
             speed_pps: Jittered::exact(60.0),
-            lifetime_ticks: Jittered::exact(40.0),
+            lifetime_secs: Jittered::exact(0.4),
             size_px: Jittered::exact(6.0),
             gravity_pps2: 0.0,
             drag_per_sec: 0.0,
@@ -147,6 +181,16 @@ impl Default for EffectDef {
             page: 0,
             uv_min: uv_min_default(),
             uv_max: uv_max_default(),
+        }
+    }
+}
+
+impl EffectDef {
+    /// Legacy `lifetime_ticks` view (100 Hz quanta, rounded up).
+    pub fn lifetime_ticks(&self) -> Jittered {
+        Jittered {
+            base: (self.lifetime_secs.base * 100.0).ceil().max(1.0),
+            range: (self.lifetime_secs.range * 100.0).ceil().max(0.0),
         }
     }
 }

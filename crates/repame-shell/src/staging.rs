@@ -123,10 +123,8 @@ impl Staging {
             return;
         }
         self.window_focused = true;
-        // Identity-key repair: the polled set IS the reverse map here,
-        // so missed releases drop without synthesizing press edges.
-        // `reconcile_held` cannot express this (its `None` reverse means
-        // "leave alone"), so compare directly.
+        // Identity-key repair: the polled set IS the reverse map here, so
+        // missed releases drop without synthesizing press edges.
         self.held.retain(|key| sched.held_keys.contains(key));
         if !sched.mouse_primary {
             self.lmb_held = false;

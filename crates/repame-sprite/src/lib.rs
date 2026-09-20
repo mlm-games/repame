@@ -67,8 +67,6 @@ impl Default for Camera2d {
 
 /// Scroll limits and follow smoothing live in `game_utils_repame::feel`.
 /// They run game-side when producing the snapshot; this crate only
-/// frames the snapshot contents.
-
 impl Camera2d {
     /// Effective look point: `center + offset`.
     /// Canvas, GPU batch, picks, and actor surfaces all use this value.
@@ -158,6 +156,8 @@ impl Camera2d {
 }
 
 /// Blend mode per sprite. Additive uses `SrcAlpha + One`.
+/// Sorted into ranges (alpha, then multiply, then additive): push order
+/// across blend modes is NOT preserved, see the batch module docs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SpriteBlend {
     #[default]
@@ -186,7 +186,10 @@ pub struct SpriteInstance {
     pub color: [f32; 4],
     /// Atlas page index for multi-texture batches.
     pub page: u32,
-    /// Draw key; higher draws on top. Default 0. Stable-sorted by `z`.
+    /// Draw key within one blend range; higher draws on top. Default 0.
+    /// Stable-sorted by `z` inside the range, but blend ranges draw
+    /// alpha-then-multiply-then-additive regardless of `z` (see
+    /// [`SpriteBlend`]).
     pub z: f32,
     pub blend: SpriteBlend,
 }
@@ -484,6 +487,13 @@ fn rotate_about(p: [f32; 2], center: [f32; 2], roll: f32) -> [f32; 2] {
 /// Viewport-local physical-px press to world point through the painted
 /// [`FrameGeom`]. Takes the region-local position, so HUD chrome or a
 /// non-fullscreen viewport does not shift picks.
+///
+/// Picks track the *painted* (possibly shaken) view by design: correct for
+/// clicking on a drawn sprite. For continuous aim (mouse crosshair, NT
+/// firing), do NOT reuse the shaken geom: unproject the staged raw px via
+/// [`unproject_px`] or [`aim_world`] through a geom built without the shake
+/// offset, otherwise the aim point inherits shake jitter exactly when
+/// trauma is highest.
 pub fn pick_world(local_px: [f32; 2], geom: FrameGeom, world_size: [f32; 2]) -> [f32; 2] {
     let d = if geom.density.is_finite() && geom.density > 1e-6 {
         geom.density
@@ -496,6 +506,55 @@ pub fn pick_world(local_px: [f32; 2], geom: FrameGeom, world_size: [f32; 2]) -> 
         geom.pivot,
         geom.fit,
         geom.roll,
+    )
+}
+
+/// Continuous-aim inverse: like [`pick_world`] but through an *unshaken*
+/// camera (`offset` and trauma roll zeroed). Picks must track the painted
+/// view; aim must not inherit shake jitter. Pass the same `world_size` and
+/// density the viewport painted with, plus the look point and roll of the
+/// camera *without* shake applied.
+pub fn aim_world(
+    local_px: [f32; 2],
+    look_unshaken: [f32; 2],
+    roll_unshaken: f32,
+    fit: (f32, f32, f32),
+    density: f32,
+    world_size: [f32; 2],
+) -> [f32; 2] {
+    let d = if density.is_finite() && density > 1e-6 {
+        density
+    } else {
+        1.0
+    };
+    dp_to_world_with_roll(
+        [local_px[0] / d, local_px[1] / d],
+        world_size,
+        look_unshaken,
+        fit,
+        roll_unshaken,
+    )
+}
+
+/// [`aim_world`] straight from a [`Camera2d`]: uses the follow target
+/// (`center`, no shake `offset`) with zero roll so firing aim never sprays
+/// with the noise function. Paint the viewport with the shaken camera;
+/// read aim with this.
+pub fn aim_world_unshaken(
+    local_px: [f32; 2],
+    cam: &Camera2d,
+    canvas_dp: [f32; 2],
+    world_size: [f32; 2],
+    density: f32,
+) -> [f32; 2] {
+    let fit = effective_fit(canvas_dp, world_size, cam);
+    aim_world(
+        local_px,
+        [cam.center.x, cam.center.y],
+        0.0,
+        fit,
+        density,
+        world_size,
     )
 }
 
@@ -586,14 +645,33 @@ impl From<std::rc::Rc<std::cell::Cell<FrameGeom>>> for GeomHandle {
     }
 }
 
-/// Press slop in physical px: pointer-up farther than this from
-/// pointer-down cancels the `Click` (drag-off-cancel).
-pub const CLICK_SLOP_PX: f32 = 12.0;
+/// Press slop in dp: pointer-up farther than this from pointer-down
+/// cancels the `Click` (drag-off-cancel). Density-independent: compared
+/// after dividing physical-px deltas by the painted density, so a tap
+/// cancels identically on density 1 and density 3.
+pub const CLICK_SLOP_DP: f32 = 12.0;
+/// Legacy physical-px slop value. Kept so old call sites keep compiling;
+/// new code uses [`CLICK_SLOP_DP`] via [`click_within_slop_dp`].
+pub const CLICK_SLOP_PX: f32 = CLICK_SLOP_DP;
 
+/// Legacy px-space slop check (density 1). New code uses
+/// [`click_within_slop_dp`].
+#[allow(dead_code)]
 fn click_within_slop(a: [f32; 2], b: [f32; 2]) -> bool {
-    let dx = a[0] - b[0];
-    let dy = a[1] - b[1];
-    dx * dx + dy * dy <= CLICK_SLOP_PX * CLICK_SLOP_PX
+    click_within_slop_dp(a, b, 1.0)
+}
+
+/// Dp-space slop check: physical-px points divided by `density` (falling
+/// back to 1.0) before comparing against [`CLICK_SLOP_DP`].
+pub fn click_within_slop_dp(a: [f32; 2], b: [f32; 2], density: f32) -> bool {
+    let d = if density.is_finite() && density > 1e-6 {
+        density
+    } else {
+        1.0
+    };
+    let dx = (a[0] - b[0]) / d;
+    let dy = (a[1] - b[1]) / d;
+    dx * dx + dy * dy <= CLICK_SLOP_DP * CLICK_SLOP_DP
 }
 
 /// World-anchored surface rect in dp: `([off_x, off_y], [w, h])`.
@@ -690,7 +768,7 @@ pub fn Viewport2d(
         .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
             if let Some(start) = press_up.take()
-                && click_within_slop(start, [p.x, p.y])
+                && click_within_slop_dp(start, [p.x, p.y], release_geom.get().density)
             {
                 let g = release_geom.get();
                 let world = pick_world([p.x, p.y], g, world_size);
@@ -945,7 +1023,7 @@ pub fn Viewport2dGpuWithId(
             let p = ev.position;
             let start = press_up.lock().ok().and_then(|mut s| s.take());
             if let Some(start) = start
-                && click_within_slop(start, [p.x, p.y])
+                && click_within_slop_dp(start, [p.x, p.y], release_geom.get().density)
             {
                 let g = release_geom.get();
                 let world = pick_world([p.x, p.y], g, world_size);
@@ -1186,14 +1264,34 @@ pub fn Viewport2dGpuWithHud(
 }
 /// World-anchored surface: `child` is boxed to a `size` rect centered
 /// on a world `center`, positioned through [`FrameGeom`]. `mirror_x`
-/// flips about the surface center. Offsets trail the board by one
-/// frame under camera motion; steady state matches.
+/// flips about the surface center (rozvp horde case: centered content).
+/// Offsets trail the board by one frame under camera motion; steady state
+/// matches. For origin-bearing art (NT sprites with off-center
+/// `xorigin`/`yorigin`), prefer [`ActorFrameWithOrigin`] or the sprite
+/// batch's anchor flips, which mirror about the anchor instead.
 #[allow(non_snake_case)]
 pub fn ActorFrame(
     center: [f32; 2],
     size: [f32; 2],
     geom: GeomHandle,
     mirror_x: bool,
+    child: View,
+) -> View {
+    ActorFrameWithOrigin(center, size, geom, mirror_x, [0.5, 0.5], child)
+}
+
+/// Origin-aware [`ActorFrame`]: `mirror_x` flips about the normalized
+/// `origin` (`[0, 1]`, e.g. an NT `xorigin / w`) instead of the surface
+/// center. Set `origin` from the catalog's
+/// [`AnimDef::anchor`](repame_anim::AnimDef::anchor) when the surface
+/// content carries an off-center sprite origin.
+#[allow(non_snake_case)]
+pub fn ActorFrameWithOrigin(
+    center: [f32; 2],
+    size: [f32; 2],
+    geom: GeomHandle,
+    mirror_x: bool,
+    origin: [f32; 2],
     child: View,
 ) -> View {
     let ([ox, oy], [w, h]) = surface_dp(center, size, geom.get());
@@ -1206,7 +1304,9 @@ pub fn ActorFrame(
         None,
     );
     if mirror_x {
-        modifier = modifier.scale2(-1.0, 1.0);
+        modifier = modifier
+            .transform_origin(origin[0].clamp(0.0, 1.0), origin[1].clamp(0.0, 1.0))
+            .scale2(-1.0, 1.0);
     }
     UiBox(modifier).child(child)
 }
@@ -1713,10 +1813,60 @@ mod tests {
     #[test]
     fn click_slop_cancels_drags() {
         assert!(click_within_slop([100.0, 100.0], [105.0, 105.0]));
-        assert!(!click_within_slop(
+        assert!(click_within_slop_dp([100.0, 100.0], [105.0, 105.0], 1.0));
+        assert!(!click_within_slop_dp(
             [100.0, 100.0],
-            [100.0 + CLICK_SLOP_PX + 1.0, 100.0]
+            [100.0 + CLICK_SLOP_DP + 1.0, 100.0],
+            1.0
         ));
+    }
+
+    #[test]
+    fn click_slop_is_density_independent() {
+        // 12 dp at density 3 is 36 px: same tap cancels on both densities.
+        assert!(click_within_slop_dp([0.0, 0.0], [36.0, 0.0], 3.0));
+        assert!(!click_within_slop_dp([0.0, 0.0], [37.0, 0.0], 3.0));
+        assert!(click_within_slop_dp([0.0, 0.0], [12.0, 0.0], 1.0));
+        assert!(!click_within_slop_dp([0.0, 0.0], [13.0, 0.0], 1.0));
+    }
+
+    #[test]
+    fn aim_ignores_shake_while_pick_follows_it() {
+        use super::{aim_world_unshaken, pick_world};
+        let world_size = [800.0, 600.0];
+        let canvas_dp = [800.0, 600.0];
+        let mut cam = Camera2d {
+            center: Vec2::new(400.0, 300.0),
+            offset: Vec2::new(10.0, -5.0),
+            units_per_pixel: 1.0,
+            zoom: 1.0,
+            roll: 0.0,
+        };
+        let fit = effective_fit(canvas_dp, world_size, &cam);
+        let shaken = FrameGeom {
+            fit,
+            look: [
+                cam.effective_center()[0] - world_size[0] * 0.5,
+                cam.effective_center()[1] - world_size[1] * 0.5,
+            ],
+            density: 1.0,
+            viewport_px: [800.0, 600.0],
+            roll: 0.0,
+            pivot: cam.effective_center(),
+        };
+        let px = [400.0, 300.0];
+        let pick = pick_world(px, shaken, world_size);
+        let aim = aim_world_unshaken(px, &cam, canvas_dp, world_size, 1.0);
+        assert!(
+            (pick[0] - aim[0] - 10.0).abs() < 1e-3 && (pick[1] - aim[1] + 5.0).abs() < 1e-3,
+            "pick follows shake, aim does not: pick {pick:?} aim {aim:?}"
+        );
+        cam.offset = Vec2::ZERO;
+        let aim_still = aim_world_unshaken(px, &cam, canvas_dp, world_size, 1.0);
+        assert!(
+            (aim[0] - aim_still[0]).abs() < 1e-3 && (aim[1] - aim_still[1]).abs() < 1e-3,
+            "aim independent of shake: {aim:?} vs {aim_still:?}"
+        );
     }
 
     #[test]

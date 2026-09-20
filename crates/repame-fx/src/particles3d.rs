@@ -1,6 +1,7 @@
-//! 3D particles on fixed 100 Hz ticks: spawners plus one-shot bursts.
+//! 3D particles on fixed steps: spawners plus one-shot bursts.
 //! Output is camera-facing billboard quads for `repame-view3d`.
-//! World space is Y-up; gravity pulls -Y; step fns take tick counts.
+//! World space is Y-up; gravity pulls -Y. Canonical steppers take seconds;
+//! `ticks` wrappers assume 100 Hz quanta.
 
 use bevy_ecs::prelude::*;
 use glam::Vec3;
@@ -10,13 +11,13 @@ use repame_view3d::MeshGroup;
 
 use super::effect::EffectDef;
 
-/// One live 3D particle. Age and life in 100 Hz ticks.
+/// One live 3D particle. Age and life in seconds; legacy tick mirrors kept.
 #[derive(Clone, Debug)]
 pub struct Particle3 {
     pub pos: [f32; 3],
     pub vel: [f32; 3],
-    pub age_ticks: i32,
-    pub life_ticks: i32,
+    pub age_secs: f32,
+    pub life_secs: f32,
     /// Billboard edge length in world units, before the ease shrink.
     pub size_world: f32,
     /// Gravity in world units/s^2, applied toward -Y.
@@ -29,6 +30,8 @@ pub struct Particle3 {
     pub page: u32,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
+    pub age_ticks: i32,
+    pub life_ticks: i32,
 }
 
 impl Component for Particle3 {
@@ -62,12 +65,13 @@ pub fn spawn_particle3(
     let r = (1.0 - z * z).max(0.0).sqrt();
     let dir = [r * theta.cos(), z, r * theta.sin()];
     let speed = def.speed_pps.sample(rng);
+    let life_secs = def.lifetime_secs.sample(rng).max(1.0 / 100.0);
     commands
         .spawn((Particle3 {
             pos,
             vel: [dir[0] * speed, dir[1] * speed, dir[2] * speed],
-            age_ticks: 0,
-            life_ticks: def.lifetime_ticks.sample(rng).max(1.0) as i32,
+            age_secs: 0.0,
+            life_secs,
             size_world: def.size_px.sample(rng).max(0.001),
             gravity_pps2: def.gravity_pps2,
             drag_per_sec: def.drag_per_sec,
@@ -77,6 +81,8 @@ pub fn spawn_particle3(
             page: def.page,
             uv_min: def.uv_min,
             uv_max: def.uv_max,
+            age_ticks: 0,
+            life_ticks: (life_secs / super::driver::SECS_PER_TICK_100HZ).ceil().max(1.0) as i32,
         },))
         .id()
 }
@@ -95,16 +101,16 @@ pub fn burst3(
 }
 
 /// Advance emitter clocks and spawn whole particles at the def rate.
-pub fn tick_spawners3(
+pub fn tick_spawners3_secs(
     commands: &mut Commands,
     spawners: &mut Query<(Entity, &mut Spawner3)>,
     particles: &Query<&Particle3>,
     live: usize,
     max_total: usize,
-    ticks: i32,
+    dt_secs: f32,
     rng: &mut impl Rng,
 ) {
-    if ticks <= 0 {
+    if !dt_secs.is_finite() || dt_secs <= 0.0 {
         return;
     }
     let mut per_spawner: std::collections::HashMap<Entity, usize> =
@@ -119,7 +125,7 @@ pub fn tick_spawners3(
         if spawner.def.spawner.rate_per_sec <= 0.0 {
             continue;
         }
-        spawner.acc += spawner.def.spawner.rate_per_sec * ticks as f32 / 100.0;
+        spawner.acc += spawner.def.spawner.rate_per_sec * dt_secs;
         while spawner.acc >= 1.0 {
             spawner.acc -= 1.0;
             if live + spawned >= max_total {
@@ -140,30 +146,64 @@ pub fn tick_spawners3(
     }
 }
 
+/// Legacy 100 Hz wrapper over [`tick_spawners3_secs`].
+pub fn tick_spawners3(
+    commands: &mut Commands,
+    spawners: &mut Query<(Entity, &mut Spawner3)>,
+    particles: &Query<&Particle3>,
+    live: usize,
+    max_total: usize,
+    ticks: i32,
+    rng: &mut impl Rng,
+) {
+    tick_spawners3_secs(
+        commands,
+        spawners,
+        particles,
+        live,
+        max_total,
+        super::driver::ticks_to_secs_100hz(ticks),
+        rng,
+    );
+}
+
 /// Integrate motion, age, and despawn the spent.
+pub fn step_particles3_secs(
+    commands: &mut Commands,
+    particles: &mut Query<(Entity, &mut Particle3)>,
+    dt_secs: f32,
+) {
+    if !dt_secs.is_finite() || dt_secs <= 0.0 {
+        return;
+    }
+    for (e, mut p) in particles {
+        p.age_secs += dt_secs;
+        if p.age_secs + 1e-6 >= p.life_secs {
+            commands.entity(e).try_despawn();
+            continue;
+        }
+        let drag = (-p.drag_per_sec * dt_secs).exp();
+        p.vel[0] *= drag;
+        p.vel[1] = p.vel[1] * drag - p.gravity_pps2 * dt_secs;
+        p.vel[2] *= drag;
+        p.pos[0] += p.vel[0] * dt_secs;
+        p.pos[1] += p.vel[1] * dt_secs;
+        p.pos[2] += p.vel[2] * dt_secs;
+        p.age_ticks = (p.age_secs / super::driver::SECS_PER_TICK_100HZ).floor() as i32;
+    }
+}
+
+/// Legacy 100 Hz wrapper over [`step_particles3_secs`].
 pub fn step_particles3(
     commands: &mut Commands,
     particles: &mut Query<(Entity, &mut Particle3)>,
     ticks: i32,
 ) {
-    if ticks <= 0 {
-        return;
-    }
-    let dt = ticks as f32 / 100.0;
-    for (e, mut p) in particles {
-        p.age_ticks += ticks;
-        if p.age_ticks >= p.life_ticks {
-            commands.entity(e).try_despawn();
-            continue;
-        }
-        let drag = (-p.drag_per_sec * dt).exp();
-        p.vel[0] *= drag;
-        p.vel[1] = p.vel[1] * drag - p.gravity_pps2 * dt;
-        p.vel[2] *= drag;
-        p.pos[0] += p.vel[0] * dt;
-        p.pos[1] += p.vel[1] * dt;
-        p.pos[2] += p.vel[2] * dt;
-    }
+    step_particles3_secs(
+        commands,
+        particles,
+        super::driver::ticks_to_secs_100hz(ticks),
+    );
 }
 
 /// Camera basis for spherical billboards. `fwd` runs particle to eye.
@@ -188,7 +228,7 @@ pub fn particle_groups<'a>(
 ) -> Vec<MeshGroup> {
     particles
         .map(|p| {
-            let t = p.age_ticks as f32 / p.life_ticks.max(1) as f32;
+            let t = (p.age_secs / p.life_secs.max(1e-6)).clamp(0.0, 1.0);
             let shrink = 1.0 - p.ease.apply(t);
             let s = (p.size_world * shrink).max(1e-4);
             let hs = s * 0.5;
@@ -237,7 +277,7 @@ mod tests {
                 max_alive: 8,
             },
             speed_pps: Jittered::exact(0.0),
-            lifetime_ticks: Jittered::exact(50.0),
+            lifetime_secs: Jittered::exact(0.5),
             size_px: Jittered::exact(2.0),
             gravity_pps2: 0.0,
             drag_per_sec: 0.0,
@@ -293,7 +333,7 @@ mod tests {
         let mut world = World::new();
         let mut d = def();
         d.gravity_pps2 = 200.0;
-        d.lifetime_ticks = Jittered::exact(100.0);
+        d.lifetime_secs = Jittered::exact(1.0);
         burst_n(&mut world, [0.0, 0.0, 0.0], &d, 1);
         step(&mut world, 10);
         let mut q = world.query::<&Particle3>();
@@ -307,7 +347,7 @@ mod tests {
         let mut world = World::new();
         let mut d = def();
         d.speed_pps = Jittered::exact(10.0);
-        d.lifetime_ticks = Jittered::exact(100.0);
+        d.lifetime_secs = Jittered::exact(1.0);
         burst_n(&mut world, [0.0, 0.0, 0.0], &d, 64);
         let mut q = world.query::<&Particle3>();
         let mut signs = std::collections::HashSet::new();

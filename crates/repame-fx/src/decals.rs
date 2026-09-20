@@ -1,12 +1,13 @@
 //! Ground decals: flat quads above the terrain that fade over a fixed life.
-//! One transparent [`MeshGroup`] per decal; state steps on 100 Hz ticks.
+//! One transparent [`MeshGroup`] per decal; ages and lives are seconds
+//! (`step_decals_secs`), `*_ticks` fields and fns are 100 Hz shims.
 //! Quads sit 0.02 above the plane to avoid z-fighting.
 
 use bevy_ecs::prelude::*;
 use repame_sim::bevy_ecs::component::{Mutable, StorageType};
 use repame_view3d::MeshGroup;
 
-/// One live decal. Age and life in 100 Hz ticks.
+/// One live decal. Age and life in seconds; legacy tick mirrors kept.
 #[derive(Clone, Debug)]
 pub struct Decal {
     pub pos: [f32; 3],
@@ -14,11 +15,11 @@ pub struct Decal {
     pub size_world: f32,
     /// Final size as a multiple of spawn size (1.0 means fixed size).
     pub grow: f32,
-    /// Fade length in ticks: alpha runs 1 to 0 over the last
-    /// `fade_ticks` of life. 0 holds full alpha, then vanishes.
-    pub fade_ticks: i32,
-    pub age_ticks: i32,
-    pub life_ticks: i32,
+    /// Fade length in seconds: alpha runs 1 to 0 over the last
+    /// `fade_secs` of life. 0 holds full alpha, then vanishes.
+    pub fade_secs: f32,
+    pub age_secs: f32,
+    pub life_secs: f32,
     /// Yaw about +Y in radians.
     pub yaw: f32,
     pub tint: [f32; 3],
@@ -26,6 +27,10 @@ pub struct Decal {
     pub page: u32,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
+    /// Legacy 100 Hz mirrors; new code reads the `_secs` fields.
+    pub fade_ticks: i32,
+    pub age_ticks: i32,
+    pub life_ticks: i32,
 }
 
 impl Component for Decal {
@@ -40,14 +45,41 @@ pub struct DecalDef {
     pub pos: [f32; 3],
     pub size_world: f32,
     pub tint: [f32; 3],
-    pub life_ticks: i32,
-    pub fade_ticks: i32,
+    /// Life in seconds. Accepts the legacy `life_ticks` name (100 Hz
+    /// quanta) at construction via [`DecalDef::with_life_ticks`]; struct
+    /// literals use seconds.
+    pub life_secs: f32,
+    /// Fade length in seconds.
+    pub fade_secs: f32,
     pub page: u32,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
     pub yaw: f32,
     pub lift: f32,
     pub grow: f32,
+    /// Legacy 100 Hz mirrors; constructors keep them in sync.
+    pub life_ticks: i32,
+    pub fade_ticks: i32,
+}
+
+fn secs_of_ticks(ticks: i32) -> f32 {
+    super::driver::ticks_to_secs_100hz(ticks)
+}
+
+impl DecalDef {
+    /// Legacy constructor from 100 Hz quanta.
+    pub fn with_life_ticks(mut self, life_ticks: i32, fade_ticks: i32) -> Self {
+        self.life_secs = secs_of_ticks(life_ticks.max(1));
+        self.fade_secs = secs_of_ticks(fade_ticks.max(0));
+        self.life_ticks = life_ticks.max(1);
+        self.fade_ticks = fade_ticks.max(0);
+        self
+    }
+
+    /// Legacy 100 Hz views.
+    pub fn life_ticks_view(&self) -> i32 {
+        self.life_ticks
+    }
 }
 
 impl Default for DecalDef {
@@ -56,6 +88,8 @@ impl Default for DecalDef {
             pos: [0.0, 0.0, 0.0],
             size_world: 1.0,
             tint: [0.0, 0.0, 0.0],
+            life_secs: 1.0,
+            fade_secs: 0.3,
             life_ticks: 100,
             fade_ticks: 30,
             page: 0,
@@ -69,16 +103,28 @@ impl Default for DecalDef {
 }
 
 /// Spawn one decal from a [`DecalDef`]. Returns the entity.
-/// `life_ticks = i32::MAX` is persistent: full alpha until despawned.
+/// `life_secs = f32::INFINITY` is persistent: full alpha until despawned.
 pub fn spawn_decal(commands: &mut Commands, def: DecalDef) -> Entity {
+    let persistent = !def.life_secs.is_finite();
     commands
         .spawn((Decal {
             pos: [def.pos[0], def.pos[1] + def.lift, def.pos[2]],
             size_world: def.size_world.max(1e-4),
             grow: def.grow,
+            fade_secs: if def.fade_secs.is_finite() {
+                def.fade_secs.max(0.0)
+            } else {
+                0.0
+            },
+            age_secs: 0.0,
+            life_secs: def.life_secs,
             fade_ticks: def.fade_ticks.max(0),
             age_ticks: 0,
-            life_ticks: def.life_ticks.max(1),
+            life_ticks: if persistent {
+                i32::MAX
+            } else {
+                def.life_ticks.max(1)
+            },
             yaw: def.yaw,
             tint: def.tint,
             page: def.page,
@@ -95,6 +141,9 @@ pub fn blob_shadow(pos: [f32; 3], radius_world: f32) -> Decal {
         pos: [pos[0], pos[1] + 0.02, pos[2]],
         size_world: (radius_world * 2.0).max(1e-4),
         grow: 1.0,
+        fade_secs: 0.0,
+        age_secs: 0.0,
+        life_secs: f32::INFINITY,
         fade_ticks: 0,
         age_ticks: 0,
         life_ticks: i32::MAX,
@@ -113,28 +162,44 @@ pub fn spawn_blob_shadow(commands: &mut Commands, pos: [f32; 3], radius_world: f
 }
 
 /// Age decals and despawn the spent.
-pub fn step_decals(commands: &mut Commands, decals: &mut Query<(Entity, &mut Decal)>, ticks: i32) {
-    if ticks <= 0 {
+pub fn step_decals_secs(
+    commands: &mut Commands,
+    decals: &mut Query<(Entity, &mut Decal)>,
+    dt_secs: f32,
+) {
+    if !dt_secs.is_finite() || dt_secs <= 0.0 {
         return;
     }
     for (e, mut d) in decals {
-        d.age_ticks += ticks;
-        if d.age_ticks >= d.life_ticks {
+        if !d.life_secs.is_finite() {
+            continue;
+        }
+        d.age_secs += dt_secs;
+        d.age_ticks = (d.age_secs / super::driver::SECS_PER_TICK_100HZ).floor() as i32;
+        if d.age_secs + 1e-6 >= d.life_secs {
             commands.entity(e).try_despawn();
         }
     }
 }
 
+/// Legacy 100 Hz wrapper over [`step_decals_secs`].
+pub fn step_decals(commands: &mut Commands, decals: &mut Query<(Entity, &mut Decal)>, ticks: i32) {
+    step_decals_secs(commands, decals, super::driver::ticks_to_secs_100hz(ticks));
+}
+
 /// Alpha at decal age: full until the fade window, then linear to 0.
 fn decal_alpha(d: &Decal) -> f32 {
-    if d.fade_ticks <= 0 || d.life_ticks <= d.fade_ticks {
-        return if d.age_ticks < d.life_ticks { 1.0 } else { 0.0 };
+    if !d.life_secs.is_finite() {
+        return 1.0;
     }
-    let fade_start = d.life_ticks - d.fade_ticks;
-    if d.age_ticks <= fade_start {
+    if d.fade_secs <= 0.0 || d.life_secs <= d.fade_secs {
+        return if d.age_secs < d.life_secs { 1.0 } else { 0.0 };
+    }
+    let fade_start = d.life_secs - d.fade_secs;
+    if d.age_secs <= fade_start {
         1.0
     } else {
-        (1.0 - (d.age_ticks - fade_start) as f32 / d.fade_ticks as f32).clamp(0.0, 1.0)
+        (1.0 - (d.age_secs - fade_start) / d.fade_secs).clamp(0.0, 1.0)
     }
 }
 
@@ -143,7 +208,11 @@ fn decal_alpha(d: &Decal) -> f32 {
 pub fn decal_groups<'a>(decals: impl Iterator<Item = &'a Decal>) -> Vec<MeshGroup> {
     decals
         .map(|d| {
-            let t = d.age_ticks as f32 / d.life_ticks.max(1) as f32;
+            let t = if d.life_secs.is_finite() {
+                (d.age_secs / d.life_secs.max(1e-6)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let grow_t = (t / 0.25).clamp(0.0, 1.0);
             let s = d.size_world * (1.0 + (d.grow - 1.0) * grow_t);
             let hs = s * 0.5;
@@ -188,12 +257,16 @@ mod tests {
     use super::*;
     use repame_sim::bevy_ecs::system::RunSystemOnce;
 
-    fn step(world: &mut World, ticks: i32) {
+    fn step_secs(world: &mut World, dt: f32) {
         let _ = world.run_system_once(
             move |mut q: Query<(Entity, &mut Decal)>, mut cmds: Commands| {
-                step_decals(&mut cmds, &mut q, ticks);
+                step_decals_secs(&mut cmds, &mut q, dt);
             },
         );
+    }
+
+    fn step(world: &mut World, ticks: i32) {
+        step_secs(world, super::super::driver::ticks_to_secs_100hz(ticks));
     }
 
     #[test]
@@ -206,6 +279,8 @@ mod tests {
                     pos: [4.0, 0.0, 6.0],
                     size_world: 2.0,
                     tint: [1.0, 0.0, 0.0],
+                    life_secs: 1.0,
+                    fade_secs: 0.4,
                     life_ticks: 100,
                     fade_ticks: 40,
                     page: 1,
@@ -255,6 +330,8 @@ mod tests {
                 DecalDef {
                     size_world: 3.0,
                     tint: [0.2, 0.2, 0.2],
+                    life_secs: 0.5,
+                    fade_secs: 0.1,
                     life_ticks: 50,
                     fade_ticks: 10,
                     yaw: 0.7,

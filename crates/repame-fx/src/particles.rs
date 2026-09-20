@@ -1,6 +1,6 @@
-//! CPU particles on fixed 100 Hz ticks: spawners plus one-shot bursts.
+//! CPU particles on fixed steps: spawners plus one-shot bursts.
 //! Motion integrates gravity and drag; output is a [`SpriteInstance`] list.
-//! Step fns take tick counts so any fixed-step game can drive them.
+//! Canonical steppers take `dt_secs`; `ticks` wrappers assume 100 Hz quanta.
 
 use std::collections::HashMap;
 
@@ -12,13 +12,13 @@ use repame_sprite::SpriteInstance;
 
 use super::effect::EffectDef;
 
-/// One live particle. Age and life in 100 Hz ticks.
+/// One live particle. Age and life in seconds.
 #[derive(Clone, Debug)]
 pub struct Particle {
     pub pos: [f32; 2],
     pub vel: [f32; 2],
-    pub age_ticks: i32,
-    pub life_ticks: i32,
+    pub age_secs: f32,
+    pub life_secs: f32,
     pub size_px: f32,
     pub gravity_pps2: f32,
     pub drag_per_sec: f32,
@@ -29,6 +29,10 @@ pub struct Particle {
     pub page: u32,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
+    /// Legacy 100 Hz age/life mirrors. Written at spawn and on every step
+    /// so old readers keep working; new code reads `age_secs`/`life_secs`.
+    pub age_ticks: i32,
+    pub life_ticks: i32,
 }
 
 impl Component for Particle {
@@ -61,12 +65,13 @@ pub fn spawn_particle(
 ) -> Entity {
     let angle = rng.random_range(0.0..std::f32::consts::TAU);
     let speed = def.speed_pps.sample(rng);
+    let life_secs = def.lifetime_secs.sample(rng).max(1.0 / 100.0);
     commands
         .spawn((Particle {
             pos: [x, y],
             vel: [angle.cos() * speed, angle.sin() * speed],
-            age_ticks: 0,
-            life_ticks: def.lifetime_ticks.sample(rng).max(1.0) as i32,
+            age_secs: 0.0,
+            life_secs,
             size_px: def.size_px.sample(rng).max(1.0),
             gravity_pps2: def.gravity_pps2,
             drag_per_sec: def.drag_per_sec,
@@ -76,6 +81,8 @@ pub fn spawn_particle(
             page: def.page,
             uv_min: def.uv_min,
             uv_max: def.uv_max,
+            age_ticks: 0,
+            life_ticks: (life_secs / super::driver::SECS_PER_TICK_100HZ).ceil().max(1.0) as i32,
         },))
         .id()
 }
@@ -98,16 +105,16 @@ pub fn burst(
 /// Caps: global `max_total` plus per-spawner `max_alive`.
 /// A capped spawner resets its accumulator, so emission resumes
 /// at rate instead of catching up in one burst.
-pub fn tick_spawners(
+pub fn tick_spawners_secs(
     commands: &mut Commands,
     spawners: &mut Query<(Entity, &mut Spawner)>,
     particles: &Query<&Particle>,
     live: usize,
     max_total: usize,
-    ticks: i32,
+    dt_secs: f32,
     rng: &mut impl Rng,
 ) {
-    if ticks <= 0 {
+    if !dt_secs.is_finite() || dt_secs <= 0.0 {
         return;
     }
     let mut per_spawner: HashMap<Entity, usize> = HashMap::new();
@@ -121,7 +128,7 @@ pub fn tick_spawners(
         if spawner.def.spawner.rate_per_sec <= 0.0 {
             continue;
         }
-        spawner.acc += spawner.def.spawner.rate_per_sec * ticks as f32 / 100.0;
+        spawner.acc += spawner.def.spawner.rate_per_sec * dt_secs;
         while spawner.acc >= 1.0 {
             spawner.acc -= 1.0;
             if live + spawned >= max_total {
@@ -142,20 +149,45 @@ pub fn tick_spawners(
     }
 }
 
+/// Legacy 100 Hz wrapper over [`tick_spawners_secs`].
+pub fn tick_spawners(
+    commands: &mut Commands,
+    spawners: &mut Query<(Entity, &mut Spawner)>,
+    particles: &Query<&Particle>,
+    live: usize,
+    max_total: usize,
+    ticks: i32,
+    rng: &mut impl Rng,
+) {
+    tick_spawners_secs(
+        commands,
+        spawners,
+        particles,
+        live,
+        max_total,
+        super::driver::ticks_to_secs_100hz(ticks),
+        rng,
+    );
+}
+
 /// Integrate motion, age, and despawn the spent.
 /// Gravity pulls +y (canvas y-down); drag is exponential per second.
-pub fn step_particles(
+/// Boundary-exact: an epsilon keeps `age == life` (after float
+/// accumulation) despawning instead of lingering one extra step.
+/// Despawn is deferred (`Commands` applies after the system), so a particle
+/// despawned here still reads one last frame from queries this tick.
+pub fn step_particles_secs(
     commands: &mut Commands,
     particles: &mut Query<(Entity, &mut Particle)>,
-    ticks: i32,
+    dt_secs: f32,
 ) {
-    if ticks <= 0 {
+    if !dt_secs.is_finite() || dt_secs <= 0.0 {
         return;
     }
-    let dt = ticks as f32 / 100.0;
+    let dt = dt_secs;
     for (e, mut p) in particles {
-        p.age_ticks += ticks;
-        if p.age_ticks >= p.life_ticks {
+        p.age_secs += dt;
+        if p.age_secs + 1e-6 >= p.life_secs {
             commands.entity(e).try_despawn();
             continue;
         }
@@ -164,7 +196,21 @@ pub fn step_particles(
         p.vel[1] = p.vel[1] * drag + p.gravity_pps2 * dt;
         p.pos[0] += p.vel[0] * dt;
         p.pos[1] += p.vel[1] * dt;
+        p.age_ticks = (p.age_secs / super::driver::SECS_PER_TICK_100HZ).floor() as i32;
     }
+}
+
+/// Legacy 100 Hz wrapper over [`step_particles_secs`].
+pub fn step_particles(
+    commands: &mut Commands,
+    particles: &mut Query<(Entity, &mut Particle)>,
+    ticks: i32,
+) {
+    step_particles_secs(
+        commands,
+        particles,
+        super::driver::ticks_to_secs_100hz(ticks),
+    );
 }
 
 /// Map live particles to sprite instances: gradient color at life
@@ -172,7 +218,7 @@ pub fn step_particles(
 pub fn particle_sprites<'a>(particles: impl Iterator<Item = &'a Particle>) -> Vec<SpriteInstance> {
     particles
         .map(|p| {
-            let t = p.age_ticks as f32 / p.life_ticks.max(1) as f32;
+            let t = (p.age_secs / p.life_secs.max(1e-6)).clamp(0.0, 1.0);
             let shrink = 1.0 - p.ease.apply(t);
             let s = (p.size_px * shrink).max(0.5);
             SpriteInstance {
@@ -230,7 +276,7 @@ mod tests {
                 max_alive: 8,
             },
             speed_pps: Jittered::exact(0.0),
-            lifetime_ticks: Jittered::exact(50.0),
+            lifetime_secs: Jittered::exact(0.5),
             size_px: Jittered::exact(4.0),
             gravity_pps2: 0.0,
             drag_per_sec: 0.0,
@@ -282,11 +328,29 @@ mod tests {
     }
 
     #[test]
+    fn secs_stepper_matches_tick_shim() {
+        let mut a = World::new();
+        let mut b = World::new();
+        let d = def();
+        burst_n(&mut a, 0.0, 0.0, &d, 1);
+        burst_n(&mut b, 0.0, 0.0, &d, 1);
+        step(&mut a, 10);
+        let _ = b.run_system_once(
+            move |mut q: Query<(Entity, &mut Particle)>, mut cmds: Commands| {
+                step_particles_secs(&mut cmds, &mut q, 0.1);
+            },
+        );
+        let pa = a.query::<&Particle>().iter(&a).next().unwrap();
+        let pb = b.query::<&Particle>().iter(&b).next().unwrap();
+        assert!((pa.age_secs - pb.age_secs).abs() < 1e-6);
+    }
+
+    #[test]
     fn gravity_pulls_down_canvas_y() {
         let mut world = World::new();
         let mut d = def();
         d.gravity_pps2 = 200.0;
-        d.lifetime_ticks = Jittered::exact(100.0);
+        d.lifetime_secs = Jittered::exact(1.0);
         burst_n(&mut world, 0.0, 0.0, &d, 1);
         step(&mut world, 10);
         let mut q = world.query::<&Particle>();
@@ -368,7 +432,7 @@ mod tests {
         let mut world = World::new();
         let mut d = def();
         d.speed_pps = Jittered::exact(100.0);
-        d.lifetime_ticks = Jittered::exact(100.0);
+        d.lifetime_secs = Jittered::exact(1.0);
         d.drag_per_sec = 15.0;
         burst_n(&mut world, 0.0, 0.0, &d, 1);
         step(&mut world, 8);

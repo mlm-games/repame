@@ -521,6 +521,21 @@ mod tests {
                     ..Modifiers::default()
                 },
             )),
+            KeymapEntry::Key(KeyChord::new(Key::Space, Modifiers::default())),
+            KeymapEntry::Key(KeyChord::new(Key::Tab, Modifiers::default())),
+            KeymapEntry::Key(KeyChord::new(Key::Enter, Modifiers::default())),
+            KeymapEntry::Key(KeyChord::new(Key::Escape, Modifiers::default())),
+            KeymapEntry::Key(KeyChord::new(Key::ArrowUp, Modifiers::default())),
+            KeymapEntry::Key(KeyChord::new(Key::ArrowDown, Modifiers::default())),
+            KeymapEntry::Key(KeyChord::new(Key::ArrowLeft, Modifiers::default())),
+            KeymapEntry::Key(KeyChord::new(Key::ArrowRight, Modifiers::default())),
+            KeymapEntry::Key(KeyChord::new(Key::ShiftLeft, Modifiers::default())),
+            KeymapEntry::Physical(PhysicalKey::Space),
+            KeymapEntry::Physical(PhysicalKey::Tab),
+            KeymapEntry::Physical(PhysicalKey::ArrowUp),
+            KeymapEntry::Physical(PhysicalKey::KeyW),
+            KeymapEntry::Physical(PhysicalKey::Digit1),
+            KeymapEntry::Physical(PhysicalKey::Minus),
             KeymapEntry::Mouse(PointerButton::Primary),
             KeymapEntry::Mouse(PointerButton::Secondary),
             KeymapEntry::Mouse(PointerButton::Tertiary),
@@ -535,5 +550,26 @@ mod tests {
             assert_eq!(decode_keymap_entry(&text), entry, "round trip {text:?}");
         }
         assert_eq!(decode_keymap_entry("bogus"), KeymapEntry::None);
+    }
+
+    #[test]
+    fn logical_and_physical_wire_forms_differ() {
+        let logical = KeymapEntry::Key(KeyChord::new(Key::Space, Modifiers::default()));
+        let physical = KeymapEntry::Physical(PhysicalKey::Space);
+        let ltext = encode_keymap_entry(&logical);
+        let ptext = encode_keymap_entry(&physical);
+        assert_ne!(ltext, ptext, "Space must not collide");
+        assert_eq!(decode_keymap_entry(&ltext), logical);
+        assert_eq!(decode_keymap_entry(&ptext), physical);
+        assert_eq!(
+            decode_keymap_entry("Space"),
+            logical,
+            "legacy bare Space stays logical (NT Swap default)"
+        );
+        assert_eq!(
+            decode_keymap_entry("KeyW"),
+            KeymapEntry::Physical(PhysicalKey::KeyW),
+            "legacy bare KeyW stays physical"
+        );
     }
 }

@@ -264,6 +264,31 @@ impl<A: ActionLike> ActionState<A> {
         held
     }
 
+    /// Take a press edge once: first caller per tick gets `true`,
+    /// later callers get `false`. Held state is untouched, so
+    /// `pressed()` keeps reading true while the binding is down.
+    /// Edges clear in `end_tick` like `just_pressed`.
+    pub fn take_just_pressed(&mut self, action: &A) -> bool {
+        if self.just_pressed.contains(action) && self.live(action) {
+            self.just_pressed.remove(action);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Take a release edge once: first caller per tick gets `true`,
+    /// later callers get `false`. Clears in `end_tick` like
+    /// `just_released`.
+    pub fn take_just_released(&mut self, action: &A) -> bool {
+        if self.just_released.contains(action) && self.live(action) {
+            self.just_released.remove(action);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn consume_all(&mut self) {
         self.consumed.extend(self.pressed.iter().cloned());
     }
@@ -371,6 +396,31 @@ mod tests {
         assert!(!st.pressed(&"jump"));
         st.end_tick();
         assert!(st.pressed(&"jump"), "consume must not leak past tick end");
+    }
+
+    #[test]
+    fn take_edge_leaves_held_intact() {
+        let mut st = ActionState::new(jump_map());
+        st.key(&space(), true);
+        assert!(st.take_just_pressed(&"jump"), "first take wins");
+        assert!(!st.take_just_pressed(&"jump"), "second take loses");
+        assert!(!st.just_pressed(&"jump"), "edge consumed");
+        assert!(st.pressed(&"jump"), "held survives the take");
+        st.end_tick();
+        assert!(st.pressed(&"jump"), "held persists to next tick");
+        st.key(&space(), false);
+        assert!(st.take_just_released(&"jump"));
+        assert!(!st.take_just_released(&"jump"));
+    }
+
+    #[test]
+    fn take_edge_while_consumed_stays_quiet() {
+        let mut st = ActionState::new(jump_map());
+        st.key(&space(), true);
+        assert!(st.consume(&"jump"));
+        assert!(!st.take_just_pressed(&"jump"), "suppressed edge reads false");
+        st.end_tick();
+        assert!(st.pressed(&"jump"), "suppress expires at tick end");
     }
 
     #[test]

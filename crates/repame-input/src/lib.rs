@@ -44,14 +44,6 @@ pub fn end_tick_system<A: ActionLike + std::fmt::Debug>(mut state: ResMut<Action
     state.end_tick();
 }
 
-/// Full input-tick closeout: edges AND consumption clear, so mocked
-/// pulses and consumed levels never leak into the next tick.
-pub fn end_input_tick_system<A: ActionLike + std::fmt::Debug>(
-    mut state: ResMut<ActionState<A>>,
-) {
-    state.end_tick();
-}
-
 /// Readout of one polled axis pair (left stick by default).
 pub fn stick_pair(state_axes: &HashMap<GamepadAxis, f32>) -> (f32, f32) {
     let x = state_axes

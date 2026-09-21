@@ -16,18 +16,26 @@ pub struct PadBridge {
     rt_held: bool,
     south: bool,
     east: bool,
+    west: bool,
     dpad_l: bool,
     dpad_u: bool,
     dpad_r: bool,
+    dpad_d: bool,
     north: bool,
+    lb: bool,
+    rb: bool,
     lt_edge: bool,
     rt_edge: bool,
     south_edge: bool,
     east_edge: bool,
+    west_edge: bool,
     dpad_l_edge: bool,
     dpad_u_edge: bool,
     dpad_r_edge: bool,
+    dpad_d_edge: bool,
     north_edge: bool,
+    lb_edge: bool,
+    rb_edge: bool,
 }
 
 impl PadBridge {
@@ -35,10 +43,14 @@ impl PadBridge {
         let (held, edge) = match button {
             GamepadButton::South => (&mut self.south, &mut self.south_edge),
             GamepadButton::East => (&mut self.east, &mut self.east_edge),
+            GamepadButton::West => (&mut self.west, &mut self.west_edge),
             GamepadButton::North => (&mut self.north, &mut self.north_edge),
             GamepadButton::DPadLeft => (&mut self.dpad_l, &mut self.dpad_l_edge),
             GamepadButton::DPadUp => (&mut self.dpad_u, &mut self.dpad_u_edge),
             GamepadButton::DPadRight => (&mut self.dpad_r, &mut self.dpad_r_edge),
+            GamepadButton::DPadDown => (&mut self.dpad_d, &mut self.dpad_d_edge),
+            GamepadButton::LeftShoulder => (&mut self.lb, &mut self.lb_edge),
+            GamepadButton::RightShoulder => (&mut self.rb, &mut self.rb_edge),
             _ => return,
         };
         if pressed && !*held {
@@ -80,10 +92,16 @@ impl PadBridge {
             left_trigger_pressed: self.lt_edge,
             south_pressed: self.south_edge,
             east_pressed: self.east_edge,
+            west_pressed: self.west_edge,
             dpad_left_pressed: self.dpad_l_edge,
             dpad_up_pressed: self.dpad_u_edge,
             dpad_right_pressed: self.dpad_r_edge,
+            dpad_down_pressed: self.dpad_d_edge,
             north_pressed: self.north_edge,
+            left_shoulder_held: self.lb,
+            left_shoulder_pressed: self.lb_edge,
+            right_shoulder_held: self.rb,
+            right_shoulder_pressed: self.rb_edge,
         }
     }
 
@@ -92,10 +110,14 @@ impl PadBridge {
         self.rt_edge = false;
         self.south_edge = false;
         self.east_edge = false;
+        self.west_edge = false;
         self.dpad_l_edge = false;
         self.dpad_u_edge = false;
         self.dpad_r_edge = false;
+        self.dpad_d_edge = false;
         self.north_edge = false;
+        self.lb_edge = false;
+        self.rb_edge = false;
     }
 }
 
@@ -110,10 +132,6 @@ impl PadBank {
             match ev {
                 GamepadEvent::Connected { .. } => {}
                 GamepadEvent::Disconnected { id } => {
-                    // Drop the bridge: a stale handle never aliases a new
-                    // device, and held buttons do not strand (the entry is
-                    // gone, so no snapshot reports them held). Reconnect
-                    // starts from a released zero state.
                     self.pads.remove(&id);
                 }
                 GamepadEvent::Button { id, button, pressed } => {
@@ -126,17 +144,24 @@ impl PadBank {
         }
     }
 
-    pub fn drain(&mut self) -> Vec<GamepadState> {
+    /// Snapshots paired with their device id (id-sorted): callers route
+    /// per-player pads before the id is discarded. Prefer this over
+    /// [`PadBank::drain`], which drops the routing key.
+    pub fn drain_with_id(&mut self) -> Vec<(GamepadId, GamepadState)> {
         let mut ids: Vec<GamepadId> = self.pads.keys().copied().collect();
         ids.sort_by_key(|id| id.0);
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             if let Some(bridge) = self.pads.get_mut(&id) {
-                out.push(bridge.snapshot());
+                out.push((id, bridge.snapshot()));
                 bridge.clear_edges();
             }
         }
         out
+    }
+
+    pub fn drain(&mut self) -> Vec<GamepadState> {
+        self.drain_with_id().into_iter().map(|(_, s)| s).collect()
     }
 
     pub fn live(&self) -> bool {
@@ -164,5 +189,43 @@ mod tests {
         b.axis(GamepadAxis::RightTrigger, 0.8);
         let s = b.snapshot();
         assert!(s.right_trigger_held && s.right_trigger_pressed);
+    }
+
+    #[test]
+    fn shoulder_and_dpad_down_buttons_track() {
+        let mut b = PadBridge::default();
+        b.button(GamepadButton::RightShoulder, true);
+        b.button(GamepadButton::LeftShoulder, true);
+        b.button(GamepadButton::DPadDown, true);
+        b.button(GamepadButton::West, true);
+        let s = b.snapshot();
+        assert!(s.right_shoulder_held && s.right_shoulder_pressed);
+        assert!(s.left_shoulder_held && s.left_shoulder_pressed);
+        assert!(s.dpad_down_pressed);
+        assert!(s.west_pressed);
+    }
+
+    #[test]
+    fn drain_with_id_routes_devices() {
+        let mut bank = PadBank::default();
+        let id0 = GamepadId(3);
+        let id1 = GamepadId(1);
+        bank.feed(vec![
+            GamepadEvent::Button {
+                id: id0,
+                button: GamepadButton::South,
+                pressed: true,
+            },
+            GamepadEvent::Button {
+                id: id1,
+                button: GamepadButton::East,
+                pressed: true,
+            },
+        ]);
+        let drained = bank.drain_with_id();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, id1, "id-sorted");
+        assert!(drained[1].1.south_pressed);
+        assert!(drained[0].1.east_pressed);
     }
 }

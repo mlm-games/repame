@@ -229,6 +229,7 @@ impl Staging {
             .touch_active
             .iter()
             .map(|(id, (start, pos))| TouchContact {
+                id: *id,
                 start: *start / d,
                 pos: *pos / d,
                 just_pressed: self.touch_new.contains(id),

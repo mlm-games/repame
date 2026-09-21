@@ -18,14 +18,21 @@ pub struct GamepadState {
     pub left_trigger_pressed: bool,
     pub south_pressed: bool,
     pub east_pressed: bool,
+    pub west_pressed: bool,
     pub dpad_left_pressed: bool,
     pub dpad_up_pressed: bool,
     pub dpad_right_pressed: bool,
+    pub dpad_down_pressed: bool,
     pub north_pressed: bool,
+    pub left_shoulder_held: bool,
+    pub left_shoulder_pressed: bool,
+    pub right_shoulder_held: bool,
+    pub right_shoulder_pressed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TouchContact {
+    pub id: u64,
     pub start: Vec2,
     pub pos: Vec2,
     pub just_pressed: bool,

@@ -7,7 +7,8 @@
 //! games work in world/dp units and do not touch physical px.
 //! Camera state lives in Repose signals, not in the renderer.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -723,7 +724,7 @@ pub fn Viewport2d(
     let on_up = on_event.clone();
     let on_up_click = on_event.clone();
     let on_leave = on_event;
-    let press: Rc<Cell<Option<[f32; 2]>>> = Rc::new(Cell::new(None));
+    let press: Rc<RefCell<HashMap<u64, [f32; 2]>>> = Rc::new(RefCell::new(HashMap::new()));
     let press_down = press.clone();
     let press_up = press.clone();
     let press_leave = press.clone();
@@ -734,7 +735,7 @@ pub fn Viewport2d(
             let p = ev.position;
             let g = pick_geom.get();
             let world = pick_world([p.x, p.y], g, world_size);
-            press_down.set(Some([p.x, p.y]));
+            press_down.borrow_mut().insert(ev.id.0, [p.x, p.y]);
             let w = ev.position_in_window();
             let button = button_of(&ev);
             on_down(PickEvent::Press {
@@ -767,7 +768,8 @@ pub fn Viewport2d(
         })
         .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
-            if let Some(start) = press_up.take()
+            let start = press_up.borrow_mut().remove(&ev.id.0);
+            if let Some(start) = start
                 && click_within_slop_dp(start, [p.x, p.y], release_geom.get().density)
             {
                 let g = release_geom.get();
@@ -785,7 +787,7 @@ pub fn Viewport2d(
             }
         })
         .on_pointer_leave(move |ev: repose_core::input::PointerEvent| {
-            press_leave.set(None);
+            press_leave.borrow_mut().remove(&ev.id.0);
             if is_touch(&ev) {
                 on_leave(PickEvent::TouchUp { id: ev.id.0 });
             }
@@ -936,7 +938,7 @@ pub fn Viewport2dGpuWithId(
     let on_up = on_event.clone();
     let on_up_click = on_event.clone();
     let on_leave = on_event;
-    let press: Arc<Mutex<Option<[f32; 2]>>> = Arc::new(Mutex::new(None));
+    let press: Arc<Mutex<HashMap<u64, [f32; 2]>>> = Arc::new(Mutex::new(HashMap::new()));
     let press_down = press.clone();
     let press_up = press.clone();
     let press_leave = press.clone();
@@ -986,8 +988,8 @@ pub fn Viewport2dGpuWithId(
             let p = ev.position;
             let g = pick_geom.get();
             let world = pick_world([p.x, p.y], g, world_size);
-            if let Ok(mut slot) = press_down.lock() {
-                *slot = Some([p.x, p.y]);
+            if let Ok(mut slots) = press_down.lock() {
+                slots.insert(ev.id.0, [p.x, p.y]);
             }
             let w = ev.position_in_window();
             let button = button_of(&ev);
@@ -1021,7 +1023,7 @@ pub fn Viewport2dGpuWithId(
         })
         .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
-            let start = press_up.lock().ok().and_then(|mut s| s.take());
+            let start = press_up.lock().ok().and_then(|mut s| s.remove(&ev.id.0));
             if let Some(start) = start
                 && click_within_slop_dp(start, [p.x, p.y], release_geom.get().density)
             {
@@ -1041,7 +1043,7 @@ pub fn Viewport2dGpuWithId(
         })
         .on_pointer_leave(move |ev: repose_core::input::PointerEvent| {
             if let Ok(mut s) = press_leave.lock() {
-                *s = None;
+                s.remove(&ev.id.0);
             }
             if is_touch(&ev) {
                 on_leave(PickEvent::TouchUp { id: ev.id.0 });
@@ -1809,6 +1811,35 @@ mod tests {
         assert!(!is_touch(&ev_of(PointerKind::Mouse)));
         // Touch zones sample window-physical px (origin + position).
         assert_eq!(screen_of(&ev_of(PointerKind::Touch)), [15.0, 27.0]);
+    }
+
+    #[test]
+    fn presses_track_per_pointer_id() {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        use std::rc::Rc;
+        let presses: Rc<RefCell<HashMap<u64, [f32; 2]>>> =
+            Rc::new(RefCell::new(HashMap::new()));
+        let down = presses.clone();
+        let up = presses.clone();
+        let leave = presses.clone();
+        let press_down = move |id: u64, at: [f32; 2]| {
+            down.borrow_mut().insert(id, at);
+        };
+        let press_up = move |id: u64| up.borrow_mut().remove(&id);
+        let press_leave = move |id: u64| {
+            leave.borrow_mut().remove(&id);
+        };
+        press_down(1, [10.0, 10.0]);
+        press_down(2, [200.0, 200.0]);
+        assert_eq!(press_up(1), Some([10.0, 10.0]));
+        assert_eq!(
+            presses.borrow().get(&2),
+            Some(&[200.0, 200.0]),
+            "second finger press survives first finger lift"
+        );
+        press_leave(2);
+        assert!(presses.borrow().is_empty());
     }
 
     #[test]

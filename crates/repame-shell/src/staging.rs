@@ -135,6 +135,30 @@ impl Staging {
             self.mouse_edges
                 .retain(|(button, _)| *button != PointerButton::Tertiary);
         }
+        // The platform publishes the live contact
+        // table (`sched.touch_points`, physical px) every event, and
+        // `feed_polled` runs once per frame before the sampler.
+        if sched.touch_points.is_empty() {
+            if !self.touch_active.is_empty() {
+                self.touch_active.clear();
+                self.touch_new.clear();
+            }
+        } else {
+            let d = repose_core::locals::effective_density_scale().max(1e-6);
+            let live: std::collections::HashSet<u64> =
+                sched.touch_points.iter().map(|(id, _, _)| *id).collect();
+            self.touch_active
+                .retain(|id, _| live.contains(id) || self.touch_new.contains(id));
+            for (id, x, y) in sched.touch_points.iter() {
+                let p = Vec2::new(*x, *y) / d;
+                if let Some(contact) = self.touch_active.get_mut(id) {
+                    contact.1 = p;
+                } else {
+                    self.touch_active.insert(*id, (p, p));
+                    self.touch_new.insert(*id);
+                }
+            }
+        }
     }
 
     pub fn pick_down(&mut self, button: PointerButton) {
@@ -206,14 +230,14 @@ impl Staging {
         self.pad_live = true;
     }
 
-    pub fn touch_down(&mut self, id: u64, screen: Vec2) {
-        self.touch_active.insert(id, (screen, screen));
+    pub fn touch_down(&mut self, id: u64, screen_dp: Vec2) {
+        self.touch_active.insert(id, (screen_dp, screen_dp));
         self.touch_new.insert(id);
     }
 
-    pub fn touch_move(&mut self, id: u64, screen: Vec2) {
+    pub fn touch_move(&mut self, id: u64, screen_dp: Vec2) {
         if let Some(contact) = self.touch_active.get_mut(&id) {
-            contact.1 = screen;
+            contact.1 = screen_dp;
         }
     }
 
@@ -222,15 +246,14 @@ impl Staging {
         self.touch_new.remove(&id);
     }
 
-    pub fn touch_contacts(&mut self, density: f32) -> Vec<TouchContact> {
-        let d = density.max(1e-6);
+    pub fn touch_contacts(&mut self) -> Vec<TouchContact> {
         let out: Vec<TouchContact> = self
             .touch_active
             .iter()
             .map(|(id, (start, pos))| TouchContact {
                 id: *id,
-                start: *start / d,
-                pos: *pos / d,
+                start: *start,
+                pos: *pos,
                 just_pressed: self.touch_new.contains(id),
             })
             .collect();

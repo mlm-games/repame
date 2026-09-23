@@ -144,6 +144,74 @@ fn missed_mouse_release_drops_level() {
 }
 
 #[test]
+fn missed_touch_release_drops_stale_contact() {
+    let mut staging = Staging::default();
+    staging.window_focused = true;
+    staging.touch_down(7, Vec2::new(100.0, 100.0));
+    assert!(!staging.touch_active.is_empty());
+
+    staging.feed_polled(&focused_scheduler());
+    assert!(
+        staging.touch_active.is_empty(),
+        "missed touch Ended must drop the stale contact"
+    );
+}
+
+#[test]
+fn polled_snapshot_repairs_contact_positions_without_stealing_edges() {
+    let mut staging = Staging::default();
+    staging.window_focused = true;
+    staging.touch_down(7, Vec2::new(100.0, 100.0));
+    let _ = staging.touch_contacts();
+    let mut sched = focused_scheduler();
+    sched.touch_points = vec![(7, 150.0, 160.0)];
+    staging.feed_polled(&sched);
+    let contacts = staging.touch_contacts();
+    assert_eq!(contacts.len(), 1, "live finger must survive repair");
+    assert_eq!(contacts[0].id, 7);
+    assert!(
+        !contacts[0].just_pressed,
+        "repair must never re-latch an edge on a finger the event path staged"
+    );
+    assert!(
+        (contacts[0].pos.x - 150.0).abs() < 1e-3 && (contacts[0].pos.y - 160.0).abs() < 1e-3,
+        "repair must track the snapshot position, got {:?}",
+        contacts[0].pos
+    );
+    assert!(
+        (contacts[0].start.x - 100.0).abs() < 1e-3,
+        "repair must never rewrite the press anchor, got {:?}",
+        contacts[0].start
+    );
+}
+
+#[test]
+fn polled_snapshot_backfills_swallowed_second_finger_with_press_edge() {
+    let mut staging = Staging::default();
+    staging.window_focused = true;
+    staging.touch_down(1, Vec2::new(60.0, 170.0));
+    let _ = staging.touch_contacts();
+    // Finger 2 down: the gesture layer swallowed its press (single
+    // primary pending-press), so no TouchDown staged it — only the
+    // contact table knows.
+    let mut sched = focused_scheduler();
+    sched.touch_points = vec![(1, 60.0, 170.0), (2, 260.0, 160.0)];
+    staging.feed_polled(&sched);
+    let contacts = staging.touch_contacts();
+    assert_eq!(contacts.len(), 2, "swallowed finger must appear");
+    let second = contacts.iter().find(|c| c.id == 2).expect("finger 2 backfilled");
+    assert!(
+        second.just_pressed,
+        "backfilled finger must latch just_pressed or stick claims never see it"
+    );
+    let first = contacts.iter().find(|c| c.id == 1).expect("finger 1 kept");
+    assert!(
+        !first.just_pressed,
+        "repair must not re-latch the already-claimed finger"
+    );
+}
+
+#[test]
 fn focus_loss_cancels_all_pending_input() {
     let mut staging = Staging::default();
     staging.window_focused = true;

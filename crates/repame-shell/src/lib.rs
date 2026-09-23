@@ -19,7 +19,7 @@ mod store;
 pub use audio::drain_cues;
 pub use levels::apply_scheduler_levels;
 pub use pads::{PadBank, PadBridge, TRIGGER_HELD};
-pub use shortcuts::{SharedEdges, ShortcutEdges, game_shortcut_map, install_handler_into, install_into, install_map, shared_edges, take as take_shortcut_edges};
+pub use shortcuts::{SharedEdges, ShortcutEdges, game_shortcut_map, install_game_shortcuts, install_handler_into, install_map, shared_edges, shortcut_handler, take as take_shortcut_edges};
 pub use staging::Staging;
 pub use store::{load_json, save_file_path, store_json};
 

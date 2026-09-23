@@ -32,18 +32,14 @@ pub fn shared_edges() -> SharedEdges {
     Rc::new(RefCell::new(ShortcutEdges::default()))
 }
 
-/// Overwrite the process-global default shortcut map (idempotent:
-/// same bindings every call, safe per frame and across test threads).
-pub fn install_map(map: shortcuts::ShortcutMap) {
-    shortcuts::set_default_map(map);
-}
-/// Install only the action handler into long-lived `edges`.
-/// The map itself is process-global (`install_map`, called alongside);
-/// pushing a scoped map per frame would leak a scope entry per frame
-/// and re-root `resolve_action` ordering.
-pub fn install_handler_into(edges: &SharedEdges, pause: &'static str, restart: &'static str, confirm: &'static str) {
+pub fn shortcut_handler(
+    edges: &SharedEdges,
+    pause: &'static str,
+    restart: &'static str,
+    confirm: &'static str,
+) -> shortcuts::Handler {
     let inner = edges.clone();
-    shortcuts::set(Some(Rc::new(move |action| {
+    Rc::new(move |action| {
         let mut e = inner.borrow_mut();
         match action {
             Action::Custom(key) if key.as_ref() == pause => {
@@ -60,17 +56,33 @@ pub fn install_handler_into(edges: &SharedEdges, pause: &'static str, restart: &
             }
             _ => false,
         }
-    })));
+    })
 }
 
-pub fn install_into(
+/// Compose the game map + edges handler once in the root view
+/// (mount-once under the hood: safe to call every frame on desktop,
+/// web, and Android-with-keyboard alike). One call per game; no
+/// per-key duplication at call sites.
+pub fn install_game_shortcuts(
     edges: &SharedEdges,
     pause: &'static str,
     restart: &'static str,
     confirm: &'static str,
 ) {
     let _ = shortcuts::InstallShortcutMap(game_shortcut_map(pause, restart, confirm));
-    install_handler_into(edges, pause, restart, confirm);
+    let _ = shortcuts::InstallShortcutHandler(shortcut_handler(edges, pause, restart, confirm));
+}
+
+/// Overwrite the process-global default shortcut map (tests and headless
+/// compose without a runner use this path).
+pub fn install_map(map: shortcuts::ShortcutMap) {
+    shortcuts::set_default_map(map);
+}
+
+/// Install only the action handler into long-lived `edges`
+/// (tests and headless compose without a runner use this path).
+pub fn install_handler_into(edges: &SharedEdges, pause: &'static str, restart: &'static str, confirm: &'static str) {
+    shortcuts::set(Some(shortcut_handler(edges, pause, restart, confirm)));
 }
 
 pub fn take(edges: &SharedEdges) -> (bool, bool, bool) {

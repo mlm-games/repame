@@ -146,6 +146,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -187,7 +196,7 @@ dependencies = [
  "log",
  "ndk",
  "ndk-context",
- "ndk-sys",
+ "ndk-sys 0.6.0+11769913",
  "num_enum",
  "thiserror 2.0.20",
 ]
@@ -1417,6 +1426,7 @@ version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
+ "futures-channel",
  "futures-core",
  "futures-macro",
  "futures-task",
@@ -1550,6 +1560,18 @@ dependencies = [
  "nalgebra",
  "num-traits",
  "simba",
+]
+
+[[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2091,9 +2113,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.24"
+version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6480ccc157a1389bb2e4891b24751b0f798ba640d22386f23143fbcc89da195a"
+checksum = "61ff90caf6077a803a240f62fdbe88645a890bbca49ef8174c3cb0404362171d"
 dependencies = [
  "bitflags 2.13.2",
  "libc",
@@ -2212,6 +2234,15 @@ name = "mach2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
+
+[[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
+]
 
 [[package]]
 name = "matrixmultiply"
@@ -2365,7 +2396,7 @@ dependencies = [
  "bitflags 2.13.2",
  "jni-sys 0.3.1",
  "log",
- "ndk-sys",
+ "ndk-sys 0.6.0+11769913",
  "num_enum",
  "raw-window-handle 0.5.2",
  "raw-window-handle 0.6.2",
@@ -2377,6 +2408,15 @@ name = "ndk-context"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
+
+[[package]]
+name = "ndk-sys"
+version = "0.5.0+25.2.9519653"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c196769dd60fd4f363e11d948139556a344e79d451aeb2fa2fd040738ef7691"
+dependencies = [
+ "jni-sys 0.3.1",
+]
 
 [[package]]
 name = "ndk-sys"
@@ -2927,6 +2967,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
 dependencies = [
  "ttf-parser",
+]
+
+[[package]]
+name = "paranoid-android"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "101795d63d371b43e38d6e7254677657be82f17022f7f7893c268f33ac0caadc"
+dependencies = [
+ "lazy_static",
+ "ndk-sys 0.5.0+25.2.9519653",
+ "sharded-slab",
+ "smallvec",
+ "tracing-core",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3491,16 +3545,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-automata"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-lite"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
-name = "renamite-animation"
-version = "0.3.1"
+name = "regex-syntax"
+version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fd3fde39cc61c1929d63821eb3141a105c64fc2e74d3133c7bc51ac5e7d7504"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "renamite-animation"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3404a1e2e77e24909930c75286f8a11c91fd8bdce864c94c560cc44301e96507"
 dependencies = [
  "glam 0.33.8",
  "renamite-geometry",
@@ -3509,9 +3580,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-behavior-common"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be466038f5164cd6bbd323abdc82ee00ddfcd997aab04472eeccbdbeacad537f"
+checksum = "78554be390fdf7340c3d9719065103d38cf136e126ed56f800cc28fa2d91a0a8"
 dependencies = [
  "glam 0.33.8",
  "kurbo",
@@ -3526,9 +3597,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-geometry"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c07b076811a5a856bcb25611df3fefbee637aa87b2152898791f230852b97c59"
+checksum = "ffec292e86f6277c5445a042b2e91f94f6df594a35f129d38523a6162e3569d1"
 dependencies = [
  "glam 0.33.8",
  "kurbo",
@@ -3539,9 +3610,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-history"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95bbe45d5c132d3ef40feeca0d14cf76fc1175d5f2983926c4736683d6ded1ed"
+checksum = "07948883a346102ad9aea9eafb206f9f253b33c2be899cc8c4c06d94ce979b2e"
 dependencies = [
  "glam 0.33.8",
  "renamite-animation",
@@ -3556,9 +3627,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-io-ren"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de8d30554212032de0792970cef57b9e57fff31a2d1a445a448bf964552337c8"
+checksum = "130f62c5f3d9180e46c19a734cf268208b7e4cf9a266adb5a256e0e6d6d13669"
 dependencies = [
  "renamite-machine",
  "renamite-model",
@@ -3569,9 +3640,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-machine"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7c7164610700b846b844896416d16fd1f2515ff5330fb61e61ada9650034c28"
+checksum = "593c904962b0f454188c2f0cfadf0e18d1a11ce369f7db1db5c3c67e70cea7a6"
 dependencies = [
  "glam 0.33.8",
  "renamite-animation",
@@ -3584,9 +3655,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-model"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9038eef78f74e5ecb982067fb5a523c57e61065965af0c8d55d878fad3e3e901"
+checksum = "da989c93daa243f5e6692ab539fcbad878b0d512fca9dbb819b3f5e2b8b59aa4"
 dependencies = [
  "glam 0.33.8",
  "kurbo",
@@ -3601,9 +3672,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-player"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c21a52df044984cf0f14db81191b5361e377a170e35366addbd3e56fe24a7752"
+checksum = "2765050bd71c58043bd458ba69a45b1a4fb3e8a6e6fd7db3e943ec1a1a73e425"
 dependencies = [
  "glam 0.33.8",
  "kurbo",
@@ -3617,9 +3688,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-player-ui"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "005e4693be5e5df3b59763c6fd2927bb63685c5b0f029125311a293993a7f282"
+checksum = "975c797fa4e8cace06b99901005f43d42a94f16f5cbd600e9add2702ff02b9f2"
 dependencies = [
  "glam 0.33.8",
  "renamite-behavior-common",
@@ -3632,9 +3703,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-render-bridge"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "366096935f066dc9fd146b880c81ce18c2400d86b265924e03f815112f1b096b"
+checksum = "4f1fc1757153d828a45560277f87c4f37104a30892c09e6f41384091e6401049"
 dependencies = [
  "glam 0.33.8",
  "kurbo",
@@ -3651,9 +3722,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-text"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da4aeb1f8c780b553a2210cbe1b7e6f7134c57f96ce0417fd4b4ae9a295518aa"
+checksum = "116cb9b3f658300b4cfbdf79f38f0ed7d2d4e607aff31c75700b712847534d7a"
 dependencies = [
  "kurbo",
  "serde",
@@ -3833,9 +3904,9 @@ dependencies = [
 
 [[package]]
 name = "repose-app"
-version = "0.30.17"
+version = "0.30.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ca687369f47a2cec95ca6b4aac521d35998638bdfce13d66b22798795239e02"
+checksum = "ba7f13c8c8e943be801a8d391f24c652fa617f3d7b9b67afe1761cdec396ccb3"
 dependencies = [
  "log",
  "repose-core",
@@ -3846,9 +3917,9 @@ dependencies = [
 
 [[package]]
 name = "repose-canvas"
-version = "0.30.17"
+version = "0.30.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "127aa82d810e0dacd43c180b315c5f9a43bf8fda5d91811add9bd58e9797bd14"
+checksum = "fcc58d57c8e434f869911ee242a8889b4ad48c9ed66f8350311a8f6b0fdf3bc0"
 dependencies = [
  "lyon_path",
  "lyon_tessellation",
@@ -3858,9 +3929,9 @@ dependencies = [
 
 [[package]]
 name = "repose-core"
-version = "0.30.17"
+version = "0.30.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aa9777a3aa5b7bbd99592c987d4fc0b1c16782e5cde3f0074bae5a4c2320a1c"
+checksum = "c1dd4b1395cc5ec172c8eba6b596bc170c82f3696881ddc7f2a59e018b6cf0ca"
 dependencies = [
  "accesskit",
  "log",
@@ -3874,19 +3945,20 @@ dependencies = [
 
 [[package]]
 name = "repose-devtools"
-version = "0.30.17"
+version = "0.30.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8482ee757330232e916070af9e690f8a1e5054281e6b450ce64b24bbb205730c"
+checksum = "dbf693e0f798d1b86bf4e161797b038711d9f9f88a0008d645465ac9adf23080"
 dependencies = [
  "repose-core",
  "web-time",
+ "web-workers",
 ]
 
 [[package]]
 name = "repose-macros"
-version = "0.30.17"
+version = "0.30.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef54956c510142ec64d5a5191b4154bd2b0c1a025182556653f6f62ca321abcf"
+checksum = "3e105f2726b607a5631efff990ab5281fa9b3de9e80259aa8e680464070bde00"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3895,9 +3967,9 @@ dependencies = [
 
 [[package]]
 name = "repose-navigation"
-version = "0.30.17"
+version = "0.30.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f129b6f87713443234671db8104f5d297ef23714ee3759183fe03823d4c253a3"
+checksum = "53a93a05f8b36fb89209b3888c5da750e02e2bf91a43186bcb3c97d36494312f"
 dependencies = [
  "log",
  "repose-core",
@@ -3908,9 +3980,9 @@ dependencies = [
 
 [[package]]
 name = "repose-platform"
-version = "0.30.17"
+version = "0.30.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25f13a8adace5fae14389c9aa49a5da92d4ba55ac80f322831444a30a783616c"
+checksum = "7a9acd5a5840eeccf1a2a026ac73d82f1778ac00720504f332a613bcfb92c8f1"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -3930,6 +4002,7 @@ dependencies = [
  "repose-render-wgpu",
  "repose-text",
  "repose-ui",
+ "rlobkit-app-events",
  "rustc-hash 2.1.3",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -3941,9 +4014,9 @@ dependencies = [
 
 [[package]]
 name = "repose-render-wgpu"
-version = "0.30.17"
+version = "0.30.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2bffbab3b91fcdfa46dd9787eb7f297498c557b6ea9023a128fff742dfd8a4c"
+checksum = "f3abcd1deab8e4a1bc20511c42d20d3ceaff4a60f31cf3602d3b039de884771b"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3961,9 +4034,9 @@ dependencies = [
 
 [[package]]
 name = "repose-text"
-version = "0.30.17"
+version = "0.30.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "787d1d6ced35c151158b830d0b1c3ae33e616269aa17acbf7acfcb41541db006"
+checksum = "291dd56d4a2088fb46a62b342be2a4d6a5482feb0f4b5067e93dfecd3504084e"
 dependencies = [
  "font-awl",
  "js-sys",
@@ -3980,9 +4053,9 @@ dependencies = [
 
 [[package]]
 name = "repose-tree"
-version = "0.30.17"
+version = "0.30.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "528db6a402463fce11d03488927b1982f4972e5bdeb56aaf5e6f44e2ad5e49a6"
+checksum = "b9cc909b5587f1f544e37b218bdc06e3efb43622fd7ac1ddff84d050641acc99"
 dependencies = [
  "log",
  "rapidhash",
@@ -3995,9 +4068,9 @@ dependencies = [
 
 [[package]]
 name = "repose-ui"
-version = "0.30.17"
+version = "0.30.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe4cd50d3396a856db4ca5460712bbf21d958be26ba13d08a4421346635827ea"
+checksum = "33c9cbedfba486fd6b187766e54c7dbac856466e899c6bcc9207c63ce69f9be0"
 dependencies = [
  "log",
  "repose-core",
@@ -4008,6 +4081,19 @@ dependencies = [
  "unicode-segmentation",
  "web-time",
  "webbrowser",
+]
+
+[[package]]
+name = "rlobkit-app-events"
+version = "0.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "195477c5d36d849078c635ee90ca338c55d0fd61303ff19756e38888586d7f23"
+dependencies = [
+ "log",
+ "paranoid-android",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4218,6 +4304,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "sharded-slab"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
+dependencies = [
+ "lazy_static",
 ]
 
 [[package]]
@@ -4762,6 +4857,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio"
+version = "1.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+dependencies = [
+ "pin-project-lite",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4820,6 +4924,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+ "valuable",
+]
+
+[[package]]
+name = "tracing-log"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+dependencies = [
+ "log",
+ "once_cell",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.3.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
+dependencies = [
+ "matchers",
+ "once_cell",
+ "regex-automata",
+ "sharded-slab",
+ "smallvec",
+ "thread_local",
+ "tracing",
+ "tracing-core",
 ]
 
 [[package]]
@@ -4931,6 +5063,12 @@ dependencies = [
  "serde_core",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "valuable"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "variadics_please"
@@ -5172,16 +5310,21 @@ dependencies = [
 
 [[package]]
 name = "web-workers"
-version = "0.3.6"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4606593135f49a636c98f948be9b986525a05ea44a5181d12253df7084f5ac59"
+checksum = "45a3851eee3524c600dbdc84849ca844d06e73d548e86492df959eec4138bec0"
 dependencies = [
  "atomic-waker",
  "continue",
+ "futures-util",
+ "gloo-timers",
  "js-sys",
  "minicov",
  "pin-project",
  "pollster 0.4.0",
+ "serde",
+ "serde_json",
+ "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -5343,7 +5486,7 @@ dependencies = [
  "log",
  "naga",
  "naga-types",
- "ndk-sys",
+ "ndk-sys 0.6.0+11769913",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-core-graphics",

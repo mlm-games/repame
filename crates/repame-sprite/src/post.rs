@@ -446,6 +446,7 @@ mod tests {
                 layer_size: 8,
                 layers: 1,
                 filter: TextureFilter::Nearest,
+                ..Default::default()
             });
             // Rebuilt per frame through the public API (same calls
             // `GpuViewport::prepare` makes from its snapshot).

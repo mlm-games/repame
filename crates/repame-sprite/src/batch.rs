@@ -48,6 +48,8 @@ pub struct BatchDesc {
     /// Array layer count (= max atlas pages).
     pub layers: u32,
     pub filter: TextureFilter,
+    /// Atlas content generation behind the uploads.
+    pub uploads_gen: u64,
 }
 
 impl Default for BatchDesc {
@@ -56,6 +58,7 @@ impl Default for BatchDesc {
             layer_size: 2048,
             layers: 4,
             filter: TextureFilter::Nearest,
+            uploads_gen: 0,
         }
     }
 }
@@ -404,7 +407,7 @@ impl SpriteBatch {
 }
 
 struct BatchEntry {
-    key: (wgpu::TextureFormat, u32, u32, u32, TextureFilter),
+    key: (wgpu::TextureFormat, u32, u32, u32, TextureFilter, u64),
     pipeline_alpha: wgpu::RenderPipeline,
     pipeline_multiply: wgpu::RenderPipeline,
     pipeline_additive: wgpu::RenderPipeline,
@@ -416,6 +419,10 @@ struct BatchEntry {
     last_alpha: u32,
     last_multiply_end: u32,
     last_total: u32,
+    /// Atlas generation resident in `texture`. Repeats of the same
+    /// generation skip `write_texture`; a new generation (fresh load)
+    /// replays the blits into the live texture.
+    applied_gen: u64,
     camera: wgpu::Buffer,
     cam_bind: wgpu::BindGroup,
     tex_bind: wgpu::BindGroup,
@@ -473,6 +480,7 @@ impl SpriteBatch {
             self.desc.layer_size,
             self.desc.layers,
             self.desc.filter,
+            self.desc.uploads_gen,
         );
         let needs = match resources.get::<BatchResources>() {
             None => true,
@@ -739,6 +747,7 @@ impl SpriteBatch {
             last_alpha: 0,
             last_multiply_end: 0,
             last_total: 0,
+            applied_gen: u64::MAX,
             camera,
             cam_bind,
             tex_bind,
@@ -894,7 +903,15 @@ impl WgpuCallback for SpriteBatch {
             queue.write_buffer(&res.instances, 0, bytemuck::cast_slice(&sorted));
         }
         // Apply pending atlas uploads straight into array layers.
+        // Lost early frames on Android just retry next frame instead of losing the atlas.
+        let fresh_atlas = res.applied_gen != self.desc.uploads_gen;
+        if fresh_atlas {
+            res.applied_gen = self.desc.uploads_gen;
+        }
         for up in &self.uploads {
+            if !fresh_atlas {
+                continue;
+            }
             let expected = up.w as usize * up.h as usize * 4;
             if up.page >= self.desc.layers
                 || up.x + up.w > self.desc.layer_size
@@ -1153,6 +1170,7 @@ mod tests {
             layer_size: 2,
             layers: 2,
             filter: TextureFilter::Nearest,
+            ..Default::default()
         });
         batch.upload(AtlasUpload {
             page: 0,
@@ -1229,6 +1247,7 @@ mod tests {
             layer_size: 2,
             layers: 2,
             filter: TextureFilter::Nearest,
+            ..Default::default()
         });
         flipped.set_camera(screen_camera([256.0, 256.0]));
         flipped.push(

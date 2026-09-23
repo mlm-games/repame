@@ -899,7 +899,7 @@ pub fn Viewport2d(
 pub fn Viewport2dGpu(
     input: FrameInput,
     geom_out: GeomHandle,
-    uploads: Vec<AtlasUpload>,
+    uploads: Arc<[AtlasUpload]>,
     desc: BatchDesc,
     on_event: impl Fn(PickEvent) + 'static,
 ) -> View {
@@ -912,7 +912,7 @@ pub fn Viewport2dGpu(
 pub fn Viewport2dGpuWithId(
     input: FrameInput,
     geom_out: GeomHandle,
-    uploads: Vec<AtlasUpload>,
+    uploads: Arc<[AtlasUpload]>,
     desc: BatchDesc,
     batch_id: impl Into<String>,
     on_event: impl Fn(PickEvent) + 'static,
@@ -944,7 +944,7 @@ pub fn Viewport2dGpuWithId(
         input: input.clone(),
         geom: geom_for_payload.arc(),
         batch_id,
-        uploads: Arc::from(uploads.into_boxed_slice()),
+        uploads,
         desc,
         bg: FullscreenPass::new(
             bg_id,
@@ -1191,7 +1191,7 @@ impl WgpuCallback for GpuViewport {
 pub fn Viewport2dGpuWithHud(
     input: FrameInput,
     geom: GeomHandle,
-    uploads: Vec<AtlasUpload>,
+    uploads: Arc<[AtlasUpload]>,
     desc: BatchDesc,
     on_event: impl Fn(PickEvent) + 'static,
 ) -> View {
@@ -1410,11 +1410,12 @@ mod tests {
             input: Arc::new(input.clone()),
             geom,
             batch_id: "test.viewport2d.main".to_string(),
-            uploads: Arc::from(uploads.into_boxed_slice()),
+            uploads: Arc::from(uploads),
             desc: BatchDesc {
                 layer_size: 2,
                 layers: 1,
                 filter: TextureFilter::Nearest,
+                ..Default::default()
             },
             bg: FullscreenPass::new(
                 "test.viewport2d.background",
@@ -1480,12 +1481,12 @@ mod tests {
                     h: 2,
                     rgba: [255, 0, 255, 255].repeat(4),
                 }]
-                .into_boxed_slice(),
             ),
             desc: BatchDesc {
                 layer_size: 2,
                 layers: 1,
                 filter: TextureFilter::Nearest,
+                ..Default::default()
             },
             bg: FullscreenPass::new(
                 "test.viewport2d.background",

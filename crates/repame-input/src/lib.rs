@@ -16,7 +16,7 @@ mod remap;
 mod snapshot;
 mod state;
 
-pub use aim::{AimTracker, StagedClick};
+pub use aim::StagedClick;
 pub use binding::Binding;
 pub use held::reconcile_held;
 pub use keymap::{

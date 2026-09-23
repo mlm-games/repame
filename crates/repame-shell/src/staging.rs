@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use glam::Vec2;
-use repame_input::{AimTracker, GamepadState, MouseState, StagedClick, TouchContact};
+use repame_input::{GamepadState, MouseState, StagedClick, TouchContact};
 use repose_core::input::{Key, KeyEvent, KeyEventType, PhysicalKey, PointerButton};
 use repose_core::runtime::Scheduler;
 
@@ -14,7 +14,6 @@ pub struct Staging {
     pub window_focused: bool,
     pub capture_armed: bool,
     pub clicks: Vec<StagedClick>,
-    pub aim: AimTracker,
     pub mouse_edges: Vec<(PointerButton, bool)>,
     pub lmb_held: bool,
     pub rmb_held: bool,
@@ -237,14 +236,6 @@ impl Staging {
             .collect();
         self.touch_new.clear();
         out
-    }
-
-    pub fn cursor_move(&mut self, phys_px: Vec2) {
-        self.aim.cursor_move(phys_px);
-    }
-
-    pub fn stage_hover(&mut self, world: Vec2, screen: [f32; 2]) {
-        self.aim.stage_hover(world, screen);
     }
 
     pub fn mouse_state(&self, allow_fire: bool) -> MouseState {

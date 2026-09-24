@@ -19,8 +19,12 @@ use repose_core::input::PhysicalKey;
 ///
 /// Levels only: inserts polled-down codes, drops codes whose keys are
 /// all up. Callers stage edges exclusively from events.
-pub fn reconcile_held<C>(staged: &mut HashSet<C>, polled: &HashSet<PhysicalKey>, code_for: impl Fn(PhysicalKey) -> Option<C>, names_for: impl Fn(&C) -> Option<&'static [PhysicalKey]>)
-where
+pub fn reconcile_held<C>(
+    staged: &mut HashSet<C>,
+    polled: &HashSet<PhysicalKey>,
+    code_for: impl Fn(PhysicalKey) -> Option<C>,
+    names_for: impl Fn(&C) -> Option<&'static [PhysicalKey]>,
+) where
     C: Eq + Hash + Clone,
 {
     for key in polled.iter() {
@@ -28,9 +32,8 @@ where
             staged.insert(code);
         }
     }
-    staged.retain(|code| {
-        names_for(code).is_none_or(|keys| keys.iter().any(|k| polled.contains(k)))
-    });
+    staged
+        .retain(|code| names_for(code).is_none_or(|keys| keys.iter().any(|k| polled.contains(k))));
 }
 
 #[cfg(test)]

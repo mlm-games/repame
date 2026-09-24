@@ -1,5 +1,5 @@
-use bevy_ecs::prelude::*;
 use super::keymap::{Keymap, KeymapCapture, KeymapDevice, KeymapEntry};
+use bevy_ecs::prelude::*;
 use repose_core::input::{Key, Modifiers};
 use repose_core::shortcuts::KeyChord;
 

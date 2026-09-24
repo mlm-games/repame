@@ -11,7 +11,11 @@ pub fn game_shortcut_map(
 ) -> shortcuts::ShortcutMap {
     shortcuts::ShortcutMap::new()
         .bind(Key::Escape, Modifiers::default(), action_for(pause))
-        .bind(Key::Character('r'), Modifiers::default(), action_for(restart))
+        .bind(
+            Key::Character('r'),
+            Modifiers::default(),
+            action_for(restart),
+        )
         .bind(Key::Enter, Modifiers::default(), action_for(confirm))
 }
 
@@ -81,7 +85,12 @@ pub fn install_map(map: shortcuts::ShortcutMap) {
 
 /// Install only the action handler into long-lived `edges`
 /// (tests and headless compose without a runner use this path).
-pub fn install_handler_into(edges: &SharedEdges, pause: &'static str, restart: &'static str, confirm: &'static str) {
+pub fn install_handler_into(
+    edges: &SharedEdges,
+    pause: &'static str,
+    restart: &'static str,
+    confirm: &'static str,
+) {
     shortcuts::set(Some(shortcut_handler(edges, pause, restart, confirm)));
 }
 

@@ -57,8 +57,7 @@ impl AimTracker {
         {
             return self.hover_px;
         }
-        if self.cursor_seq > 0
-            && self.input_seq.wrapping_sub(self.cursor_seq) <= Self::STALE_AFTER
+        if self.cursor_seq > 0 && self.input_seq.wrapping_sub(self.cursor_seq) <= Self::STALE_AFTER
         {
             return self.cursor_px;
         }

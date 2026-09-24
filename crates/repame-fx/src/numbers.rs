@@ -48,7 +48,9 @@ pub fn spawn_number_secs(
             age_secs: 0.0,
             life_secs,
             age_ticks: 0,
-            life_ticks: (life_secs / super::driver::SECS_PER_TICK_100HZ).ceil().max(1.0) as i32,
+            life_ticks: (life_secs / super::driver::SECS_PER_TICK_100HZ)
+                .ceil()
+                .max(1.0) as i32,
             rise_pps: 40.0,
             color,
         },))
@@ -92,11 +94,7 @@ pub fn step_numbers(
     numbers: &mut Query<(Entity, &mut DamageNumber)>,
     ticks: i32,
 ) {
-    step_numbers_secs(
-        commands,
-        numbers,
-        super::driver::ticks_to_secs_100hz(ticks),
-    );
+    step_numbers_secs(commands, numbers, super::driver::ticks_to_secs_100hz(ticks));
 }
 
 #[cfg(test)]

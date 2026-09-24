@@ -97,11 +97,7 @@ impl Sim {
         self.step_with(dt, |_| {})
     }
 
-    pub fn step_with(
-        &mut self,
-        dt: Duration,
-        mut after_tick: impl FnMut(&mut World),
-    ) -> u32 {
+    pub fn step_with(&mut self, dt: Duration, mut after_tick: impl FnMut(&mut World)) -> u32 {
         if self.step.is_zero() {
             return 0;
         }

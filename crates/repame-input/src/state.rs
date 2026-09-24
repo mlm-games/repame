@@ -52,7 +52,8 @@ impl<A: ActionLike> ActionState<A> {
             .flat_map(|a| self.map.bindings_for(a).iter().cloned())
             .collect();
         self.down_buttons.retain(|b| live.contains(b));
-        self.pressed.retain(|a| !self.map.bindings_for(a).is_empty());
+        self.pressed
+            .retain(|a| !self.map.bindings_for(a).is_empty());
         self.just_pressed
             .retain(|a| !self.map.bindings_for(a).is_empty());
         self.just_released.clear();
@@ -200,27 +201,30 @@ impl<A: ActionLike> ActionState<A> {
         }
         let mut best = 0.0f32;
         for b in self.map.bindings_for(action) {
-            let s =
-                match b {
-                    Binding::Key(_) | Binding::Physical(_) | Binding::Mouse(_) | Binding::Pad(_) => {
-                        if self.binding_down(b) { 1.0 } else { 0.0 }
+            let s = match b {
+                Binding::Key(_) | Binding::Physical(_) | Binding::Mouse(_) | Binding::Pad(_) => {
+                    if self.binding_down(b) {
+                        1.0
+                    } else {
+                        0.0
                     }
-                    Binding::Axis { axis, threshold } => {
-                        let v = self.axis_value(*axis);
-                        if !Binding::axis_active(*threshold, v) {
+                }
+                Binding::Axis { axis, threshold } => {
+                    let v = self.axis_value(*axis);
+                    if !Binding::axis_active(*threshold, v) {
+                        0.0
+                    } else {
+                        // Radial deadzone remap t..1 to 0..1.
+                        let t = threshold.abs().clamp(0.0, 0.95);
+                        let a = v.abs();
+                        if a <= t {
                             0.0
                         } else {
-                            // Radial deadzone remap t..1 to 0..1.
-                            let t = threshold.abs().clamp(0.0, 0.95);
-                            let a = v.abs();
-                            if a <= t {
-                                0.0
-                            } else {
-                                ((a - t) / (1.0 - t)).clamp(0.0, 1.0).max(1e-6)
-                            }
+                            ((a - t) / (1.0 - t)).clamp(0.0, 1.0).max(1e-6)
                         }
                     }
-                };
+                }
+            };
             best = best.max(s);
         }
         best.clamp(0.0, 1.0)
@@ -418,7 +422,10 @@ mod tests {
         let mut st = ActionState::new(jump_map());
         st.key(&space(), true);
         assert!(st.consume(&"jump"));
-        assert!(!st.take_just_pressed(&"jump"), "suppressed edge reads false");
+        assert!(
+            !st.take_just_pressed(&"jump"),
+            "suppressed edge reads false"
+        );
         st.end_tick();
         assert!(st.pressed(&"jump"), "suppress expires at tick end");
     }

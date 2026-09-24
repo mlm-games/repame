@@ -1,0 +1,13 @@
+[package]
+name = "repame-content"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "headless project, scene, resource, and asset content foundation"
+
+[dependencies]
+bevy_ecs.workspace = true
+ron.workspace = true
+serde.workspace = true

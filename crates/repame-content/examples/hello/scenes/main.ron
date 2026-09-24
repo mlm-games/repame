@@ -1,0 +1,22 @@
+(
+    format: 1,
+    id: "main",
+    entities: [
+        (
+            id: "world",
+            name: "World",
+            components: {
+                "transform": (position: [0.0, 0.0]),
+            },
+            assets: {
+                "notes": "notes",
+            },
+            resources: {
+                "input": "input",
+            },
+        ),
+    ],
+    resources: {
+        "input": "input",
+    },
+)

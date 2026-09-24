@@ -82,7 +82,9 @@ pub fn spawn_particle3(
             uv_min: def.uv_min,
             uv_max: def.uv_max,
             age_ticks: 0,
-            life_ticks: (life_secs / super::driver::SECS_PER_TICK_100HZ).ceil().max(1.0) as i32,
+            life_ticks: (life_secs / super::driver::SECS_PER_TICK_100HZ)
+                .ceil()
+                .max(1.0) as i32,
         },))
         .id()
 }

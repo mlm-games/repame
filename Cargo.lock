@@ -3781,6 +3781,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "repame-content"
+version = "0.2.2"
+dependencies = [
+ "bevy_ecs",
+ "ron",
+ "serde",
+]
+
+[[package]]
 name = "repame-fx"
 version = "0.2.2"
 dependencies = [

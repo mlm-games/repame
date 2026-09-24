@@ -1,0 +1,14 @@
+(
+    format: 1,
+    name: "hello-content",
+    entry_scene: "scenes/main.ron",
+    scenes: [
+        (id: "main", path: "scenes/main.ron"),
+    ],
+    assets: [
+        (id: "notes", kind: "text", path: "assets/notes.txt"),
+    ],
+    resources: [
+        (id: "input", kind: "ron", path: "resources/input.ron"),
+    ],
+)

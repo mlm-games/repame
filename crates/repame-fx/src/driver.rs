@@ -120,9 +120,21 @@ mod tests {
         let mut edges = 0;
         let out = SimDriver::frame(|| fx += 1, true, || sim += 1, || edges += 1);
         assert_eq!((fx, sim, edges), (1, 0, 1));
-        assert_eq!(out, FxTick { ran: 0, blocked: true });
+        assert_eq!(
+            out,
+            FxTick {
+                ran: 0,
+                blocked: true
+            }
+        );
         let out = SimDriver::frame(|| fx += 1, false, || sim += 1, || edges += 1);
         assert_eq!((fx, sim, edges), (2, 1, 1));
-        assert_eq!(out, FxTick { ran: 1, blocked: false });
+        assert_eq!(
+            out,
+            FxTick {
+                ran: 1,
+                blocked: false
+            }
+        );
     }
 }

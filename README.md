@@ -12,6 +12,7 @@ Pattern initially tested using [resims](https://github.com/mlm-games/resims)'s o
 | Crate | Role |
 |---|---|
 | `repame-sim` | Headless sim: `bevy_ecs` `World` + `Schedule` stepping, fixed-timestep accumulator, snapshot-out convention. |
+| `repame-content` | Headless RON project, scene, resource, and asset content foundation with validated references and ECS scene spawning. |
 | `repame-atlas` | CPU shelf atlas packing + upload queue (`UvRect`, drain-once uploads). |
 | `repame-anim` | Frame-strip animation player (loop/once/ping-pong). |
 | `repame-audio` | Audio banks / rigs / music wiring. |

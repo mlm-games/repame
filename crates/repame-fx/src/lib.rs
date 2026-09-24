@@ -44,9 +44,7 @@ pub use decals::{
 };
 pub use effect::{EaseKind, EffectDef, Gradient, Jittered, SpawnerDef};
 pub use flash::Flash;
-pub use numbers::{
-    DamageNumber, spawn_number, spawn_number_secs, step_numbers, step_numbers_secs,
-};
+pub use numbers::{DamageNumber, spawn_number, spawn_number_secs, step_numbers, step_numbers_secs};
 pub use particles::{
     Particle, Spawner, burst, particle_sprites, particle_sprites_with_white, step_particles,
     step_particles_secs, tick_spawners, tick_spawners_secs,

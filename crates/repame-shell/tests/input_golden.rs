@@ -12,8 +12,8 @@ use std::collections::HashSet;
 
 use glam::Vec2;
 use repame_input::{
-    ActionMap, ActionState, Binding, KeymapDevice, KeymapEntry, RemapSession,
-    decode_keymap_entry, encode_keymap_entry,
+    ActionMap, ActionState, Binding, KeymapDevice, KeymapEntry, RemapSession, decode_keymap_entry,
+    encode_keymap_entry,
 };
 use repame_shell::Staging;
 use repose_core::input::{Key, Modifiers, PhysicalKey, PointerButton};
@@ -199,7 +199,10 @@ fn polled_snapshot_backfills_swallowed_second_finger_with_press_edge() {
     staging.feed_polled(&sched);
     let contacts = staging.touch_contacts();
     assert_eq!(contacts.len(), 2, "swallowed finger must appear");
-    let second = contacts.iter().find(|c| c.id == 2).expect("finger 2 backfilled");
+    let second = contacts
+        .iter()
+        .find(|c| c.id == 2)
+        .expect("finger 2 backfilled");
     assert!(
         second.just_pressed,
         "backfilled finger must latch just_pressed or stick claims never see it"
@@ -227,7 +230,10 @@ fn focus_loss_cancels_all_pending_input() {
     assert!(staging.held.is_empty());
     assert!(staging.take_edges().is_empty());
     assert!(!staging.lmb_held && !staging.rmb_held);
-    assert!(staging.clicks.is_empty(), "staged clicks must not survive alt-tab");
+    assert!(
+        staging.clicks.is_empty(),
+        "staged clicks must not survive alt-tab"
+    );
     assert!(
         staging.mouse_edges.is_empty(),
         "mouse edges must not survive alt-tab"
@@ -270,7 +276,10 @@ fn consume_expires_at_tick_end() {
     assert!(state.consume(&"jump"));
     assert!(!state.pressed(&"jump"));
     state.end_tick();
-    assert!(state.pressed(&"jump"), "consume must not leak past tick end");
+    assert!(
+        state.pressed(&"jump"),
+        "consume must not leak past tick end"
+    );
 }
 
 #[test]

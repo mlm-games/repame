@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -109,11 +108,7 @@ impl<A: Clone + Eq + Hash> Keymap<A> {
 
     /// Resolve a capture with the next pressed input. `None` clears
     /// mouse button, or pad button/axis overwrites that side
-    pub fn resolve_capture(
-        &mut self,
-        capture: &KeymapCapture<A>,
-        pressed: Option<KeymapEntry>,
-    ) {
+    pub fn resolve_capture(&mut self, capture: &KeymapCapture<A>, pressed: Option<KeymapEntry>) {
         let entry = pressed.unwrap_or(KeymapEntry::None);
         match capture.device {
             KeymapDevice::KeyboardMouse => {
@@ -141,11 +136,7 @@ impl<A: Clone + Eq + Hash> Keymap<A> {
         out
     }
 
-    pub fn to_action_map_contexts(
-        &self,
-        gameplay: &[A],
-        menu: &[A],
-    ) -> super::map::ActionMap<A> {
+    pub fn to_action_map_contexts(&self, gameplay: &[A], menu: &[A]) -> super::map::ActionMap<A> {
         let mut out = self.to_action_map();
         for action in gameplay {
             out.in_context("gameplay", action.clone());
@@ -499,10 +490,7 @@ mod tests {
         let capture = map.begin_capture("fire", KeymapDevice::KeyboardMouse);
         map.resolve_capture(&capture, Some(chord('f')));
         assert_eq!(map.keyboard(&"fire"), chord('f'));
-        assert_eq!(
-            map.gamepad(&"fire"),
-            KeymapEntry::Pad(GamepadButton::South)
-        );
+        assert_eq!(map.gamepad(&"fire"), KeymapEntry::Pad(GamepadButton::South));
         let capture = map.begin_capture("fire", KeymapDevice::Gamepad);
         map.resolve_capture(&capture, None);
         assert_eq!(map.gamepad(&"fire"), KeymapEntry::None);

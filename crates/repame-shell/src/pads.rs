@@ -134,7 +134,11 @@ impl PadBank {
                 GamepadEvent::Disconnected { id } => {
                     self.pads.remove(&id);
                 }
-                GamepadEvent::Button { id, button, pressed } => {
+                GamepadEvent::Button {
+                    id,
+                    button,
+                    pressed,
+                } => {
                     self.pads.entry(id).or_default().button(button, pressed);
                 }
                 GamepadEvent::Axis { id, axis, value } => {

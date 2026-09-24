@@ -280,19 +280,11 @@ pub enum PickEvent {
     },
     /// Touch/pen contact began: pointer id + window-physical px.
     /// Mouse does not emit these; taps still emit `Click` too.
-    TouchDown {
-        id: u64,
-        screen: [f32; 2],
-    },
+    TouchDown { id: u64, screen: [f32; 2] },
     /// Touch/pen contact moved (same coordinate space as `TouchDown`).
-    TouchMove {
-        id: u64,
-        screen: [f32; 2],
-    },
+    TouchMove { id: u64, screen: [f32; 2] },
     /// Touch/pen contact ended (up / leave).
-    TouchUp {
-        id: u64,
-    },
+    TouchUp { id: u64 },
 }
 
 /// Touch/pen pointers drive game touch zones;
@@ -1474,16 +1466,14 @@ mod tests {
                 pivot: [64.0, 64.0],
             })),
             batch_id: "test.viewport2d.overlay".to_string(),
-            uploads: Arc::from(
-                vec![AtlasUpload {
-                    page: 0,
-                    x: 0,
-                    y: 0,
-                    w: 2,
-                    h: 2,
-                    rgba: [255, 0, 255, 255].repeat(4),
-                }]
-            ),
+            uploads: Arc::from(vec![AtlasUpload {
+                page: 0,
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 2,
+                rgba: [255, 0, 255, 255].repeat(4),
+            }]),
             desc: BatchDesc {
                 layer_size: 2,
                 layers: 1,
@@ -1818,8 +1808,7 @@ mod tests {
         use std::cell::RefCell;
         use std::collections::HashMap;
         use std::rc::Rc;
-        let presses: Rc<RefCell<HashMap<u64, [f32; 2]>>> =
-            Rc::new(RefCell::new(HashMap::new()));
+        let presses: Rc<RefCell<HashMap<u64, [f32; 2]>>> = Rc::new(RefCell::new(HashMap::new()));
         let down = presses.clone();
         let up = presses.clone();
         let leave = presses.clone();
@@ -2031,8 +2020,12 @@ pub fn cursor_frame(
         rgba: px,
         size: [w16, h16],
         hotspot: [
-            (origin.0 * mag as f32).round().clamp(0.0, w16.saturating_sub(1) as f32) as u16,
-            (origin.1 * mag as f32).round().clamp(0.0, h16.saturating_sub(1) as f32) as u16,
+            (origin.0 * mag as f32)
+                .round()
+                .clamp(0.0, w16.saturating_sub(1) as f32) as u16,
+            (origin.1 * mag as f32)
+                .round()
+                .clamp(0.0, h16.saturating_sub(1) as f32) as u16,
         ],
         key,
     })

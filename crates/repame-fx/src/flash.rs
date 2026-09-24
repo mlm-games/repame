@@ -22,7 +22,9 @@ impl Flash {
         let duration = if !duration_secs.is_finite() || duration_secs <= 0.0 {
             1
         } else {
-            (duration_secs / super::driver::SECS_PER_TICK_100HZ).ceil().max(1.0) as i32
+            (duration_secs / super::driver::SECS_PER_TICK_100HZ)
+                .ceil()
+                .max(1.0) as i32
         };
         self.color = color;
         self.remaining_ticks = duration;

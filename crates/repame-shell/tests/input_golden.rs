@@ -248,6 +248,19 @@ fn focus_loss_cancels_all_pending_input() {
 }
 
 #[test]
+fn staged_hover_is_baked_aim_and_clears_on_focus_loss() {
+    let mut staging = Staging::default();
+    staging.stage_hover(Vec2::new(12.0, 34.0), [56.0, 78.0]);
+    assert_eq!(staging.aim.baked(), Some(Vec2::new(12.0, 34.0)));
+    assert_eq!(staging.aim.live_px(), Some(Vec2::new(56.0, 78.0)));
+
+    staging.set_window_focused(false);
+
+    assert_eq!(staging.aim.baked(), None);
+    assert_eq!(staging.aim.live_px(), None);
+}
+
+#[test]
 fn consume_expires_at_tick_end() {
     let mut map = ActionMap::new();
     let space = KeyChord::new(Key::Space, Modifiers::default());

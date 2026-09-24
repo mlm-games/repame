@@ -92,6 +92,14 @@ impl Sim {
     /// let steps = sim.step(frame_dt);
     /// ```
     pub fn step(&mut self, dt: Duration) -> u32 {
+        self.step_with(dt, |_| {})
+    }
+
+    pub fn step_with(
+        &mut self,
+        dt: Duration,
+        mut after_tick: impl FnMut(&mut World),
+    ) -> u32 {
         if self.step.is_zero() {
             return 0;
         }
@@ -99,7 +107,7 @@ impl Sim {
         let mut ran = 0;
         while self.accumulator >= self.step && ran < self.max_steps.max(1) {
             self.accumulator -= self.step;
-            self.tick();
+            self.tick_with(&mut after_tick);
             ran += 1;
         }
         if self.accumulator >= self.step {
@@ -136,12 +144,17 @@ impl Sim {
     /// Run the schedule once, advancing sim time by one step.
     /// Tick-model games drive this directly instead of `step`.
     pub fn tick(&mut self) {
+        self.tick_with(|_| {});
+    }
+
+    fn tick_with(&mut self, after_tick: impl FnOnce(&mut World)) {
         {
             let mut time = self.world.resource_mut::<SimTime>();
             time.delta_secs = self.step.as_secs_f32();
             time.elapsed_secs += self.step.as_secs_f64();
         }
         self.schedule.run(&mut self.world);
+        after_tick(&mut self.world);
     }
 }
 
@@ -156,6 +169,27 @@ mod tests {
         assert_eq!(ran, 3);
         let time = sim.world.resource::<SimTime>();
         assert!((time.elapsed_secs - 3.0 / 60.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn post_tick_runs_after_each_fixed_step() {
+        use std::sync::{Arc, Mutex};
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sim_log = log.clone();
+        let mut sim = Sim::with_default_step();
+        sim.add_system(move || sim_log.lock().unwrap().push("sim"));
+        let post_log = log.clone();
+
+        let ran = sim.step_with(Duration::from_millis(50), move |_| {
+            post_log.lock().unwrap().push("post");
+        });
+
+        assert_eq!(ran, 3);
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["sim", "post", "sim", "post", "sim", "post"]
+        );
     }
 
     #[test]

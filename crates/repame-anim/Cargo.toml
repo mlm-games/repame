@@ -10,5 +10,6 @@ description = "animation catalogs, atlas packing, and frame players"
 [dependencies]
 bevy_ecs.workspace = true
 repame-atlas.workspace = true
+ron.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -198,6 +198,95 @@ impl SceneDocument {
         ron::ser::to_string_pretty(self, Default::default())
             .map_err(|error| ron_error(Path::new("<scene>"), error))
     }
+
+    pub fn content_hash(&self) -> Result<u64, ContentError> {
+        Ok(crate::project::content_hash(self.to_ron()?.as_bytes()))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TypeRegistry {
+    components: BTreeSet<String>,
+    resource_kinds: BTreeSet<String>,
+    strict: bool,
+}
+
+impl TypeRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    pub fn register_component(&mut self, name: impl Into<String>) -> Result<(), String> {
+        let name = name.into();
+        if name.trim().is_empty() || name.trim() != name {
+            return Err(format!("invalid component type `{name}`"));
+        }
+        self.components.insert(name);
+        Ok(())
+    }
+
+    pub fn register_resource_kind(&mut self, kind: impl Into<String>) -> Result<(), String> {
+        let kind = kind.into();
+        if kind.trim().is_empty() || kind.trim() != kind {
+            return Err(format!("invalid resource kind `{kind}`"));
+        }
+        self.resource_kinds.insert(kind);
+        Ok(())
+    }
+
+    pub fn validate_scene(
+        &self,
+        scene: &SceneDocument,
+        assets: &BTreeMap<String, AssetEntry>,
+        resources: &BTreeMap<String, ResourceEntry>,
+        path: &Path,
+    ) -> Result<(), ContentError> {
+        scene.validate(assets, resources, path)?;
+        if !self.strict {
+            return Ok(());
+        }
+        for entity in &scene.entities {
+            for component in entity.components.keys() {
+                if !self.components.contains(component) {
+                    return Err(ContentError::new(
+                        path,
+                        format!(
+                            "entity `{}` uses unregistered component `{component}`",
+                            entity.id
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_resource_kinds(
+        &self,
+        resources: &BTreeMap<String, ResourceEntry>,
+        path: &Path,
+    ) -> Result<(), ContentError> {
+        if !self.strict {
+            return Ok(());
+        }
+        for resource in resources.values() {
+            if !self.resource_kinds.contains(&resource.kind) {
+                return Err(ContentError::new(
+                    path,
+                    format!(
+                        "resource `{}` uses unregistered kind `{}`",
+                        resource.id, resource.kind
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]

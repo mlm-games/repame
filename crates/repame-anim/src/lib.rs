@@ -4,13 +4,13 @@
 use std::collections::HashMap;
 
 use repame_atlas::{AllocError, AtlasId, atlas_id};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Atlas types surfaced here so catalog users skip the atlas dep.
 pub use repame_atlas::{Atlas, AtlasDesc, UvRect};
 
 /// One strip def: `frames` cells laid out horizontally.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnimDef {
     /// Frame count in the strip.
     pub frames: u32,
@@ -48,6 +48,8 @@ impl AnimDef {
 pub enum CatalogError {
     /// Malformed JSON.
     Json(serde_json::Error),
+    /// Malformed RON.
+    Ron(ron::error::SpannedError),
     /// Atlas exhausted mid-pack. `placed` frames landed first.
     AtlasFull { placed: usize },
     /// A single cell is larger than one page.
@@ -64,6 +66,7 @@ impl std::fmt::Display for CatalogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Json(e) => write!(f, "anim catalog json: {e}"),
+            Self::Ron(e) => write!(f, "anim catalog ron: {e}"),
             Self::AtlasFull { placed } => {
                 write!(f, "atlas full after {placed} frames")
             }
@@ -114,6 +117,15 @@ impl AnimCatalog {
     pub fn from_json(json: &str, desc: AtlasDesc) -> Result<Self, CatalogError> {
         let raw: HashMap<String, AnimDef> =
             serde_json::from_str(json).map_err(CatalogError::Json)?;
+        Self::from_defs(raw, desc)
+    }
+
+    pub fn from_ron(text: &str, desc: AtlasDesc) -> Result<Self, CatalogError> {
+        let raw: HashMap<String, AnimDef> = ron::from_str(text).map_err(CatalogError::Ron)?;
+        Self::from_defs(raw, desc)
+    }
+
+    fn from_defs(raw: HashMap<String, AnimDef>, desc: AtlasDesc) -> Result<Self, CatalogError> {
         let mut defs = HashMap::with_capacity(raw.len());
         let mut stems: HashMap<String, String> = HashMap::with_capacity(raw.len());
         for (name, def) in raw {

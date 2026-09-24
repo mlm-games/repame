@@ -15,7 +15,6 @@ mod levels;
 mod pads;
 mod shortcuts;
 mod staging;
-mod store;
 pub use audio::drain_cues;
 pub use levels::apply_scheduler_levels;
 pub use pads::{PadBank, PadBridge, TRIGGER_HELD};
@@ -24,7 +23,6 @@ pub use shortcuts::{
     install_map, shared_edges, shortcut_handler, take as take_shortcut_edges,
 };
 pub use staging::Staging;
-pub use store::{load_json, save_file_path, store_json};
 
 /// Per-frame hooks the game implements.
 pub trait ShellHooks {

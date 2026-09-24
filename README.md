@@ -12,12 +12,12 @@ Pattern initially tested using [resims](https://github.com/mlm-games/resims)'s o
 | Crate | Role |
 |---|---|
 | `repame-sim` | Headless sim: `bevy_ecs` `World` + `Schedule` stepping, fixed-timestep accumulator, snapshot-out convention. |
-| `repame-content` | Headless RON project, scene, resource, and asset content foundation with validated references and ECS scene spawning. |
+| `repame-content` | Headless RON project, scene, resource, and asset content foundation with typed imports, cached artifacts, validated references, and ECS scene spawning. |
 | `repame-atlas` | CPU shelf atlas packing + upload queue (`UvRect`, drain-once uploads). |
 | `repame-anim` | Frame-strip animation player (loop/once/ping-pong). |
 | `repame-audio` | Audio banks / rigs / music wiring. |
 | `repame-sprite` | 2D viewport: instanced sprite batch (texture atlas + per-instance transform/uv/color), `Camera2d`, CPU picking, fullscreen postfx hook. Atm mainly aiming to cover my 2D games (rozvp, Opensus, Floppy-Warriors's rust version) and 2D remakes (nt-recreated-bevy) and stabilise later once core bugs are fixed. |
-| `repame-shell` | App wiring: Repose platform runners + sim stepping + viewport mount, gamepad to input mapping (done internally in repose), save-path helpers, etc. |
+| `repame-shell` | App wiring: Repose platform runners + sim stepping + viewport mount, gamepad to input mapping (done internally in repose). |
 | `repame-actors` | Live vector actors (`.ren` rigs via `renamite-player`). |
 | `repame-fx` | Sim-side particles (2D sprites + 3D billboards), ground decals + blob shadows, trauma shake, flash, floaters, transitions. |
 | `repame-input` | Leafwing-shaped action map / `ActionState` edges-at-tick-end. |

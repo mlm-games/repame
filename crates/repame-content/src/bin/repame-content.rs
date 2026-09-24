@@ -29,6 +29,25 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        (Some("import"), Some(root)) => match Project::load(root).and_then(|project| {
+            let imported = project.import_assets()?;
+            Ok((project, imported))
+        }) {
+            Ok((project, imported)) => {
+                let reused = imported.iter().filter(|asset| asset.reused).count();
+                println!(
+                    "{}: imported {} assets ({} reused)",
+                    project.manifest().name,
+                    imported.len(),
+                    reused
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        },
         (Some("load"), Some(root)) => match Project::load(root) {
             Ok(project) => {
                 let mut world = World::new();
@@ -58,6 +77,6 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: repame-content <validate|load> <project-directory>");
+    eprintln!("usage: repame-content <validate|import|load> <project-directory>");
     ExitCode::from(2)
 }

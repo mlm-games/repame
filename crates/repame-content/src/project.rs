@@ -8,9 +8,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::{ContentError, io_error, ron_error};
+use crate::import::{ImportCache, ImportedAsset};
 use crate::model::{
     AssetEntry, ProjectManifest, ResourceEntry, SceneDocument, SceneEntry, SceneInstance,
-    validate_id,
+    TypeRegistry, validate_id,
 };
 use crate::{PROJECT_FILE, PROJECT_FORMAT};
 
@@ -30,6 +31,7 @@ pub struct AssetSource {
     pub path: PathBuf,
     pub size: u64,
     pub fingerprint: u64,
+    pub dependencies: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,11 +276,19 @@ impl Project {
         self.load_scene_path(&self.entry_scene_path)
     }
 
+    pub fn entry_scene_hash(&self) -> Result<u64, ContentError> {
+        self.entry_scene()?.content_hash()
+    }
+
     pub fn scene_by_id(&self, id: &str) -> Result<SceneDocument, ContentError> {
         let path = self.scene_paths.get(id).ok_or_else(|| {
             ContentError::new(self.project_path(), format!("unknown scene id `{id}`"))
         })?;
         self.load_scene_path(path)
+    }
+
+    pub fn scene_hash(&self, id: &str) -> Result<u64, ContentError> {
+        self.scene_by_id(id)?.content_hash()
     }
 
     pub fn scene_by_path(&self, path: &str) -> Result<SceneDocument, ContentError> {
@@ -331,6 +341,7 @@ impl Project {
                     fingerprint: file_fingerprint(&path)?,
                     path,
                     size,
+                    dependencies: entry.dependencies.clone(),
                 })
             })
             .collect()
@@ -379,12 +390,53 @@ impl Project {
         ))
     }
 
+    pub fn import_cache(&self) -> Result<ImportCache, ContentError> {
+        ImportCache::new(self.root.join(".repame").join("imports"))
+    }
+
+    pub fn import_assets(&self) -> Result<Vec<ImportedAsset>, ContentError> {
+        let sources = self.asset_sources()?;
+        let by_id: BTreeMap<String, AssetSource> = sources
+            .into_iter()
+            .map(|source| (source.id.clone(), source))
+            .collect();
+        let cache = self.import_cache()?;
+        let mut imported = Vec::with_capacity(by_id.len());
+        for id in self.asset_import_order() {
+            let source = &by_id[&id];
+            let dependencies = source
+                .dependencies
+                .iter()
+                .filter_map(|dependency| {
+                    by_id
+                        .get(dependency)
+                        .map(|entry| (dependency.clone(), entry.fingerprint))
+                })
+                .collect();
+            imported.push(cache.import(source, &dependencies)?);
+        }
+        Ok(imported)
+    }
+
     pub fn validate(&self) -> Result<(), ContentError> {
         let mut scene_paths = BTreeSet::new();
         scene_paths.insert(self.entry_scene_path.clone());
         scene_paths.extend(self.scene_paths.values().cloned());
         for path in scene_paths {
             self.load_scene_path(&path)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_with_types(&self, types: &TypeRegistry) -> Result<(), ContentError> {
+        self.validate()?;
+        types.validate_resource_kinds(&self.resources, &self.project_path())?;
+        let mut scene_paths = BTreeSet::new();
+        scene_paths.insert(self.entry_scene_path.clone());
+        scene_paths.extend(self.scene_paths.values().cloned());
+        for path in scene_paths {
+            let scene = self.load_scene_path(&path)?;
+            types.validate_scene(&scene, &self.assets, &self.resources, &path)?;
         }
         Ok(())
     }

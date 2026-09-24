@@ -32,6 +32,7 @@ pub struct Sim {
     ///
     /// Each tick adds this to `SimTime`. Set before first `step`.
     pub step: Duration,
+    pub time_scale: f32,
     /// Max ticks per `step` call. Default `8`.
     ///
     /// Caps catch-up after hitches. Excess wall time is dropped.
@@ -57,6 +58,7 @@ impl Sim {
             schedule: Schedule::default(),
             accumulator: Duration::ZERO,
             step,
+            time_scale: 1.0,
             max_steps: 8,
         }
     }
@@ -148,10 +150,15 @@ impl Sim {
     }
 
     fn tick_with(&mut self, after_tick: impl FnOnce(&mut World)) {
+        let time_scale = if self.time_scale.is_finite() && self.time_scale > 0.0 {
+            self.time_scale
+        } else {
+            1.0
+        };
         {
             let mut time = self.world.resource_mut::<SimTime>();
-            time.delta_secs = self.step.as_secs_f32();
-            time.elapsed_secs += self.step.as_secs_f64();
+            time.delta_secs = self.step.as_secs_f32() * time_scale;
+            time.elapsed_secs += self.step.as_secs_f64() * time_scale as f64;
         }
         self.schedule.run(&mut self.world);
         after_tick(&mut self.world);
@@ -181,7 +188,7 @@ mod tests {
         sim.add_system(move || sim_log.lock().unwrap().push("sim"));
         let post_log = log.clone();
 
-        let ran = sim.step_with(Duration::from_millis(50), move |_| {
+        let ran = sim.step_with(Duration::from_millis(51), move |_| {
             post_log.lock().unwrap().push("post");
         });
 
@@ -221,6 +228,17 @@ mod tests {
         assert!((sim.alpha() - 0.5).abs() < 1e-6, "got {}", sim.alpha());
         sim.step(Duration::from_millis(8));
         assert!(sim.alpha() < 1e-6, "step boundary, got {}", sim.alpha());
+    }
+
+    #[test]
+    fn time_scale_changes_simulated_delta_without_changing_wall_accumulation() {
+        let mut sim = Sim::with_default_step();
+        sim.time_scale = 0.25;
+        let ran = sim.step(Duration::from_nanos(16_666_667));
+        let time = sim.world.resource::<SimTime>();
+        assert_eq!(ran, 1);
+        assert!((time.delta_secs - 1.0 / 240.0).abs() < 1e-6);
+        assert!((time.elapsed_secs - 1.0 / 240.0).abs() < 1e-9);
     }
 
     #[test]

@@ -711,7 +711,15 @@ pub fn Viewport2d(
     geom_out: GeomHandle,
     on_event: impl Fn(PickEvent) + 'static,
 ) -> View {
-    let input = Rc::new(input);
+    Viewport2dShared(Arc::new(input), geom_out, on_event)
+}
+
+#[allow(non_snake_case)]
+pub fn Viewport2dShared(
+    input: Arc<FrameInput>,
+    geom_out: GeomHandle,
+    on_event: impl Fn(PickEvent) + 'static,
+) -> View {
     let world_size = input.world_size;
     let pick_geom = geom_out.clone();
     let move_geom = geom_out.clone();
@@ -907,7 +915,14 @@ pub fn Viewport2dGpu(
     desc: BatchDesc,
     on_event: impl Fn(PickEvent) + 'static,
 ) -> View {
-    Viewport2dGpuWithId(input, geom_out, uploads, desc, "viewport2d.main", on_event)
+    Viewport2dGpuWithIdShared(
+        Arc::new(input),
+        geom_out,
+        uploads,
+        desc,
+        "viewport2d.main",
+        on_event,
+    )
 }
 
 /// GPU viewport with explicit batch id so a second viewport or minimap
@@ -921,10 +936,33 @@ pub fn Viewport2dGpuWithId(
     batch_id: impl Into<String>,
     on_event: impl Fn(PickEvent) + 'static,
 ) -> View {
+    Viewport2dGpuWithIdShared(Arc::new(input), geom_out, uploads, desc, batch_id, on_event)
+}
+
+#[allow(non_snake_case)]
+pub fn Viewport2dGpuWithIdShared(
+    input: Arc<FrameInput>,
+    geom_out: GeomHandle,
+    uploads: Arc<[AtlasUpload]>,
+    desc: BatchDesc,
+    batch_id: impl Into<String>,
+    on_event: impl Fn(PickEvent) + 'static,
+) -> View {
+    viewport2d_gpu_with_id_shared(input, geom_out, uploads, desc, batch_id, on_event, false)
+}
+
+fn viewport2d_gpu_with_id_shared(
+    input: Arc<FrameInput>,
+    geom_out: GeomHandle,
+    uploads: Arc<[AtlasUpload]>,
+    desc: BatchDesc,
+    batch_id: impl Into<String>,
+    on_event: impl Fn(PickEvent) + 'static,
+    overlay_separate: bool,
+) -> View {
     let batch_id: String = batch_id.into();
     let bg_id = format!("{batch_id}.background");
     let overlay_id = format!("{batch_id}.overlay");
-    let input = Arc::new(input);
     let world_size = input.world_size;
     let pick_geom = geom_out.clone();
     let move_geom = geom_out.clone();
@@ -950,6 +988,7 @@ pub fn Viewport2dGpuWithId(
         batch_id,
         uploads,
         desc,
+        overlay_separate,
         bg: FullscreenPass::new(
             bg_id,
             fullscreen::SOLID_WGSL,
@@ -1060,13 +1099,14 @@ struct GpuViewport {
     batch_id: String,
     uploads: Arc<[AtlasUpload]>,
     desc: BatchDesc,
+    overlay_separate: bool,
     bg: FullscreenPass,
     overlay: FullscreenPass,
 }
 
 impl WgpuCallback for GpuViewport {
     fn resource_key(&self) -> Option<&str> {
-        Some(&self.batch_id)
+        Some("repame.viewport2d.resources")
     }
 
     fn prepare(
@@ -1122,7 +1162,9 @@ impl WgpuCallback for GpuViewport {
                 &[] as &[FullscreenTexture],
             );
         }
-        if let Some(ov) = self.input.overlay_color {
+        if !self.overlay_separate
+            && let Some(ov) = self.input.overlay_color
+        {
             let words = [ov[0], ov[1], ov[2], ov[3]];
             self.overlay.prepare_with(
                 device,
@@ -1192,7 +1234,7 @@ impl WgpuCallback for GpuViewport {
             }
             batch::draw_batch_with_id_callback(self.batch_id.as_str(), rpass, resources);
         }
-        if self.input.overlay_color.is_some() {
+        if !self.overlay_separate && self.input.overlay_color.is_some() {
             self.overlay.paint(info, rpass, resources);
         }
     }
@@ -1209,18 +1251,26 @@ pub fn Viewport2dGpuWithHud(
     desc: BatchDesc,
     on_event: impl Fn(PickEvent) + 'static,
 ) -> View {
+    Viewport2dGpuWithHudShared(Arc::new(input), geom, uploads, desc, on_event)
+}
+
+#[allow(non_snake_case)]
+pub fn Viewport2dGpuWithHudShared(
+    input: Arc<FrameInput>,
+    geom: GeomHandle,
+    uploads: Arc<[AtlasUpload]>,
+    desc: BatchDesc,
+    on_event: impl Fn(PickEvent) + 'static,
+) -> View {
     use repose_ui::ViewExt as _;
-    let texts = input.texts.clone();
-    let overlay = input.overlay_color;
-    let cam = input.cam;
-    let world_size = input.world_size;
-    let hud_input = std::rc::Rc::new((cam, world_size, texts, overlay));
+    let hud_input = input.clone();
     let hud_geom = geom.clone();
     let hud = Canvas(
         Modifier::new().fill_max_size().hit_passthrough(),
         move |scope: &mut DrawScope| {
-            let (cam, world_size, texts, overlay) =
-                (hud_input.0, hud_input.1, &hud_input.2, hud_input.3);
+            let input = hud_input.as_ref();
+            let cam = input.cam;
+            let world_size = input.world_size;
             let d = effective_density_scale();
             let cam_center = cam.effective_center();
             let fit = effective_fit(
@@ -1249,7 +1299,7 @@ pub fn Viewport2dGpuWithHud(
                 );
                 [dx * d, dy * d]
             };
-            for t in texts.iter() {
+            for t in input.texts.iter() {
                 let [tx, ty] = project(t.pos.x, t.pos.y);
                 scope.draw_text(
                     t.text.clone(),
@@ -1258,7 +1308,7 @@ pub fn Viewport2dGpuWithHud(
                     Px(t.size * fit.0 * d),
                 );
             }
-            if let Some(tint) = overlay {
+            if let Some(tint) = input.overlay_color {
                 scope.draw_rect(
                     Rect {
                         x: 0.0,
@@ -1273,7 +1323,15 @@ pub fn Viewport2dGpuWithHud(
         },
     );
     repose_ui::ZStack(Modifier::new().fill_max_size())
-        .child(Viewport2dGpu(input, geom, uploads, desc, on_event))
+        .child(viewport2d_gpu_with_id_shared(
+            input,
+            geom,
+            uploads,
+            desc,
+            "viewport2d.main",
+            on_event,
+            true,
+        ))
         .child(hud)
 }
 /// World-anchored surface: `child` is boxed to a `size` rect centered
@@ -1431,6 +1489,7 @@ mod tests {
                 filter: TextureFilter::Nearest,
                 ..Default::default()
             },
+            overlay_separate: false,
             bg: FullscreenPass::new(
                 "test.viewport2d.background",
                 fullscreen::SOLID_WGSL,
@@ -1500,6 +1559,7 @@ mod tests {
                 filter: TextureFilter::Nearest,
                 ..Default::default()
             },
+            overlay_separate: false,
             bg: FullscreenPass::new(
                 "test.viewport2d.background",
                 fullscreen::SOLID_WGSL,

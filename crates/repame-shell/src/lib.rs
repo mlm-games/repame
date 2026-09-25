@@ -7,6 +7,7 @@ use web_time::Duration;
 use anyhow::Result;
 pub use repame_sim::{Sim, SimTime};
 pub use repame_sprite::{Camera2d, FrameInput, PickEvent, SpriteInstance};
+use repose_core::View;
 pub use repose_core::input::{GamepadEvent, GamepadId};
 use repose_platform::gamepad::{GamepadBackend, create_backend};
 
@@ -32,6 +33,43 @@ pub trait ShellHooks {
     fn on_frame(&mut self, _sim: &mut Sim, _dt: Duration) {}
 }
 
+pub struct RetainedRoot {
+    key: String,
+    generation: u64,
+}
+
+impl RetainedRoot {
+    pub fn new() -> Self {
+        Self {
+            key: format!(
+                "repame.retained_root.{}",
+                repose_core::unique_component_id()
+            ),
+            generation: 0,
+        }
+    }
+
+    pub fn call<F>(&mut self, sched: &mut repose_core::runtime::Scheduler, build: F) -> View
+    where
+        F: FnOnce(&mut repose_core::runtime::Scheduler) -> View,
+    {
+        let key = &self.key;
+        let epoch = repose_core::timer::frame_count();
+        let generation = self.generation;
+        repose_core::scope!(key, sched, [epoch, generation], { build(sched) })
+    }
+
+    pub fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
+impl Default for RetainedRoot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Desktop entry point. Mounts `root` with title and size.
 /// The root closure owns stepping and requests frames for continuity.
 /// The closure receives the live [`Scheduler`] each frame, whose
@@ -42,7 +80,7 @@ pub trait ShellHooks {
 pub fn run_desktop(
     title: &str,
     size: (u32, u32),
-    root: impl FnMut(
+    mut root: impl FnMut(
         &mut repose_core::runtime::Scheduler,
         &repose_core::RenderContext,
     ) -> repose_core::View
@@ -53,14 +91,18 @@ pub fn run_desktop(
         window_size: size,
         ..Default::default()
     };
-    repose_platform::run_desktop_app_with_config(root, config)?;
+    let mut retained = RetainedRoot::new();
+    repose_platform::run_desktop_app_with_config(
+        move |sched, ctx| retained.call(sched, |sched| root(sched, ctx)),
+        config,
+    )?;
     Ok(())
 }
 
 /// Web entry point. Mounts `root` with default options.
 #[cfg(target_arch = "wasm32")]
 pub fn run_web(
-    root: impl FnMut(
+    mut root: impl FnMut(
         &mut repose_core::runtime::Scheduler,
         &repose_core::RenderContext,
     ) -> repose_core::View
@@ -68,22 +110,27 @@ pub fn run_web(
 ) -> Result<(), wasm_bindgen::JsValue> {
     let mut options = repose_platform::web::WebOptions::new(None);
     options.set_prevent_default(true);
-    repose_platform::web::run_web_app(root, options)
+    let mut retained = RetainedRoot::new();
+    repose_platform::web::run_web_app(
+        move |sched, ctx| retained.call(sched, |sched| root(sched, ctx)),
+        options,
+    )
 }
 
 /// Android entry point. Mounts `root` with default options.
 #[cfg(target_os = "android")]
 pub fn run_android(
     app: winit::platform::android::activity::AndroidApp,
-    root: impl FnMut(
+    mut root: impl FnMut(
         &mut repose_core::runtime::Scheduler,
         &repose_core::RenderContext,
     ) -> repose_core::View
     + 'static,
 ) -> Result<()> {
+    let mut retained = RetainedRoot::new();
     repose_platform::android::run_android_app_with_options(
         app,
-        root,
+        move |sched, ctx| retained.call(sched, |sched| root(sched, ctx)),
         repose_app::AndroidOptions::default(),
     )
 }

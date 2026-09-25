@@ -60,6 +60,9 @@ pub trait FullscreenTextureUpload {
     fn width(&self) -> u32;
     fn height(&self) -> u32;
     fn rgba(&self) -> &[u8];
+    fn generation(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl FullscreenTextureUpload for FullscreenTexture {
@@ -149,7 +152,7 @@ struct PassInstance {
     uniform_cap: u64,
     uniform_layout: wgpu::BindGroupLayout,
     uniform_bind: wgpu::BindGroup,
-    slots: Vec<Option<(wgpu::Texture, u32, u32)>>,
+    slots: Vec<Option<(wgpu::Texture, u32, u32, Option<u64>)>>,
     tex_bind: Option<wgpu::BindGroup>,
     tex_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -379,11 +382,21 @@ impl FullscreenPass {
                 );
                 continue;
             }
-            let fresh = match &inst.slots[slot] {
-                Some((_, w, h)) => *w != width || *h != height,
+            let generation = up.generation();
+            let size_changed = match &inst.slots[slot] {
+                Some((_, w, h, _)) => *w != width || *h != height,
                 None => true,
             };
-            if fresh {
+            let fresh = match &inst.slots[slot] {
+                Some((_, _, _, applied_generation)) => {
+                    size_changed || *applied_generation != generation
+                }
+                None => true,
+            };
+            if !fresh && generation.is_some() {
+                continue;
+            }
+            if size_changed {
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("fullscreen_art"),
                     size: wgpu::Extent3d {
@@ -398,10 +411,10 @@ impl FullscreenPass {
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 });
-                inst.slots[slot] = Some((texture, width, height));
+                inst.slots[slot] = Some((texture, width, height, generation));
                 relayout = true;
             }
-            let (texture, _, _) = inst.slots[slot].as_ref().expect("just stored");
+            let (texture, _, _, _) = inst.slots[slot].as_ref().expect("stored above");
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture,
@@ -421,6 +434,10 @@ impl FullscreenPass {
                     depth_or_array_layers: 1,
                 },
             );
+            if !size_changed && let Some((_, _, _, applied_generation)) = inst.slots[slot].as_mut()
+            {
+                *applied_generation = generation;
+            }
         }
         if relayout && inst.slots.iter().all(|s| s.is_some()) {
             let views: Vec<wgpu::TextureView> = inst

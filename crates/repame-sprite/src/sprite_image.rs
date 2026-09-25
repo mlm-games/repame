@@ -1,11 +1,12 @@
 use std::fmt;
 use std::sync::Arc;
 
+use repose_core::locals::effective_density_scale;
 use repose_core::{
     Color, ControlVisual, ControlVisualState, Dp, ImageFilter, ImageFit, ImageHandle,
     ImageHandleGuard, ImageSourceRect, Modifier, Rect, RenderContext, Scene, SceneNode, View,
 };
-use repose_ui::{Image, ImageExt};
+use repose_ui::Box as UiBox;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpriteImageFrameDef {
@@ -281,26 +282,99 @@ impl SpriteImage {
         } else {
             modifier.size(Dp(self.size[0]), Dp(self.size[1]))
         };
-        Image(modifier, self.handle())
-            .image_source_rect(self.source_rect)
-            .image_fit(ImageFit::FillBounds)
-            .image_filter(ImageFilter::Nearest)
+        let visual = self.control_visual(Color::WHITE);
+        UiBox(modifier.painter(move |scene, rect, alpha| {
+            visual.paint(
+                scene,
+                rect,
+                ControlVisualState {
+                    alpha,
+                    ..ControlVisualState::default()
+                },
+            );
+        }))
     }
 
     pub fn control_visual(&self, tint: Color) -> ControlVisual {
-        ControlVisual::image(self.handle(), Some(self.source_rect), tint)
-            .image_fit(ImageFit::FillBounds)
-            .image_filter(ImageFilter::Nearest)
+        let _asset = self.asset.clone();
+        let handle = self.handle();
+        let source = self.source_rect;
+        ControlVisual::custom(move |scene, rect, state| {
+            let _ = &_asset;
+            let alpha = state.alpha.clamp(0.0, 1.0);
+            let tint = Color(tint.0, tint.1, tint.2, (tint.3 as f32 * alpha) as u8);
+            scene.nodes.push(SceneNode::Image {
+                rect,
+                handle,
+                tint,
+                fit: ImageFit::FillBounds,
+                filter: ImageFilter::Nearest,
+                source_rect: Some(source),
+            });
+        })
+    }
+
+    pub fn rotated_control_visual(&self, tint: Color, quarter_turns: i32) -> ControlVisual {
+        let quarter_turns = quarter_turns.rem_euclid(4);
+        if quarter_turns == 0 {
+            return self.control_visual(tint);
+        }
+        let _asset = self.asset.clone();
+        let handle = self.handle();
+        let source = self.source_rect;
+        ControlVisual::custom(
+            move |scene: &mut Scene, rect: Rect, state: ControlVisualState| {
+                let _ = &_asset;
+                let angle = quarter_turns as f32 * std::f32::consts::FRAC_PI_2;
+                let (sin, cos) = angle.sin_cos();
+                let center_x = rect.x + rect.w * 0.5;
+                let center_y = rect.y + rect.h * 0.5;
+                let transform = repose_core::Transform {
+                    translate_x: center_x - (cos * center_x - sin * center_y),
+                    translate_y: center_y - (sin * center_x + cos * center_y),
+                    rotate: angle,
+                    origin_x: 0.0,
+                    origin_y: 0.0,
+                    ..repose_core::Transform::identity()
+                };
+                let image_rect = if quarter_turns % 2 == 1 {
+                    Rect {
+                        x: center_x - rect.h * 0.5,
+                        y: center_y - rect.w * 0.5,
+                        w: rect.h,
+                        h: rect.w,
+                    }
+                } else {
+                    rect
+                };
+                let alpha = state.alpha.clamp(0.0, 1.0);
+                let tint = Color(tint.0, tint.1, tint.2, (tint.3 as f32 * alpha) as u8);
+                scene.nodes.push(SceneNode::PushTransform { transform });
+                scene.nodes.push(SceneNode::Image {
+                    rect: image_rect,
+                    handle,
+                    tint,
+                    fit: ImageFit::FillBounds,
+                    filter: ImageFilter::Nearest,
+                    source_rect: Some(source),
+                });
+                scene.nodes.push(SceneNode::PopTransform);
+            },
+        )
     }
 
     pub fn prefix_control_visual(&self, tint: Color) -> ControlVisual {
+        let _asset = self.asset.clone();
         let handle = self.handle();
         let source = self.source_rect;
         let natural_width = self.size[0].max(1.0);
         ControlVisual::custom(
             move |scene: &mut Scene, rect: Rect, state: ControlVisualState| {
-                let visible = if rect.w.is_finite() && rect.w > 0.0 {
-                    ((rect.w / natural_width).clamp(0.0, 1.0) * source.width as f32)
+                let _ = &_asset;
+                let density = effective_density_scale().max(1e-6);
+                let logical_width = rect.w / density;
+                let visible = if logical_width.is_finite() && logical_width > 0.0 {
+                    ((logical_width / natural_width).clamp(0.0, 1.0) * source.width as f32)
                         .floor()
                         .max(1.0) as u32
                 } else {
@@ -352,19 +426,28 @@ impl SpriteImage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repose_core::ControlVisualState;
+    use repose_core::{ControlVisualState, RenderCommand};
 
     #[test]
     fn sprite_frame_becomes_source_rect_control_visual() {
         let context = RenderContext::new();
         let definition = SpriteImageDef::horizontal_strip(2, [2, 2], [1.0, 1.0], 8.0)
             .expect("strip should be valid");
-        let asset =
-            SpriteImageAsset::from_rgba8(&context, [4, 2], vec![255; 4 * 2 * 4], definition, true)
-                .expect("asset should be valid");
-        let frame = asset.frame(1).expect("frame should exist");
+        let (handle, visual) = {
+            let asset = SpriteImageAsset::from_rgba8(
+                &context,
+                [4, 2],
+                vec![255; 4 * 2 * 4],
+                definition,
+                true,
+            )
+            .expect("asset should be valid");
+            let frame = asset.frame(1).expect("frame should exist");
+            (frame.handle(), frame.control_visual(Color::WHITE))
+        };
+        let _ = context.drain();
         let mut scene = Scene::default();
-        frame.control_visual(Color::WHITE).paint(
+        visual.paint(
             &mut scene,
             Rect {
                 x: 3.0,
@@ -386,5 +469,70 @@ mod tests {
         assert_eq!(rect.w, 20.0);
         assert_eq!(*source_rect, Some(ImageSourceRect::new(2, 0, 2, 2)));
         assert_eq!(*filter, ImageFilter::Nearest);
+        assert!(context.drain().is_empty());
+        drop(visual);
+        assert!(matches!(
+            context.drain().as_slice(),
+            [RenderCommand::RemoveImage { handle: removed }] if *removed == handle
+        ));
+    }
+
+    #[test]
+    fn rotated_visual_swaps_quarter_turn_rect() {
+        let context = RenderContext::new();
+        let definition = SpriteImageDef::single([8, 2], [4.0, 1.0]);
+        let visual =
+            SpriteImageAsset::from_rgba8(&context, [8, 2], vec![255; 8 * 2 * 4], definition, true)
+                .expect("asset should be valid")
+                .frame(0)
+                .expect("frame should exist")
+                .rotated_control_visual(Color::WHITE, 1);
+        let mut scene = Scene::default();
+        visual.paint(
+            &mut scene,
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                w: 20.0,
+                h: 80.0,
+            },
+            ControlVisualState::default(),
+        );
+        assert_eq!(scene.nodes.len(), 3);
+        assert!(matches!(
+            scene.nodes[1],
+            SceneNode::Image { rect, .. } if rect == Rect { x: -20.0, y: 50.0, w: 80.0, h: 20.0 }
+        ));
+        assert!(matches!(&scene.nodes[2], SceneNode::PopTransform));
+    }
+
+    #[test]
+    fn prefix_visual_uses_logical_control_width() {
+        let context = RenderContext::new();
+        let definition = SpriteImageDef::horizontal_strip(1, [2, 2], [1.0, 1.0], 8.0)
+            .expect("strip should be valid");
+        let visual =
+            SpriteImageAsset::from_rgba8(&context, [2, 2], vec![255; 2 * 2 * 4], definition, true)
+                .expect("asset should be valid")
+                .frame(0)
+                .expect("frame should exist")
+                .prefix_control_visual(Color::WHITE);
+        let mut scene = Scene::default();
+        repose_core::locals::with_density(repose_core::locals::Density { scale: 2.0 }, || {
+            visual.paint(
+                &mut scene,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 2.0,
+                    h: 2.0,
+                },
+                ControlVisualState::default(),
+            );
+        });
+        let Some(SceneNode::Image { source_rect, .. }) = scene.nodes.first() else {
+            panic!("expected image node");
+        };
+        assert_eq!(*source_rect, Some(ImageSourceRect::new(0, 0, 1, 2)));
     }
 }

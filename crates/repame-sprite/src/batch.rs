@@ -22,7 +22,8 @@
 //! `CallbackResources` (like `FullscreenPass`'s id map), so viewports +
 //! minimaps coexist.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
@@ -406,8 +407,32 @@ impl SpriteBatch {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct AtlasDescriptor {
+    layer_size: u32,
+    layers: u32,
+    filter: TextureFilter,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct AtlasKey {
+    descriptor: AtlasDescriptor,
+    generation: u64,
+}
+
+struct AtlasLayout {
+    tex_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+struct AtlasResources {
+    texture: wgpu::Texture,
+    tex_bind: wgpu::BindGroup,
+    applied_gen: Arc<Mutex<Option<u64>>>,
+}
+
 struct BatchEntry {
-    key: (wgpu::TextureFormat, u32, u32, u32, TextureFilter, u64),
+    key: (wgpu::TextureFormat, u32, u32, u32, TextureFilter),
     pipeline_alpha: wgpu::RenderPipeline,
     pipeline_multiply: wgpu::RenderPipeline,
     pipeline_additive: wgpu::RenderPipeline,
@@ -419,18 +444,23 @@ struct BatchEntry {
     last_alpha: u32,
     last_multiply_end: u32,
     last_total: u32,
-    /// Atlas generation resident in `texture`. Repeats of the same
-    /// generation skip `write_texture`; a new generation (fresh load)
-    /// replays the blits into the live texture.
-    applied_gen: u64,
     camera: wgpu::Buffer,
     cam_bind: wgpu::BindGroup,
-    tex_bind: wgpu::BindGroup,
-    texture: wgpu::Texture,
+    atlas: Arc<AtlasResources>,
+    atlas_key: AtlasKey,
 }
 
 struct BatchResources {
     batches: HashMap<String, BatchEntry>,
+    atlases: HashMap<AtlasKey, Arc<AtlasResources>>,
+    layouts: HashMap<AtlasDescriptor, Arc<AtlasLayout>>,
+}
+
+impl BatchResources {
+    fn prune_atlases(&mut self) {
+        let live: HashSet<AtlasKey> = self.batches.values().map(|entry| entry.atlas_key).collect();
+        self.atlases.retain(|key, _| live.contains(key));
+    }
 }
 
 const CORNERS: &[f32] = &[
@@ -467,6 +497,76 @@ fn sampler_desc(filter: TextureFilter) -> wgpu::SamplerDescriptor<'static> {
     }
 }
 
+fn create_atlas_layout(device: &wgpu::Device, filter: TextureFilter) -> AtlasLayout {
+    let sampler = device.create_sampler(&sampler_desc(filter));
+    let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sprite_batch_tex_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    AtlasLayout {
+        tex_layout,
+        sampler,
+    }
+}
+
+fn create_atlas(device: &wgpu::Device, key: AtlasKey, layout: &AtlasLayout) -> AtlasResources {
+    let descriptor = key.descriptor;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("sprite_batch_atlas"),
+        size: wgpu::Extent3d {
+            width: descriptor.layer_size,
+            height: descriptor.layer_size,
+            depth_or_array_layers: descriptor.layers,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let tex_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("sprite_batch_tex_bg"),
+        layout: &layout.tex_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&layout.sampler),
+            },
+        ],
+    });
+    AtlasResources {
+        texture,
+        tex_bind,
+        applied_gen: Arc::new(Mutex::new(None)),
+    }
+}
+
 impl SpriteBatch {
     fn ensure_resources(
         &self,
@@ -474,22 +574,57 @@ impl SpriteBatch {
         screen: &ScreenDescriptor,
         resources: &mut CallbackResources,
     ) {
+        let descriptor = AtlasDescriptor {
+            layer_size: self.desc.layer_size,
+            layers: self.desc.layers,
+            filter: self.desc.filter,
+        };
+        let atlas_key = AtlasKey {
+            descriptor,
+            generation: self.desc.uploads_gen,
+        };
         let key = (
             screen.target_format,
             screen.sample_count,
             self.desc.layer_size,
             self.desc.layers,
             self.desc.filter,
-            self.desc.uploads_gen,
         );
-        let needs = match resources.get::<BatchResources>() {
-            None => true,
-            Some(all) => match all.batches.get(self.id.as_str()) {
-                None => true,
-                Some(e) => e.key != key,
-            },
-        };
+        if resources.get::<BatchResources>().is_none() {
+            resources.insert(BatchResources {
+                batches: HashMap::new(),
+                atlases: HashMap::new(),
+                layouts: HashMap::new(),
+            });
+        }
+        let layout = resources
+            .get_mut::<BatchResources>()
+            .expect("batch resources initialized")
+            .layouts
+            .entry(descriptor)
+            .or_insert_with(|| Arc::new(create_atlas_layout(device, descriptor.filter)))
+            .clone();
+        let atlas = resources
+            .get_mut::<BatchResources>()
+            .expect("batch resources initialized")
+            .atlases
+            .entry(atlas_key)
+            .or_insert_with(|| Arc::new(create_atlas(device, atlas_key, &layout)))
+            .clone();
+        let needs = resources
+            .get::<BatchResources>()
+            .expect("batch resources initialized")
+            .batches
+            .get(self.id.as_str())
+            .is_none_or(|entry| entry.key != key);
         if !needs {
+            if let Some(all) = resources.get_mut::<BatchResources>()
+                && let Some(entry) = all.batches.get_mut(self.id.as_str())
+            {
+                entry.atlas = atlas;
+                entry.atlas_key = atlas_key;
+                all.prune_atlases();
+            }
             return;
         }
         if resources
@@ -497,7 +632,7 @@ impl SpriteBatch {
             .is_some_and(|all| all.batches.contains_key(self.id.as_str()))
         {
             log::warn!(
-                "sprite_batch[{}]: rebuilding pipeline/texture (format/sample/desc changed); atlas contents dropped, re-upload required",
+                "sprite_batch[{}]: rebuilding pipeline for format/sample/descriptor change",
                 self.id
             );
         }
@@ -522,25 +657,6 @@ impl SpriteBatch {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("sprite_batch_atlas"),
-            size: wgpu::Extent3d {
-                width: self.desc.layer_size,
-                height: self.desc.layer_size,
-                depth_or_array_layers: self.desc.layers,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        let sampler = device.create_sampler(&sampler_desc(self.desc.filter));
         let cam_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sprite_batch_cam_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -554,27 +670,6 @@ impl SpriteBatch {
                 count: None,
             }],
         });
-        let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("sprite_batch_tex_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
         let cam_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sprite_batch_cam_bg"),
             layout: &cam_layout,
@@ -583,23 +678,9 @@ impl SpriteBatch {
                 resource: camera.as_entire_binding(),
             }],
         });
-        let tex_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sprite_batch_tex_bg"),
-            layout: &tex_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sprite_batch_pl"),
-            bind_group_layouts: &[Some(&cam_layout), Some(&tex_layout)],
+            bind_group_layouts: &[Some(&cam_layout), Some(&layout.tex_layout)],
             immediate_size: 0,
         });
         let vertex_buffers = [
@@ -747,24 +828,20 @@ impl SpriteBatch {
             last_alpha: 0,
             last_multiply_end: 0,
             last_total: 0,
-            applied_gen: u64::MAX,
             camera,
             cam_bind,
-            tex_bind,
-            texture,
+            atlas,
+            atlas_key,
         };
-        match resources.get_mut::<BatchResources>() {
-            Some(all) => {
-                all.batches.insert(self.id.clone(), entry);
-            }
-            None => {
-                let mut all = BatchResources {
-                    batches: HashMap::new(),
-                };
-                all.batches.insert(self.id.clone(), entry);
-                resources.insert(all);
-            }
-        }
+        resources
+            .get_mut::<BatchResources>()
+            .expect("batch resources initialized")
+            .batches
+            .insert(self.id.clone(), entry);
+        resources
+            .get_mut::<BatchResources>()
+            .expect("batch resources initialized")
+            .prune_atlases();
     }
 
     /// Record this batch's instance counts after uploading. Split out so
@@ -862,10 +939,17 @@ impl SpriteBatch {
         if !sorted.is_empty() {
             queue.write_buffer(&res.instances, 0, bytemuck::cast_slice(&sorted));
         }
-        let fresh_atlas = res.applied_gen != self.desc.uploads_gen;
-        if fresh_atlas {
-            res.applied_gen = self.desc.uploads_gen;
+        let atlas = res.atlas.clone();
+        let fresh_atlas = atlas
+            .applied_gen
+            .lock()
+            .map(|generation| *generation != Some(self.desc.uploads_gen))
+            .unwrap_or(true);
+        if fresh_atlas && uploads.is_empty() {
+            self.finish_prepare(alpha, multiply_end, total, resources);
+            return Vec::new();
         }
+        let mut wrote_any = false;
         for up in uploads {
             if !fresh_atlas {
                 continue;
@@ -889,7 +973,7 @@ impl SpriteBatch {
             }
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &res.texture,
+                    texture: &atlas.texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d {
                         x: up.x,
@@ -910,6 +994,13 @@ impl SpriteBatch {
                     depth_or_array_layers: 1,
                 },
             );
+            wrote_any = true;
+        }
+        if fresh_atlas
+            && wrote_any
+            && let Ok(mut generation) = atlas.applied_gen.lock()
+        {
+            *generation = Some(self.desc.uploads_gen);
         }
         self.finish_prepare(alpha, multiply_end, total, resources);
         Vec::new()
@@ -974,7 +1065,7 @@ fn draw_batch_with_pass<P: BatchRenderPass>(
         return;
     }
     rpass.set_bind_group(0, &res.cam_bind, &[]);
-    rpass.set_bind_group(1, &res.tex_bind, &[]);
+    rpass.set_bind_group(1, &res.atlas.tex_bind, &[]);
     rpass.set_vertex_buffer(0, res.corners.slice(..));
     rpass.set_vertex_buffer(1, res.instances.slice(..));
     if res.last_alpha > 0 {
@@ -1016,7 +1107,7 @@ pub fn draw_batch(rpass: &mut wgpu::RenderPass<'_>, resources: &CallbackResource
 
 impl WgpuCallback for SpriteBatch {
     fn resource_key(&self) -> Option<&str> {
-        Some(self.id())
+        Some("repame.sprite_batch.resources")
     }
 
     fn prepare(

@@ -7,7 +7,7 @@
 //! games work in world/dp units and do not touch physical px.
 //! Camera state lives in Repose signals, not in the renderer.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,9 @@ use glam::{Mat4, Vec2, Vec3};
 use repose_canvas::{Canvas, DrawScope, Embedded};
 use repose_core::locals::effective_density_scale;
 use repose_core::{Color, Dp, Modifier, Px, Rect, View};
-use repose_render_wgpu::{Callback, CallbackResources, ScreenDescriptor, WgpuCallback};
+use repose_render_wgpu::{
+    Callback, CallbackRenderPass, CallbackResources, ScreenDescriptor, WgpuCallback,
+};
 use repose_ui::Box as UiBox;
 use repose_ui::ViewExt;
 
@@ -27,9 +29,17 @@ pub use batch::{
 };
 
 pub mod fullscreen;
-pub use fullscreen::{FullscreenDesc, FullscreenPass, FullscreenTexture};
+pub use fullscreen::{
+    FullscreenDesc, FullscreenPass, FullscreenTexture, FullscreenTextureRef,
+    FullscreenTextureUpload,
+};
 
 pub mod post;
+
+pub mod sprite_image;
+pub use sprite_image::{
+    SpriteImage, SpriteImageAsset, SpriteImageDef, SpriteImageError, SpriteImageFrameDef,
+};
 
 /// 2D orthographic camera. Owned by the UI (signals), copied into the
 /// snapshot per frame. `effective_center` is `center + offset`.
@@ -1055,6 +1065,10 @@ struct GpuViewport {
 }
 
 impl WgpuCallback for GpuViewport {
+    fn resource_key(&self) -> Option<&str> {
+        Some(&self.batch_id)
+    }
+
     fn prepare(
         &self,
         device: &wgpu::Device,
@@ -1085,8 +1099,14 @@ impl WgpuCallback for GpuViewport {
         for s in &self.input.sprites {
             batch.push_sprite(s);
         }
-        batch.extend_uploads(self.uploads.iter().cloned());
-        batch.prepare(device, queue, encoder, screen, resources);
+        batch.prepare_with_uploads(
+            device,
+            queue,
+            encoder,
+            screen,
+            resources,
+            self.uploads.as_ref(),
+        );
         let composite = post::use_composite(self.input.chroma);
         // Background fill under the batch. Skipped when the snapshot has
         if let Some(bg) = self.input.background
@@ -1099,7 +1119,7 @@ impl WgpuCallback for GpuViewport {
                 screen,
                 resources,
                 bytemuck::cast_slice(&words),
-                &[],
+                &[] as &[FullscreenTexture],
             );
         }
         if let Some(ov) = self.input.overlay_color {
@@ -1110,7 +1130,7 @@ impl WgpuCallback for GpuViewport {
                 screen,
                 resources,
                 bytemuck::cast_slice(&words),
-                &[],
+                &[] as &[FullscreenTexture],
             );
         }
         if post::use_composite(self.input.chroma) {
@@ -1135,7 +1155,7 @@ impl WgpuCallback for GpuViewport {
     fn paint(
         &self,
         info: repose_core::PaintCallbackInfo,
-        rpass: &mut wgpu::RenderPass<'static>,
+        rpass: &mut CallbackRenderPass<'_, '_>,
         resources: &CallbackResources,
     ) {
         let d = if info.pixels_per_point.is_finite() && info.pixels_per_point > 1e-6 {
@@ -1170,7 +1190,7 @@ impl WgpuCallback for GpuViewport {
             if self.input.background.is_some() {
                 self.bg.paint(info, rpass, resources);
             }
-            draw_batch_with_id(self.batch_id.as_str(), rpass, resources);
+            batch::draw_batch_with_id_callback(self.batch_id.as_str(), rpass, resources);
         }
         if self.input.overlay_color.is_some() {
             self.overlay.paint(info, rpass, resources);

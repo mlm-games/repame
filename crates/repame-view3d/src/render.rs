@@ -273,7 +273,7 @@ use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
-use repose_render_wgpu::{CallbackResources, DepthComposite, ScreenDescriptor};
+use repose_render_wgpu::{CallbackRenderPass, CallbackResources, DepthComposite, ScreenDescriptor};
 
 use super::mesh::MeshGroup;
 use super::skin::SkinnedDraw;
@@ -2634,6 +2634,17 @@ pub fn paint_scene_with_id(
     composite.blit(id, rpass);
 }
 
+pub(crate) fn paint_scene_with_callback(
+    id: &str,
+    rpass: &mut CallbackRenderPass<'_, '_>,
+    resources: &CallbackResources,
+) {
+    let Some(composite) = resources.get::<DepthComposite>() else {
+        return;
+    };
+    composite.blit(id, rpass);
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::mesh::MeshGroup;
@@ -3204,10 +3215,10 @@ mod tests {
             fn paint(
                 &self,
                 _info: repose_core::PaintCallbackInfo,
-                rpass: &mut wgpu::RenderPass<'static>,
+                rpass: &mut CallbackRenderPass<'_, '_>,
                 resources: &repose_render_wgpu::CallbackResources,
             ) {
-                paint_scene_with_id("test.depth", rpass, resources);
+                paint_scene_with_callback("test.depth", rpass, resources);
             }
         }
 
@@ -3327,10 +3338,10 @@ mod tests {
             fn paint(
                 &self,
                 _info: repose_core::PaintCallbackInfo,
-                rpass: &mut wgpu::RenderPass<'static>,
+                rpass: &mut CallbackRenderPass<'_, '_>,
                 resources: &repose_render_wgpu::CallbackResources,
             ) {
-                paint_scene_with_id("test.lit", rpass, resources);
+                paint_scene_with_callback("test.lit", rpass, resources);
             }
         }
 
@@ -3484,10 +3495,10 @@ mod tests {
             fn paint(
                 &self,
                 _info: repose_core::PaintCallbackInfo,
-                rpass: &mut wgpu::RenderPass<'static>,
+                rpass: &mut CallbackRenderPass<'_, '_>,
                 resources: &repose_render_wgpu::CallbackResources,
             ) {
-                paint_scene_with_id("test.textured", rpass, resources);
+                paint_scene_with_callback("test.textured", rpass, resources);
             }
         }
 
@@ -3717,10 +3728,10 @@ mod tests {
             fn paint(
                 &self,
                 _info: repose_core::PaintCallbackInfo,
-                rpass: &mut wgpu::RenderPass<'static>,
+                rpass: &mut CallbackRenderPass<'_, '_>,
                 resources: &repose_render_wgpu::CallbackResources,
             ) {
-                paint_scene_with_id("test.blend", rpass, resources);
+                paint_scene_with_callback("test.blend", rpass, resources);
             }
         }
 
@@ -3858,10 +3869,10 @@ mod tests {
             fn paint(
                 &self,
                 _info: repose_core::PaintCallbackInfo,
-                rpass: &mut wgpu::RenderPass<'static>,
+                rpass: &mut CallbackRenderPass<'_, '_>,
                 resources: &repose_render_wgpu::CallbackResources,
             ) {
-                paint_scene_with_id("test.fog", rpass, resources);
+                paint_scene_with_callback("test.fog", rpass, resources);
             }
         }
 
@@ -4012,10 +4023,10 @@ mod tests {
             fn paint(
                 &self,
                 _info: repose_core::PaintCallbackInfo,
-                rpass: &mut wgpu::RenderPass<'static>,
+                rpass: &mut CallbackRenderPass<'_, '_>,
                 resources: &repose_render_wgpu::CallbackResources,
             ) {
-                paint_scene_with_id("test.shadow", rpass, resources);
+                paint_scene_with_callback("test.shadow", rpass, resources);
             }
         }
 
@@ -4153,10 +4164,10 @@ mod tests {
             fn paint(
                 &self,
                 _info: repose_core::PaintCallbackInfo,
-                rpass: &mut wgpu::RenderPass<'static>,
+                rpass: &mut CallbackRenderPass<'_, '_>,
                 resources: &repose_render_wgpu::CallbackResources,
             ) {
-                paint_scene_with_id("test.shadow.ground", rpass, resources);
+                paint_scene_with_callback("test.shadow.ground", rpass, resources);
             }
         }
 
@@ -4374,10 +4385,10 @@ mod tests {
             fn paint(
                 &self,
                 _info: repose_core::PaintCallbackInfo,
-                rpass: &mut wgpu::RenderPass<'static>,
+                rpass: &mut CallbackRenderPass<'_, '_>,
                 resources: &repose_render_wgpu::CallbackResources,
             ) {
-                paint_scene_with_id(
+                paint_scene_with_callback(
                     if self.use_gpu {
                         "test.skin.gpu"
                     } else {
@@ -4510,10 +4521,10 @@ mod tests {
             fn paint(
                 &self,
                 _info: repose_core::PaintCallbackInfo,
-                rpass: &mut wgpu::RenderPass<'static>,
+                rpass: &mut CallbackRenderPass<'_, '_>,
                 resources: &repose_render_wgpu::CallbackResources,
             ) {
-                paint_scene_with_id("test.cascade", rpass, resources);
+                paint_scene_with_callback("test.cascade", rpass, resources);
             }
         }
 
@@ -4684,10 +4695,10 @@ mod tests {
             fn paint(
                 &self,
                 _info: repose_core::PaintCallbackInfo,
-                rpass: &mut wgpu::RenderPass<'static>,
+                rpass: &mut CallbackRenderPass<'_, '_>,
                 resources: &repose_render_wgpu::CallbackResources,
             ) {
-                paint_scene_with_id("test.point", rpass, resources);
+                paint_scene_with_callback("test.point", rpass, resources);
             }
         }
 

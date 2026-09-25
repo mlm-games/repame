@@ -26,7 +26,7 @@ use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
-use repose_render_wgpu::{CallbackResources, ScreenDescriptor, WgpuCallback};
+use repose_render_wgpu::{CallbackRenderPass, CallbackResources, ScreenDescriptor, WgpuCallback};
 use wgpu::util::DeviceExt;
 
 use super::{SpriteBlend, SpriteInstance};
@@ -822,55 +822,15 @@ impl SpriteBatch {
                 .count() as u32;
         (v, alpha, multiply_end)
     }
-}
 
-/// Draw the prepared batch for one id. Shared by [`SpriteBatch`] and
-/// viewport payloads so all GPU consumers issue identical draw calls.
-pub fn draw_batch_with_id(
-    id: &str,
-    rpass: &mut wgpu::RenderPass<'_>,
-    resources: &CallbackResources,
-) {
-    let Some(all) = resources.get::<BatchResources>() else {
-        return;
-    };
-    let Some(res) = all.batches.get(id) else {
-        return;
-    };
-    if res.last_total == 0 {
-        return;
-    }
-    rpass.set_bind_group(0, &res.cam_bind, &[]);
-    rpass.set_bind_group(1, &res.tex_bind, &[]);
-    rpass.set_vertex_buffer(0, res.corners.slice(..));
-    rpass.set_vertex_buffer(1, res.instances.slice(..));
-    if res.last_alpha > 0 {
-        rpass.set_pipeline(&res.pipeline_alpha);
-        rpass.draw(0..6, 0..res.last_alpha);
-    }
-    if res.last_multiply_end > res.last_alpha {
-        rpass.set_pipeline(&res.pipeline_multiply);
-        rpass.draw(0..6, res.last_alpha..res.last_multiply_end);
-    }
-    if res.last_total > res.last_multiply_end {
-        rpass.set_pipeline(&res.pipeline_additive);
-        rpass.draw(0..6, res.last_multiply_end..res.last_total);
-    }
-}
-
-/// Draw the default batch (backward compat for single-batch apps).
-pub fn draw_batch(rpass: &mut wgpu::RenderPass<'_>, resources: &CallbackResources) {
-    draw_batch_with_id("sprite_batch.default", rpass, resources);
-}
-
-impl WgpuCallback for SpriteBatch {
-    fn prepare(
+    pub(crate) fn prepare_with_uploads(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         _encoder: &mut wgpu::CommandEncoder,
         screen: &ScreenDescriptor,
         resources: &mut CallbackResources,
+        uploads: &[AtlasUpload],
     ) -> Vec<wgpu::CommandBuffer> {
         self.ensure_resources(device, screen, resources);
         let (sorted, alpha, multiply_end) = self.sorted_instances();
@@ -902,13 +862,11 @@ impl WgpuCallback for SpriteBatch {
         if !sorted.is_empty() {
             queue.write_buffer(&res.instances, 0, bytemuck::cast_slice(&sorted));
         }
-        // Apply pending atlas uploads straight into array layers.
-        // Lost early frames on Android just retry next frame instead of losing the atlas.
         let fresh_atlas = res.applied_gen != self.desc.uploads_gen;
         if fresh_atlas {
             res.applied_gen = self.desc.uploads_gen;
         }
-        for up in &self.uploads {
+        for up in uploads {
             if !fresh_atlas {
                 continue;
             }
@@ -956,14 +914,129 @@ impl WgpuCallback for SpriteBatch {
         self.finish_prepare(alpha, multiply_end, total, resources);
         Vec::new()
     }
+}
+
+trait BatchRenderPass {
+    fn set_bind_group(&mut self, index: u32, bind_group: &wgpu::BindGroup, offsets: &[u32]);
+    fn set_vertex_buffer(&mut self, slot: u32, buffer: wgpu::BufferSlice<'_>);
+    fn set_pipeline(&mut self, pipeline: &wgpu::RenderPipeline);
+    fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>);
+}
+
+impl BatchRenderPass for wgpu::RenderPass<'_> {
+    fn set_bind_group(&mut self, index: u32, bind_group: &wgpu::BindGroup, offsets: &[u32]) {
+        self.set_bind_group(index, bind_group, offsets);
+    }
+
+    fn set_vertex_buffer(&mut self, slot: u32, buffer: wgpu::BufferSlice<'_>) {
+        self.set_vertex_buffer(slot, buffer);
+    }
+
+    fn set_pipeline(&mut self, pipeline: &wgpu::RenderPipeline) {
+        self.set_pipeline(pipeline);
+    }
+
+    fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) {
+        self.draw(vertices, instances);
+    }
+}
+
+impl BatchRenderPass for CallbackRenderPass<'_, '_> {
+    fn set_bind_group(&mut self, index: u32, bind_group: &wgpu::BindGroup, offsets: &[u32]) {
+        self.set_bind_group(index, bind_group, offsets);
+    }
+
+    fn set_vertex_buffer(&mut self, slot: u32, buffer: wgpu::BufferSlice<'_>) {
+        self.set_vertex_buffer(slot, buffer);
+    }
+
+    fn set_pipeline(&mut self, pipeline: &wgpu::RenderPipeline) {
+        self.set_pipeline(pipeline);
+    }
+
+    fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) {
+        self.draw(vertices, instances);
+    }
+}
+
+fn draw_batch_with_pass<P: BatchRenderPass>(
+    id: &str,
+    rpass: &mut P,
+    resources: &CallbackResources,
+) {
+    let Some(all) = resources.get::<BatchResources>() else {
+        return;
+    };
+    let Some(res) = all.batches.get(id) else {
+        return;
+    };
+    if res.last_total == 0 {
+        return;
+    }
+    rpass.set_bind_group(0, &res.cam_bind, &[]);
+    rpass.set_bind_group(1, &res.tex_bind, &[]);
+    rpass.set_vertex_buffer(0, res.corners.slice(..));
+    rpass.set_vertex_buffer(1, res.instances.slice(..));
+    if res.last_alpha > 0 {
+        rpass.set_pipeline(&res.pipeline_alpha);
+        rpass.draw(0..6, 0..res.last_alpha);
+    }
+    if res.last_multiply_end > res.last_alpha {
+        rpass.set_pipeline(&res.pipeline_multiply);
+        rpass.draw(0..6, res.last_alpha..res.last_multiply_end);
+    }
+    if res.last_total > res.last_multiply_end {
+        rpass.set_pipeline(&res.pipeline_additive);
+        rpass.draw(0..6, res.last_multiply_end..res.last_total);
+    }
+}
+
+/// Draw the prepared batch for one id. Shared by [`SpriteBatch`] and
+/// viewport payloads so all GPU consumers issue identical draw calls.
+pub fn draw_batch_with_id(
+    id: &str,
+    rpass: &mut wgpu::RenderPass<'_>,
+    resources: &CallbackResources,
+) {
+    draw_batch_with_pass(id, rpass, resources);
+}
+
+pub(crate) fn draw_batch_with_id_callback(
+    id: &str,
+    rpass: &mut CallbackRenderPass<'_, '_>,
+    resources: &CallbackResources,
+) {
+    draw_batch_with_pass(id, rpass, resources);
+}
+
+/// Draw the default batch (backward compat for single-batch apps).
+pub fn draw_batch(rpass: &mut wgpu::RenderPass<'_>, resources: &CallbackResources) {
+    draw_batch_with_id("sprite_batch.default", rpass, resources);
+}
+
+impl WgpuCallback for SpriteBatch {
+    fn resource_key(&self) -> Option<&str> {
+        Some(self.id())
+    }
+
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        screen: &ScreenDescriptor,
+        resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        self.prepare_with_uploads(device, queue, encoder, screen, resources, &self.uploads)
+    }
 
     fn paint(
         &self,
         _info: repose_core::PaintCallbackInfo,
-        rpass: &mut wgpu::RenderPass<'static>,
+        rpass: &mut CallbackRenderPass<'_, '_>,
         resources: &CallbackResources,
     ) {
-        draw_batch_with_id(self.id.as_str(), rpass, resources);
+        draw_batch_with_id_callback(self.id.as_str(), rpass, resources);
     }
 }
 

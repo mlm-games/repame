@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use repose_render_wgpu::{CallbackResources, ScreenDescriptor};
+use repose_render_wgpu::{CallbackRenderPass, CallbackResources, ScreenDescriptor};
 
 use super::batch::draw_batch_with_id;
 
@@ -402,7 +402,7 @@ pub(crate) fn prepare_composite(
 /// offscreen texture 1:1 (both come from the painted frame geometry).
 pub(crate) fn paint_composite(
     id: &str,
-    rpass: &mut wgpu::RenderPass<'static>,
+    rpass: &mut CallbackRenderPass<'_, '_>,
     resources: &CallbackResources,
 ) {
     let Some(all) = resources.get::<PostResources>() else {
@@ -420,6 +420,7 @@ pub(crate) fn paint_composite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::batch::draw_batch_with_id_callback;
     use crate::{AtlasUpload, BatchDesc, SpriteBatch, TextureFilter, screen_camera};
     use glam::Vec2;
     use repose_core::{Color, Rect, Scene, SceneNode};
@@ -476,13 +477,13 @@ mod tests {
         fn paint(
             &self,
             _info: repose_core::PaintCallbackInfo,
-            rpass: &mut wgpu::RenderPass<'static>,
+            rpass: &mut CallbackRenderPass<'_, '_>,
             resources: &CallbackResources,
         ) {
             if use_composite(self.amount) {
                 paint_composite("sprite_batch.default", rpass, resources);
             } else {
-                draw_batch_with_id("sprite_batch.default", rpass, resources);
+                draw_batch_with_id_callback("sprite_batch.default", rpass, resources);
             }
         }
     }

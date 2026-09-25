@@ -13,14 +13,16 @@ use glam::Vec2;
 use glam::Vec3;
 use repose_core::input::{PointerButton, PointerEventKind};
 use repose_core::{Modifier, View};
-use repose_render_wgpu::{Callback, CallbackResources, ScreenDescriptor, WgpuCallback};
+use repose_render_wgpu::{
+    Callback, CallbackRenderPass, CallbackResources, ScreenDescriptor, WgpuCallback,
+};
 use repose_ui::Embedded;
 
 use super::camera::OrbitCamera;
 use super::mesh::MeshGroup;
 use super::pick::{MeshHit, pick_ray};
 use super::render::{BatchDesc, SceneBatch, SceneLight, SceneUpload};
-use super::render::{paint_scene_with_id, prepare_scene_with_id};
+use super::render::{paint_scene_with_callback, prepare_scene_with_id};
 
 /// Everything the viewport draws this frame. Plain data, snapshot per frame.
 ///
@@ -470,6 +472,10 @@ impl GpuViewport3d {
 }
 
 impl WgpuCallback for GpuViewport3d {
+    fn resource_key(&self) -> Option<&str> {
+        Some(&self.batch_id)
+    }
+
     fn prepare(
         &self,
         device: &wgpu::Device,
@@ -536,7 +542,7 @@ impl WgpuCallback for GpuViewport3d {
     fn paint(
         &self,
         info: repose_core::PaintCallbackInfo,
-        rpass: &mut wgpu::RenderPass<'static>,
+        rpass: &mut CallbackRenderPass<'_, '_>,
         resources: &CallbackResources,
     ) {
         if let Ok(mut g) = self.geom.lock() {
@@ -544,7 +550,7 @@ impl WgpuCallback for GpuViewport3d {
                 viewport_px: [info.viewport.w.max(1.0), info.viewport.h.max(1.0)],
             };
         }
-        paint_scene_with_id(self.batch_id.as_str(), rpass, resources);
+        paint_scene_with_callback(self.batch_id.as_str(), rpass, resources);
     }
 }
 

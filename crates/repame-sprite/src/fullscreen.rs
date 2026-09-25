@@ -22,7 +22,7 @@ pub const SOLID_WGSL: &str = r#"
 
 use std::collections::HashMap;
 
-use repose_render_wgpu::{CallbackResources, ScreenDescriptor, WgpuCallback};
+use repose_render_wgpu::{CallbackRenderPass, CallbackResources, ScreenDescriptor, WgpuCallback};
 
 use super::TextureFilter;
 
@@ -45,6 +45,57 @@ pub struct FullscreenTexture {
     pub w: u32,
     pub h: u32,
     pub rgba: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FullscreenTextureRef<'a> {
+    pub slot: u32,
+    pub w: u32,
+    pub h: u32,
+    pub rgba: &'a [u8],
+}
+
+pub trait FullscreenTextureUpload {
+    fn slot(&self) -> u32;
+    fn width(&self) -> u32;
+    fn height(&self) -> u32;
+    fn rgba(&self) -> &[u8];
+}
+
+impl FullscreenTextureUpload for FullscreenTexture {
+    fn slot(&self) -> u32 {
+        self.slot
+    }
+
+    fn width(&self) -> u32 {
+        self.w
+    }
+
+    fn height(&self) -> u32 {
+        self.h
+    }
+
+    fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
+}
+
+impl FullscreenTextureUpload for FullscreenTextureRef<'_> {
+    fn slot(&self) -> u32 {
+        self.slot
+    }
+
+    fn width(&self) -> u32 {
+        self.w
+    }
+
+    fn height(&self) -> u32 {
+        self.h
+    }
+
+    fn rgba(&self) -> &[u8] {
+        self.rgba
+    }
 }
 
 /// A game-owned procedural effect. `Send + Sync` for the compositor
@@ -298,43 +349,46 @@ impl FullscreenPass {
         }
     }
 
-    fn apply_uploads(
+    fn apply_uploads<T: FullscreenTextureUpload>(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         inst: &mut PassInstance,
-        uploads: &[FullscreenTexture],
+        uploads: &[T],
     ) {
         if uploads.is_empty() {
             return;
         }
         let mut relayout = false;
         for up in uploads {
-            let slot = up.slot as usize;
-            if slot >= inst.slots.len() || up.w == 0 || up.h == 0 {
-                log::warn!("fullscreen: dropping bad upload slot={}", up.slot);
+            let slot = up.slot() as usize;
+            let width = up.width();
+            let height = up.height();
+            let rgba = up.rgba();
+            if slot >= inst.slots.len() || width == 0 || height == 0 {
+                log::warn!("fullscreen: dropping bad upload slot={}", up.slot());
                 continue;
             }
-            if up.rgba.len() != up.w as usize * up.h as usize * 4 {
+            if rgba.len() != width as usize * height as usize * 4 {
                 log::warn!(
                     "fullscreen: dropping malformed upload slot={} {}x{} ({} bytes)",
-                    up.slot,
-                    up.w,
-                    up.h,
-                    up.rgba.len()
+                    up.slot(),
+                    width,
+                    height,
+                    rgba.len()
                 );
                 continue;
             }
             let fresh = match &inst.slots[slot] {
-                Some((_, w, h)) => *w != up.w || *h != up.h,
+                Some((_, w, h)) => *w != width || *h != height,
                 None => true,
             };
             if fresh {
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("fullscreen_art"),
                     size: wgpu::Extent3d {
-                        width: up.w,
-                        height: up.h,
+                        width,
+                        height,
                         depth_or_array_layers: 1,
                     },
                     mip_level_count: 1,
@@ -344,7 +398,7 @@ impl FullscreenPass {
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 });
-                inst.slots[slot] = Some((texture, up.w, up.h));
+                inst.slots[slot] = Some((texture, width, height));
                 relayout = true;
             }
             let (texture, _, _) = inst.slots[slot].as_ref().expect("just stored");
@@ -355,15 +409,15 @@ impl FullscreenPass {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                &up.rgba,
+                rgba,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(up.w * 4),
-                    rows_per_image: Some(up.h),
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
                 },
                 wgpu::Extent3d {
-                    width: up.w,
-                    height: up.h,
+                    width,
+                    height,
                     depth_or_array_layers: 1,
                 },
             );
@@ -403,14 +457,14 @@ impl FullscreenPass {
     /// Prepare with explicit data instead of the stored snapshot.
     /// Lets game-owned passes (custom snapshot types) delegate without
     /// rebuilding engine state: same pipeline, same draw calls.
-    pub fn prepare_with(
+    pub fn prepare_with<T: FullscreenTextureUpload>(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         screen: &ScreenDescriptor,
         resources: &mut CallbackResources,
         uniforms: &[u8],
-        uploads: &[FullscreenTexture],
+        uploads: &[T],
     ) -> Vec<wgpu::CommandBuffer> {
         self.ensure_resources(device, screen, resources, uniforms.len());
         let Some(all) = resources.get_mut::<PassResources>() else {
@@ -449,6 +503,10 @@ impl FullscreenPass {
 }
 
 impl WgpuCallback for FullscreenPass {
+    fn resource_key(&self) -> Option<&str> {
+        Some(&self.id)
+    }
+
     fn prepare(
         &self,
         device: &wgpu::Device,
@@ -470,7 +528,7 @@ impl WgpuCallback for FullscreenPass {
     fn paint(
         &self,
         _info: repose_core::PaintCallbackInfo,
-        rpass: &mut wgpu::RenderPass<'static>,
+        rpass: &mut CallbackRenderPass<'_, '_>,
         resources: &CallbackResources,
     ) {
         let Some(all) = resources.get::<PassResources>() else {

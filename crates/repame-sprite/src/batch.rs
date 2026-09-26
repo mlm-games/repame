@@ -249,11 +249,14 @@ struct BatchInstance {
     page: f32,
     z: f32,
     flags: u32,
-    _pad: u32,
+    /// Half a texel in normalized UV, used to inset the UV rect to texel
+    /// centres in the vertex shader. Zero disables the inset.
+    texel: f32,
 }
 
 // Locked to `shaders/sprite.wgsl::Instance` (row0@0, row1@16,
-// uv_min@32, uv_max@40, tint@48, page@64, z@68, flags@72; stride 80).
+// uv_min@32, uv_max@40, tint@48, page@64, z@68, flags@72, texel@76;
+// stride 80).
 // If this fires, update the WGSL offsets and the vertex buffer layout
 // below together.
 const _: () = assert!(size_of::<BatchInstance>() == 80);
@@ -384,7 +387,7 @@ impl SpriteBatch {
             page: page as f32,
             z,
             flags,
-            _pad: 0,
+            texel: 0.5 / self.desc.layer_size.max(1) as f32,
         });
     }
 
@@ -736,6 +739,11 @@ impl SpriteBatch {
                         format: wgpu::VertexFormat::Uint32,
                         offset: 72,
                         shader_location: 9,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32,
+                        offset: 76,
+                        shader_location: 10,
                     },
                 ],
             }),

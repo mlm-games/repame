@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use repose_core::locals::effective_density_scale;
 use repose_core::{
-    Color, ControlVisual, ControlVisualState, Dp, ImageFilter, ImageFit, ImageHandle,
-    ImageHandleGuard, ImageSourceRect, Modifier, Rect, RenderContext, Scene, SceneNode, View,
+    Color, ControlVisual, ControlVisualState, Dp, ImageAlignment, ImageFilter, ImageFit,
+    ImageHandle, ImageHandleGuard, ImageSourceRect, Modifier, Rect, RenderContext, Scene,
+    SceneNode, View,
 };
 use repose_ui::Box as UiBox;
 
@@ -310,6 +311,7 @@ impl SpriteImage {
                 fit: ImageFit::FillBounds,
                 filter: ImageFilter::Nearest,
                 source_rect: Some(source),
+                alignment: ImageAlignment::Center,
             });
         })
     }
@@ -357,6 +359,7 @@ impl SpriteImage {
                     fit: ImageFit::FillBounds,
                     filter: ImageFilter::Nearest,
                     source_rect: Some(source),
+                    alignment: ImageAlignment::Center,
                 });
                 scene.nodes.push(SceneNode::PopTransform);
             },
@@ -395,6 +398,7 @@ impl SpriteImage {
                         visible,
                         source.height,
                     )),
+                    alignment: ImageAlignment::Center,
                 });
             },
         )

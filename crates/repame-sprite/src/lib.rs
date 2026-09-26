@@ -331,6 +331,54 @@ fn sane_positive(v: f32) -> f32 {
     if v.is_finite() && v > 1e-6 { v } else { 1.0 }
 }
 
+/// Scissor (x, y, w, h) bounding the contain-fit world box inside a
+/// callback's viewport, or `None` when the box covers the viewport and
+/// clipping would be a no-op.
+fn fitted_box_scissor(
+    info: &repose_core::PaintCallbackInfo,
+    world: [f32; 2],
+    fit: (f32, f32, f32),
+    roll: f32,
+) -> Option<(u32, u32, u32, u32)> {
+    let d = if info.pixels_per_point.is_finite() && info.pixels_per_point > 1e-6 {
+        info.pixels_per_point
+    } else {
+        1.0
+    };
+    let (s, ox, oy) = fit;
+    if !(s.is_finite() && s > 1e-6) {
+        return None;
+    }
+    // `fit`'s offsets are dp inside the callback rect, so the box in
+    // physical pixels is the world extent scaled and pushed out by them.
+    let (bw, bh) = (world[0] * s * d, world[1] * s * d);
+    let cx = info.viewport.x + ox * d + bw * 0.5;
+    let cy = info.viewport.y + oy * d + bh * 0.5;
+    let (hw, hh) = (bw * 0.5, bh * 0.5);
+    let (c, sn) = (roll.cos().abs(), roll.sin().abs());
+    let (ex, ey) = (hw * c + hh * sn, hw * sn + hh * c);
+    // Intersect with the callback's own clip, then round INWARD. A clip
+    // must not admit anything outside the box, so the minimum edge ceils
+    // and the maximum floors. Rounding outward leaves a 1px sliver of
+    // overhanging geometry painted along each edge of the view, which is
+    // visible for art that overhangs the world box (the title logo).
+    let lx = (cx - ex).max(info.clip_rect.x);
+    let ty = (cy - ey).max(info.clip_rect.y);
+    let rx = (cx + ex).min(info.clip_rect.x + info.clip_rect.w);
+    let by = (cy + ey).min(info.clip_rect.y + info.clip_rect.h);
+    if !(rx > lx && by > ty) {
+        return None;
+    }
+    let sx = lx.ceil().max(0.0) as u32;
+    let sy = ty.ceil().max(0.0) as u32;
+    let ex2 = rx.floor().max(0.0) as u32;
+    let ey2 = by.floor().max(0.0) as u32;
+    if ex2 <= sx || ey2 <= sy {
+        return None;
+    }
+    Some((sx, sy, ex2 - sx, ey2 - sy))
+}
+
 /// Contain-fit of a `world` extent into a dp-space canvas: uniform
 /// scale plus centering offsets. `world_to_dp` / `dp_to_world` invert
 /// each other for any positive scale.
@@ -1232,7 +1280,31 @@ impl WgpuCallback for GpuViewport {
             if self.input.background.is_some() {
                 self.bg.paint(info, rpass, resources);
             }
-            batch::draw_batch_with_id_callback(self.batch_id.as_str(), rpass, resources);
+            // Contain-fit maps the world box into the middle of the canvas
+            // and leaves the rest as letterbox. Sprites outside the world
+            // box still project into that letterbox (the fit matrix has no
+            // clipping term), so they would paint over the bars. Clip the
+            // batch to the fitted box the way GML's `draw_set_clip_rect`
+            // bounded the room, then restore the callback's own clip for
+            // the overlay pass below.
+            let restore = (
+                info.clip_rect.x.ceil().max(0.0) as u32,
+                info.clip_rect.y.ceil().max(0.0) as u32,
+                ((info.clip_rect.x + info.clip_rect.w).floor().max(0.0) as u32)
+                    .saturating_sub(info.clip_rect.x.ceil().max(0.0) as u32),
+                ((info.clip_rect.y + info.clip_rect.h).floor().max(0.0) as u32)
+                    .saturating_sub(info.clip_rect.y.ceil().max(0.0) as u32),
+            );
+            match fitted_box_scissor(&info, self.input.world_size, fit, roll) {
+                Some(sc) => {
+                    rpass.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
+                    batch::draw_batch_with_id_callback(self.batch_id.as_str(), rpass, resources);
+                    rpass.set_scissor_rect(restore.0, restore.1, restore.2, restore.3);
+                }
+                None => {
+                    batch::draw_batch_with_id_callback(self.batch_id.as_str(), rpass, resources);
+                }
+            }
         }
         if !self.overlay_separate && self.input.overlay_color.is_some() {
             self.overlay.paint(info, rpass, resources);

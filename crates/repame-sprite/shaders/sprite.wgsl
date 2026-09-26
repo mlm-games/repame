@@ -20,6 +20,8 @@ struct Instance {
     @location(7) page: f32,
     @location(8) z: f32,
     @location(9) flags: u32,
+    // Half a texel in normalized UV.
+    @location(10) texel: f32,
 };
 
 struct Camera {
@@ -39,7 +41,15 @@ fn vs_main(@location(0) corner: vec2<f32>, inst: Instance) -> VertexOut {
     );
     var out: VertexOut;
     out.pos = camera.view_proj * vec4<f32>(world, 1.0);
-    out.uv = mix(inst.uv_min, inst.uv_max, corner + vec2<f32>(0.5, 0.5));
+    // UV rects are cell BOUNDARIES, so the outer half texel on each side
+    // belongs to the neighbouring atlas cell. Sampling it bleeds a
+    // hairline of adjacent art along every sprite edge; the fringe is
+    // sub-pixel, so it only shows when a given scale lands it on a pixel
+    // boundary. Inset to texel centres, never past the midpoint so a
+    // one-texel cell cannot invert.
+    let span = inst.uv_max - inst.uv_min;
+    let inset = min(vec2<f32>(inst.texel), span * 0.5);
+    out.uv = mix(inst.uv_min + inset, inst.uv_max - inset, corner + vec2<f32>(0.5, 0.5));
     out.tint = inst.tint;
     out.page = inst.page;
     return out;

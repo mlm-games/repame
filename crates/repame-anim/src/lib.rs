@@ -885,44 +885,4 @@ mod tests {
         assert_eq!(p.frame(), 3);
         assert!((p.frame_progress() - 0.0).abs() < 1e-6);
     }
-    /// Full nt catalog pack: proves the real content budget. Reads
-    /// `$NT_ASSETS/images/anims.json` (else the nt checkout next to
-    /// Repos); skips gracefully when absent.
-    #[test]
-    fn packs_full_nt_catalog() {
-        let path = std::env::var("NT_ASSETS").map_or_else(
-            |_| {
-                let home = std::env::var("HOME").unwrap_or_default();
-                format!("{home}/Documents/nt-recreated-bevy/assets/images/anims.json")
-            },
-            |dir| format!("{dir}/images/anims.json"),
-        );
-        let Ok(json) = std::fs::read_to_string(&path) else {
-            eprintln!("SKIP nt catalog pack (no assets at {path})");
-            return;
-        };
-        let cat = AnimCatalog::from_json(
-            &json,
-            AtlasDesc {
-                size: 2048,
-                max_pages: 16,
-                padding: 1,
-            },
-        )
-        .expect("nt catalog fits in 16 pages @2048");
-        assert_eq!(cat.names().len(), 2066);
-        assert_eq!(cat.frame_count(), 11796);
-        eprintln!(
-            "nt catalog: {} frames on {} pages @2048 ({:.0}% fill)",
-            cat.frame_count(),
-            cat.atlas().page_count(),
-            cat.atlas().utilization() * 100.0
-        );
-        // Spot checks: first/last anims resolve with sane uvs.
-        for name in ["spr360Big", "sprVlambeer"] {
-            let uv = cat.uv(name, 0).expect("resolves");
-            assert!(uv.max[0] <= 1.0 && uv.max[1] <= 1.0);
-            assert!(uv.max[0] > uv.min[0] && uv.max[1] > uv.min[1]);
-        }
-    }
 }

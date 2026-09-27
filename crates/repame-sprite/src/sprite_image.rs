@@ -4,8 +4,8 @@ use std::sync::Arc;
 use repose_core::locals::effective_density_scale;
 use repose_core::{
     Color, ControlVisual, ControlVisualState, Dp, ImageAlignment, ImageFilter, ImageFit,
-    ImageHandle, ImageHandleGuard, ImageSourceRect, Modifier, Rect, RenderContext, Scene,
-    SceneNode, View,
+    ImageHandle, ImageHandleGuard, ImagePaintStyle, ImageSourceRect, Modifier, Rect,
+    RenderContext, Scene, SceneNode, View,
 };
 use repose_ui::Box as UiBox;
 
@@ -308,10 +308,12 @@ impl SpriteImage {
                 rect,
                 handle,
                 tint,
-                fit: ImageFit::FillBounds,
-                filter: ImageFilter::Nearest,
-                source_rect: Some(source),
-                alignment: ImageAlignment::Center,
+                style: ImagePaintStyle {
+                    fit: ImageFit::FillBounds,
+                    filter: ImageFilter::Nearest,
+                    source_rect: Some(source),
+                    alignment: ImageAlignment::Center,
+                },
             });
         })
     }
@@ -356,10 +358,12 @@ impl SpriteImage {
                     rect: image_rect,
                     handle,
                     tint,
-                    fit: ImageFit::FillBounds,
-                    filter: ImageFilter::Nearest,
-                    source_rect: Some(source),
-                    alignment: ImageAlignment::Center,
+                    style: ImagePaintStyle {
+                        fit: ImageFit::FillBounds,
+                        filter: ImageFilter::Nearest,
+                        source_rect: Some(source),
+                        alignment: ImageAlignment::Center,
+                    },
                 });
                 scene.nodes.push(SceneNode::PopTransform);
             },
@@ -390,15 +394,17 @@ impl SpriteImage {
                     rect,
                     handle,
                     tint,
-                    fit: ImageFit::FillBounds,
-                    filter: ImageFilter::Nearest,
-                    source_rect: Some(ImageSourceRect::new(
-                        source.x,
-                        source.y,
-                        visible,
-                        source.height,
-                    )),
-                    alignment: ImageAlignment::Center,
+                    style: ImagePaintStyle {
+                        fit: ImageFit::FillBounds,
+                        filter: ImageFilter::Nearest,
+                        source_rect: Some(ImageSourceRect::new(
+                            source.x,
+                            source.y,
+                            visible,
+                            source.height,
+                        )),
+                        alignment: ImageAlignment::Center,
+                    },
                 });
             },
         )
@@ -463,8 +469,10 @@ mod tests {
         );
         let Some(SceneNode::Image {
             rect,
-            source_rect,
-            filter,
+            style:
+                ImagePaintStyle {
+                    source_rect, filter, ..
+                },
             ..
         }) = scene.nodes.first()
         else {
@@ -534,7 +542,11 @@ mod tests {
                 ControlVisualState::default(),
             );
         });
-        let Some(SceneNode::Image { source_rect, .. }) = scene.nodes.first() else {
+        let Some(SceneNode::Image {
+            style: ImagePaintStyle { source_rect, .. },
+            ..
+        }) = scene.nodes.first()
+        else {
             panic!("expected image node");
         };
         assert_eq!(*source_rect, Some(ImageSourceRect::new(0, 0, 1, 2)));

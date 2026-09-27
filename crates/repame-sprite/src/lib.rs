@@ -2,7 +2,7 @@
 //!
 //! The UI builds a [`FrameInput`] per frame (plain data, rebuilt
 //! during composition) and mounts [`Viewport2d`] as a Repose view, which
-//! draws the snapshot through a dp-space contain-fit and reports pointer
+//! draws the snapshot through a dp-space [`FitMode`] and reports pointer
 //! picks back in world coords. Unit discipline lives here, once:
 //! games work in world/dp units and do not touch physical px.
 //! Camera state lives in Repose signals, not in the renderer.
@@ -41,6 +41,18 @@ pub use sprite_image::{
     SpriteImage, SpriteImageAsset, SpriteImageDef, SpriteImageError, SpriteImageFrameDef,
 };
 
+/// How the world rect is framed when the canvas aspect differs from
+/// `world_size`. Named like Godot's `Window.stretch/aspect.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FitMode {
+    #[default]
+    Keep,
+    /// Same scale, world rect anchored at the canvas
+    /// origin, so the roomier axis reveals world past `world_size` and
+    /// the roomier side of the canvas is not wasted on bars.
+    Expand,
+}
+
 /// 2D orthographic camera. Owned by the UI (signals), copied into the
 /// snapshot per frame. `effective_center` is `center + offset`.
 /// Canvas, GPU batch, and picks derive from these fields together.
@@ -62,6 +74,9 @@ pub struct Camera2d {
     /// Roll in radians about the look point. Defaults to `0.0`.
     /// Applied on canvas, GPU, picks, and actor surfaces alike.
     pub roll: f32,
+    /// Aspect-fit policy when the canvas and `world_size` disagree.
+    /// Defaults to [`FitMode::Keep`].
+    pub fit: FitMode,
 }
 
 impl Default for Camera2d {
@@ -72,6 +87,7 @@ impl Default for Camera2d {
             units_per_pixel: 1.0,
             zoom: 1.0,
             roll: 0.0,
+            fit: FitMode::Keep,
         }
     }
 }
@@ -400,6 +416,11 @@ pub fn contain_fit(canvas_dp: [f32; 2], world: [f32; 2]) -> (f32, f32, f32) {
 /// Effective fit for one frame: base contain-fit scaled by
 /// `zoom / units_per_pixel`, re-centered. Default camera matches
 /// [`contain_fit`]; zoom 2 doubles on-screen size on both backends.
+///
+/// The scale is [`FitMode`]-independent — both modes scale uniformly, so
+/// neither can crop the world rect. Only the offsets differ: `Keep`
+/// centers the world box (bars on the roomier axis), `Expand` anchors it
+/// at the origin so the roomier axis shows world past `world_size`.
 pub fn effective_fit(canvas_dp: [f32; 2], world: [f32; 2], cam: &Camera2d) -> (f32, f32, f32) {
     let (base, _, _) = contain_fit(canvas_dp, world);
     let zoom = sane_positive(cam.zoom);
@@ -408,11 +429,14 @@ pub fn effective_fit(canvas_dp: [f32; 2], world: [f32; 2], cam: &Camera2d) -> (f
     if !s.is_finite() || s <= 1e-6 {
         return (1.0, 0.0, 0.0);
     }
-    (
-        s,
-        (canvas_dp[0] - world[0] * s) * 0.5,
-        (canvas_dp[1] - world[1] * s) * 0.5,
-    )
+    let (ox, oy) = match cam.fit {
+        FitMode::Keep => (
+            (canvas_dp[0] - world[0] * s) * 0.5,
+            (canvas_dp[1] - world[1] * s) * 0.5,
+        ),
+        FitMode::Expand => (0.0, 0.0),
+    };
+    (s, ox, oy)
 }
 
 /// GPU camera for the shared framing contract: matrix form of
@@ -1524,6 +1548,7 @@ mod tests {
             units_per_pixel: 0.5,
             zoom: 1.0,
             roll: 0.0,
+            fit: FitMode::Keep,
         };
         let input = FrameInput {
             cam,
@@ -1739,6 +1764,74 @@ mod tests {
         );
     }
 
+    /// `Keep` is the pre-`FitMode` framing: centered world box, bars on
+    /// the roomier axis, exactly `world` visible.
+    #[test]
+    fn fit_mode_keep_is_contain_fit() {
+        for (canvas, world) in [
+            ([1600.0, 900.0], [800.0, 800.0]),
+            ([900.0, 1600.0], [800.0, 800.0]),
+            ([1000.0, 1000.0], [800.0, 600.0]),
+        ] {
+            let cam = Camera2d {
+                center: Vec2::new(world[0] * 0.5, world[1] * 0.5),
+                fit: FitMode::Keep,
+                ..Default::default()
+            };
+            let fit = effective_fit(canvas, world, &cam);
+            assert_eq!(fit, contain_fit(canvas, world), "{canvas:?}/{world:?}");
+            let (s, ox, oy) = fit;
+            // World box lands centered and no larger than the canvas.
+            assert!((ox - (canvas[0] - world[0] * s) * 0.5).abs() < 1e-4);
+            assert!((oy - (canvas[1] - world[1] * s) * 0.5).abs() < 1e-4);
+            assert!(world[0] * s <= canvas[0] + 1e-4 && world[1] * s <= canvas[1] + 1e-4);
+        }
+    }
+
+    /// `Expand` keeps the same uniform scale but anchors the world box at
+    /// the canvas origin, so the roomier axis shows world past `world` and
+    /// nothing is ever cropped.
+    #[test]
+    fn fit_mode_expand_reveals_more_and_never_crops() {
+        let canvas = [1600.0, 900.0];
+        let world = [800.0, 800.0];
+        let cam = Camera2d {
+            center: Vec2::new(world[0] * 0.5, world[1] * 0.5),
+            fit: FitMode::Expand,
+            ..Default::default()
+        };
+        let (s, ox, oy) = effective_fit(canvas, world, &cam);
+        let keep = effective_fit(
+            canvas,
+            world,
+            &Camera2d {
+                fit: FitMode::Keep,
+                ..cam
+            },
+        );
+        assert_eq!(s, keep.0, "expand must not change the uniform scale");
+        assert_eq!((ox, oy), (0.0, 0.0), "expand anchors at the origin");
+        // Never crops: the whole world box still lands inside the canvas.
+        assert!(world[0] * s <= canvas[0] + 1e-4 && world[1] * s <= canvas[1] + 1e-4);
+        // Reveals more on the roomier axis, while the constraining axis
+        // still shows exactly `world` (its scale is unchanged).
+        let visible = [canvas[0] / s, canvas[1] / s];
+        let exact = [
+            (visible[0] - world[0]).abs() < 1e-3,
+            (visible[1] - world[1]).abs() < 1e-3,
+        ];
+        assert!(exact[0] ^ exact[1], "one axis exact: {visible:?}");
+        if exact[0] {
+            assert!(visible[1] > world[1], "y reveals: {visible:?}");
+        } else {
+            assert!(visible[0] > world[0], "x reveals: {visible:?}");
+        }
+        // Picks invert the expanded framing like any other.
+        let dp = world_to_dp([100.0, 700.0], world, cam.effective_center(), (s, ox, oy));
+        let back = dp_to_world(dp, world, cam.effective_center(), (s, ox, oy));
+        assert!((back[0] - 100.0).abs() < 1e-3 && (back[1] - 700.0).abs() < 1e-3);
+    }
+
     #[test]
     fn canvas_rotated_rect_matches_instance_rows() {
         // Canvas draws the mirror-adjusted quad plus a px-space rotation;
@@ -1750,6 +1843,7 @@ mod tests {
             units_per_pixel: 1.0,
             zoom: 1.0,
             roll: 0.3,
+            fit: FitMode::Keep,
         };
         let world_size = [800.0, 600.0];
         let canvas_dp = [800.0, 600.0];
@@ -1816,6 +1910,7 @@ mod tests {
             units_per_pixel: 0.0,
             zoom: 0.0,
             roll: 0.0,
+            fit: FitMode::Keep,
         };
         let m = bad.view_proj([0.0, 0.0]);
         assert!(m.is_finite(), "view_proj stays finite, got {m:?}");
@@ -1830,6 +1925,7 @@ mod tests {
             units_per_pixel: 1.0,
             zoom: 2.0,
             roll: 0.0,
+            fit: FitMode::Keep,
         };
         let world_size = [800.0, 600.0];
         let density = 1.25;
@@ -1916,6 +2012,7 @@ mod tests {
             units_per_pixel: 1.0,
             zoom: 1.0,
             roll: 0.0,
+            fit: FitMode::Keep,
         };
         assert_eq!(cam.effective_center(), [410.0, 290.0]);
         let fit = effective_fit(canvas_dp, world_size, &cam);
@@ -1940,19 +2037,24 @@ mod tests {
                 PointerId(3),
                 kind,
                 PointerEventKind::Down(PointerButton::Primary),
-                RVec2 { x: 10.0, y: 20.0 },
+                RVec2 { x: 15.0, y: 27.0 },
                 1.0,
                 Modifiers::default(),
             );
             ev.origin = RVec2 { x: 5.0, y: 7.0 };
+            ev.position = RVec2 { x: 10.0, y: 20.0 };
             ev
         };
         // Touch + pen forward to touch zones; mouse stays on clicks.
         assert!(is_touch(&ev_of(PointerKind::Touch)));
         assert!(is_touch(&ev_of(PointerKind::Pen)));
         assert!(!is_touch(&ev_of(PointerKind::Mouse)));
-        // Touch zones sample window-physical px (origin + position).
-        assert_eq!(screen_of(&ev_of(PointerKind::Touch)), [15.0, 27.0]);
+        // Touch zones sample window-physical px, which `window_position`
+        // already carries: `origin + position` reconstructs the same
+        // point rather than replacing it.
+        let ev = ev_of(PointerKind::Touch);
+        assert_eq!(ev.origin + ev.position, ev.position_in_window());
+        assert_eq!(screen_of(&ev), [15.0, 27.0]);
     }
 
     #[test]
@@ -2014,6 +2116,7 @@ mod tests {
             units_per_pixel: 1.0,
             zoom: 1.0,
             roll: 0.0,
+            fit: FitMode::Keep,
         };
         let fit = effective_fit(canvas_dp, world_size, &cam);
         let shaken = FrameGeom {
@@ -2050,6 +2153,7 @@ mod tests {
             units_per_pixel: 1.0,
             zoom: 1.0,
             roll: std::f32::consts::FRAC_PI_2,
+            fit: FitMode::Keep,
         };
         let world = [800.0, 600.0];
         let dp = [1000.0, 600.0];
@@ -2212,6 +2316,7 @@ mod unproject_tests {
             units_per_pixel: 1.0 / 3.0,
             zoom: 1.0,
             roll: 0.0,
+            fit: FitMode::Keep,
         };
         let world = Vec2::new(100.0, 60.0);
         let viewport_dp = [1024.0, 600.0];

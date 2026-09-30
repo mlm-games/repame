@@ -565,8 +565,8 @@ fn merged_quad_frame(
             let px = members.iter().map(|c| c[0]).max().unwrap_or(ox) + 1;
             (
                 [px as f32, oy as f32 + v as f32, oz as f32 + u as f32],
-                [0.0, 0.0, w as f32],
                 [0.0, h as f32, 0.0],
+                [0.0, 0.0, w as f32],
             )
         }
         [-1, 0, 0] => {
@@ -581,8 +581,8 @@ fn merged_quad_frame(
             let py = members.iter().map(|c| c[1]).max().unwrap_or(oy) + 1;
             (
                 [ox as f32 + u as f32, py as f32, oz as f32 + v as f32],
-                [w as f32, 0.0, 0.0],
                 [0.0, 0.0, h as f32],
+                [w as f32, 0.0, 0.0],
             )
         }
         [0, -1, 0] => {
@@ -605,8 +605,8 @@ fn merged_quad_frame(
             let pz = members.iter().map(|c| c[2]).min().unwrap_or(oz);
             (
                 [ox as f32 + u as f32, oy as f32 + v as f32, pz as f32],
-                [w as f32, 0.0, 0.0],
                 [0.0, h as f32, 0.0],
+                [w as f32, 0.0, 0.0],
             )
         }
     }
@@ -752,6 +752,35 @@ mod tests {
 
     fn grid_of(cells: &[([i32; 3], Cell)]) -> HashMap<[i32; 3], Cell> {
         cells.iter().cloned().collect()
+    }
+
+    #[test]
+    fn merged_frame_winds_outward() {
+        for dir in DIRS {
+            let (_, eu, ev) = merged_quad_frame(&[[0, 0, 0]], dir, 0, 0, 2, 3);
+            let cross = [
+                eu[1] * ev[2] - eu[2] * ev[1],
+                eu[2] * ev[0] - eu[0] * ev[2],
+                eu[0] * ev[1] - eu[1] * ev[0],
+            ];
+            for axis in 0..3 {
+                let want = dir[axis] as f32;
+                if want == 0.0 {
+                    assert_eq!(
+                        cross[axis], 0.0,
+                        "dir {:?} axis {} not axis aligned",
+                        dir, axis
+                    );
+                } else {
+                    assert!(
+                        cross[axis] * want > 0.0,
+                        "greedy quad for dir {:?} winds inward (cross {:?})",
+                        dir,
+                        cross
+                    );
+                }
+            }
+        }
     }
 
     #[test]

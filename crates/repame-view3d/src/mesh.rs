@@ -258,36 +258,36 @@ impl MeshGroup {
         if f(Vec3::X, Vec3::new(x1, y0 + h / 2.0, cz)) {
             self.push_quad(
                 [x1, y0, z0],
-                [x1, y0, z1],
-                [x1, y1, z1],
                 [x1, y1, z0],
+                [x1, y1, z1],
+                [x1, y0, z1],
                 shade(color, [1, 0, 0]),
             );
         }
         if f(Vec3::NEG_X, Vec3::new(x0, y0 + h / 2.0, cz)) {
             self.push_quad(
                 [x0, y0, z1],
-                [x0, y0, z0],
-                [x0, y1, z0],
                 [x0, y1, z1],
+                [x0, y1, z0],
+                [x0, y0, z0],
                 shade(color, [-1, 0, 0]),
             );
         }
         if f(Vec3::Z, Vec3::new(cx, y0 + h / 2.0, z1)) {
             self.push_quad(
                 [x1, y0, z1],
-                [x0, y0, z1],
-                [x0, y1, z1],
                 [x1, y1, z1],
+                [x0, y1, z1],
+                [x0, y0, z1],
                 shade(color, [0, 0, 1]),
             );
         }
         if f(Vec3::NEG_Z, Vec3::new(cx, y0 + h / 2.0, z0)) {
             self.push_quad(
                 [x0, y0, z0],
-                [x1, y0, z0],
-                [x1, y1, z0],
                 [x0, y1, z0],
+                [x1, y1, z0],
+                [x1, y0, z0],
                 shade(color, [0, 0, -1]),
             );
         }
@@ -328,6 +328,36 @@ mod tests {
         // Top + one facing side: 2 quads = 4 tris.
         assert_eq!(g.tri_count(), 4, "got {} tris", g.tri_count());
         assert!(g.positions.iter().all(|p| p.iter().all(|v| v.is_finite())));
+    }
+
+    #[test]
+    fn box_quads_wind_outward() {
+        let mut g = MeshGroup {
+            depth_test: true,
+            ..Default::default()
+        };
+        let eye = Vec3::new(10.0, 10.0, 10.0);
+        g.push_box(0.0, 0.0, 0.0, 2.0, 2.0, 2.0, [1.0, 1.0, 1.0], eye);
+        let center = Vec3::new(0.0, 1.0, 0.0);
+        let tris: Vec<&[[f32; 3]]> = g.positions.chunks(3).collect();
+        assert_eq!(
+            tris.len(),
+            6,
+            "expected 3 facing quads, got tris {}",
+            tris.len()
+        );
+        for t in tris {
+            let a = Vec3::from(t[0]);
+            let b = Vec3::from(t[1]);
+            let c = Vec3::from(t[2]);
+            let normal = (b - a).cross(c - a);
+            let centroid = (a + b + c) / 3.0;
+            assert!(
+                normal.dot(centroid - center) > 0.0,
+                "box quad winds inward: normal {:?}",
+                normal
+            );
+        }
     }
 
     #[test]

@@ -111,6 +111,12 @@ pub struct ImpulseRequest3d {
     pub torque: Vec3,
 }
 
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct VelocityRequest3d {
+    pub linear: Vec3,
+    pub angular: Vec3,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RayHit3d {
     pub distance: f32,
@@ -464,6 +470,27 @@ fn apply_impulse_requests(
     }
 }
 
+fn apply_velocity_requests(
+    mut world: ResMut<RapierWorld3d>,
+    mut requests: Query<(Entity, &mut VelocityRequest3d)>,
+) {
+    for (entity, mut request) in &mut requests {
+        let Some(&handle) = world.entity_to_body.get(&entity) else {
+            continue;
+        };
+        if let Some(body) = world.bodies.get_mut(handle) {
+            if request.linear != Vec3::ZERO {
+                body.set_linvel(to_vec(request.linear), true);
+            }
+            if request.angular != Vec3::ZERO {
+                body.set_angvel(to_vec(request.angular), true);
+            }
+        }
+        request.linear = Vec3::ZERO;
+        request.angular = Vec3::ZERO;
+    }
+}
+
 fn step_rapier(mut world: ResMut<RapierWorld3d>, time: ResMut<SimTime>) {
     world.step_once(time.delta_secs);
 }
@@ -535,6 +562,7 @@ pub fn init_world(world: &mut bevy_ecs::prelude::World, gravity: Vec3, length_un
 pub fn register_rapier3d_systems(sim: &mut Sim) {
     sim.add_chained_systems(
         (
+            despawn_cleanup,
             spawn_bodies,
             spawn_spherical_joints,
             spawn_fixed_joints,
@@ -542,9 +570,9 @@ pub fn register_rapier3d_systems(sim: &mut Sim) {
             spawn_rope_joints,
             spawn_spring_joints,
             apply_impulse_requests,
+            apply_velocity_requests,
             step_rapier,
             sync_snapshots,
-            despawn_cleanup,
         )
             .chain(),
     );
@@ -699,6 +727,147 @@ mod tests {
         }
         let settled = *sim.world.get::<BodySnapshot3d>(entity).unwrap();
         assert!(settled.linvel.x.abs() < pushed.linvel.x.abs());
+    }
+
+    #[test]
+    fn velocity_request_sets_velocity_and_zeroes() {
+        let mut sim = sim_with_world();
+        let entity = sim
+            .world
+            .spawn((
+                RapierBody3d {
+                    spawn_pos: Vec3::ZERO,
+                    gravity_scale: 0.0,
+                    ..Default::default()
+                },
+                VelocityRequest3d::default(),
+                BodySnapshot3d::default(),
+            ))
+            .id();
+        sim.tick();
+        sim.world.entity_mut(entity).insert(VelocityRequest3d {
+            linear: Vec3::new(4.0, -2.0, 1.5),
+            angular: Vec3::new(0.5, 2.0, -1.0),
+        });
+        sim.tick();
+        let request = *sim.world.get::<VelocityRequest3d>(entity).unwrap();
+        assert_eq!(request.linear, Vec3::ZERO);
+        assert_eq!(request.angular, Vec3::ZERO);
+        let world = sim.world.resource::<RapierWorld3d>();
+        let body = world
+            .bodies
+            .get(world.body_handle(entity).unwrap())
+            .unwrap();
+        let linvel = body.linvel();
+        let angvel = body.angvel();
+        assert!(
+            (Vec3::new(linvel.x, linvel.y, linvel.z) - Vec3::new(4.0, -2.0, 1.5)).length() < 1e-4
+        );
+        assert!(
+            (Vec3::new(angvel.x, angvel.y, angvel.z) - Vec3::new(0.5, 2.0, -1.0)).length() < 1e-4
+        );
+    }
+
+    #[test]
+    fn velocity_request_shows_in_snapshot_and_applies_once() {
+        let mut sim = sim_with_world();
+        let entity = sim
+            .world
+            .spawn((
+                RapierBody3d {
+                    spawn_pos: Vec3::ZERO,
+                    gravity_scale: 0.0,
+                    ..Default::default()
+                },
+                VelocityRequest3d::default(),
+                BodySnapshot3d::default(),
+            ))
+            .id();
+        sim.tick();
+        sim.world.entity_mut(entity).insert(VelocityRequest3d {
+            linear: Vec3::new(3.0, 0.0, -2.0),
+            angular: Vec3::new(0.0, 1.0, 0.0),
+        });
+        sim.tick();
+        let snapshot = *sim.world.get::<BodySnapshot3d>(entity).unwrap();
+        assert!((snapshot.linvel - Vec3::new(3.0, 0.0, -2.0)).length() < 1e-4);
+        assert!((snapshot.angvel - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-4);
+        assert!(snapshot.pos.length() > 0.0);
+        for _ in 0..60 {
+            sim.tick();
+        }
+        let later = *sim.world.get::<BodySnapshot3d>(entity).unwrap();
+        assert!(
+            (later.linvel - snapshot.linvel).length() < 1e-3,
+            "zeroed request must not re-apply a zero velocity set"
+        );
+        assert!((later.angvel - snapshot.angvel).length() < 1e-3);
+    }
+
+    #[test]
+    fn remove_reinsert_body_respawns_with_new_kind() {
+        let mut sim = sim_with_world();
+        let entity = sim
+            .world
+            .spawn((
+                RapierBody3d {
+                    kind: BodyKind::Dynamic,
+                    spawn_pos: Vec3::new(0.0, 10.0, 0.0),
+                    half_extents: Vec3::splat(0.5),
+                    ..Default::default()
+                },
+                BodySnapshot3d::default(),
+            ))
+            .id();
+        sim.tick();
+        let dynamic_handle = sim.world.resource::<RapierWorld3d>().body_handle(entity);
+        assert!(dynamic_handle.is_some());
+        for _ in 0..30 {
+            sim.tick();
+        }
+        let fallen = *sim.world.get::<BodySnapshot3d>(entity).unwrap();
+        assert!(fallen.pos.y < 9.0);
+
+        sim.world.entity_mut(entity).remove::<RapierBody3d>();
+        sim.world.entity_mut(entity).insert(RapierBody3d {
+            kind: BodyKind::Kinematic,
+            spawn_pos: Vec3::new(0.0, 10.0, 0.0),
+            half_extents: Vec3::splat(0.5),
+            ..Default::default()
+        });
+        sim.tick();
+        let kinematic_handle = sim.world.resource::<RapierWorld3d>().body_handle(entity);
+        assert!(
+            kinematic_handle.is_some(),
+            "respawned body must exist on the next tick"
+        );
+        assert_ne!(kinematic_handle, dynamic_handle);
+        assert_eq!(sim.world.resource::<RapierWorld3d>().body_count(), 1);
+        let respawned = *sim.world.get::<BodySnapshot3d>(entity).unwrap();
+        assert!((respawned.pos - Vec3::new(0.0, 10.0, 0.0)).length() < 1e-3);
+        for _ in 0..30 {
+            sim.tick();
+        }
+        let kinematic = *sim.world.get::<BodySnapshot3d>(entity).unwrap();
+        assert!((kinematic.pos - Vec3::new(0.0, 10.0, 0.0)).length() < 1e-3);
+
+        sim.world.entity_mut(entity).remove::<RapierBody3d>();
+        sim.world.entity_mut(entity).insert(RapierBody3d {
+            kind: BodyKind::Dynamic,
+            spawn_pos: Vec3::new(0.0, 10.0, 0.0),
+            half_extents: Vec3::splat(0.5),
+            ..Default::default()
+        });
+        sim.tick();
+        let dynamic_again = sim.world.resource::<RapierWorld3d>().body_handle(entity);
+        assert!(dynamic_again.is_some());
+        assert_ne!(dynamic_again, kinematic_handle);
+        assert_eq!(sim.world.resource::<RapierWorld3d>().body_count(), 1);
+        for _ in 0..30 {
+            sim.tick();
+        }
+        let refallen = *sim.world.get::<BodySnapshot3d>(entity).unwrap();
+        assert!(refallen.pos.y < 9.0);
     }
 
     #[test]

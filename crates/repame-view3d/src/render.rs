@@ -3,6 +3,7 @@
 //! Offscreen target and blit live in `DepthComposite`.
 //! Texture array is fed from [`SceneUpload`]s, one page per group.
 //! Frustum cull runs per group in `finish`. `depth_test = false` overlays skip cull.
+const SCENE_TARGET_SAMPLE_COUNT: u32 = 1;
 const SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -1974,7 +1975,7 @@ impl SceneBatch {
                     bias: wgpu::DepthBiasState::default(),
                 }),
                 multisample: wgpu::MultisampleState {
-                    count: screen.sample_count,
+                    count: SCENE_TARGET_SAMPLE_COUNT,
                     mask: !0,
                     alpha_to_coverage_enabled: false,
                 },

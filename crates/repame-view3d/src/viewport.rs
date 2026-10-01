@@ -164,6 +164,14 @@ pub enum View3dEvent {
     Orbit { dx: f32, dy: f32 },
     /// Pan delta, in px (shift/middle/right-drag).
     Pan { dx: f32, dy: f32 },
+    /// Raw pointer-move-while-pressed delta, in px, with the button held.
+    /// Fires for every such move regardless of button, alongside the
+    /// derived [`View3dEvent::Orbit`] / [`View3dEvent::Pan`] delta.
+    Drag {
+        button: PointerButton,
+        dx: f32,
+        dy: f32,
+    },
     /// Multiplicative zoom factor (wheel).
     Zoom { factor: f32 },
     /// Ground-plane (y = 0) point under a clean click, if the ray hits.
@@ -175,6 +183,11 @@ pub enum View3dEvent {
     /// world-space point, so agents select while terrain falls through
     /// to [`View3dEvent::GroundClick`].
     MeshClick { pick_id: u32, point: [f32; 3] },
+    /// Camera ray at the pointer pixel on pointer-move: `eye` origin,
+    /// unit `dir` into the scene (same ray [`resolve_click`] inverts
+    /// through). Leads each move's events, so consumers always hold the
+    /// current ray before the accompanying pick or drag delta.
+    HoverRay { eye: [f32; 3], dir: [f32; 3] },
     /// Cursor pick under pointer-move: `Some` when a pickable group is
     /// under the cursor, else the ground-plane fallback. Emitted per move
     /// event (AABB early-out; unpickable scenes cost nothing).
@@ -236,13 +249,80 @@ fn click_within_slop(a: [f32; 2], b: [f32; 2]) -> bool {
     dx * dx + dy * dy <= CLICK_SLOP_PX * CLICK_SLOP_PX
 }
 
-/// Press state: press position + last position, both viewport-local px.
+/// Events for one pointer move, in emission order: the camera ray at the
+/// pixel ([`View3dEvent::HoverRay`]) leads, then the press-state payload —
+/// the derived orbit/pan delta plus the raw [`View3dEvent::Drag`] when a
+/// button is down, else the hover pick ([`View3dEvent::HoverMesh`] /
+/// [`View3dEvent::Hover`]). No events for a pressed zero-delta move.
+/// Function of the snapshot only, shared by the pointer-move handler and
+/// tests.
+fn resolve_move(
+    d: Option<&DragState>,
+    cam: &OrbitCamera,
+    viewport_px: [f32; 2],
+    px: [f32; 2],
+    groups: &[MeshGroup],
+) -> Vec<View3dEvent> {
+    let a = Frame3d::aspect(viewport_px);
+    let vp = Vec2::new(viewport_px[0].max(1.0), viewport_px[1].max(1.0));
+    let p = Vec2::new(px[0], px[1]);
+    let (eye, dir) = cam.screen_ray(a, vp, p);
+    let ray = View3dEvent::HoverRay {
+        eye: eye.into(),
+        dir: dir.into(),
+    };
+    match d {
+        Some(d) => {
+            let dx = px[0] - d.last[0];
+            let dy = px[1] - d.last[1];
+            if dx.abs() + dy.abs() <= 0.0 {
+                return Vec::new();
+            }
+            let gesture = if d.pan {
+                View3dEvent::Pan { dx, dy }
+            } else {
+                View3dEvent::Orbit { dx, dy }
+            };
+            vec![
+                ray,
+                gesture,
+                View3dEvent::Drag {
+                    button: d.button,
+                    dx,
+                    dy,
+                },
+            ]
+        }
+        None => {
+            let mesh: Option<MeshHit> = pick_ray(eye, dir, groups);
+            let ground = cam.ground_point(a, vp, p);
+            let pick = match (mesh, ground) {
+                (Some(hit), _) => View3dEvent::HoverMesh {
+                    pick_id: Some(hit.pick_id),
+                    x: hit.point[0],
+                    z: hit.point[2],
+                },
+                (None, Some(gp)) => View3dEvent::HoverMesh {
+                    pick_id: None,
+                    x: gp.x,
+                    z: gp.y,
+                },
+                (None, None) => View3dEvent::Hover { x: None, z: None },
+            };
+            vec![ray, pick]
+        }
+    }
+}
+
+/// Press state: press position + last position, both viewport-local px,
+/// plus the button that started the press.
 #[derive(Clone, Copy)]
 struct DragState {
     start: [f32; 2],
     last: [f32; 2],
     /// True for pan gestures (non-primary button or shift held).
     pan: bool,
+    button: PointerButton,
 }
 
 /// 3D viewport view. Owns nothing render-side; gesture handling and camera
@@ -294,7 +374,6 @@ pub fn Viewport3d(
     let on_event = Rc::new(on_event);
     let on_move = on_event.clone();
     let on_up_click = on_event.clone();
-    let on_hover = on_event.clone();
     let on_zoom = on_event;
 
     let drag: Rc<std::cell::Cell<Option<DragState>>> = Rc::new(std::cell::Cell::new(None));
@@ -313,54 +392,34 @@ pub fn Viewport3d(
         .on_pointer_down(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
             let primary = matches!(ev.event, PointerEventKind::Down(PointerButton::Primary));
+            let button = match ev.event {
+                PointerEventKind::Down(b) => b,
+                _ => PointerButton::Primary,
+            };
             drag_down.set(Some(DragState {
                 start: [p.x, p.y],
                 last: [p.x, p.y],
                 pan: !primary || ev.modifiers.shift,
+                button,
             }));
         })
         .on_pointer_move(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
-            match drag_move.take() {
-                Some(mut d) => {
-                    let dx = p.x - d.last[0];
-                    let dy = p.y - d.last[1];
-                    d.last = [p.x, p.y];
-                    drag_move.set(Some(d));
-                    if dx.abs() + dy.abs() > 0.0 {
-                        if d.pan {
-                            on_move(View3dEvent::Pan { dx, dy });
-                        } else {
-                            on_move(View3dEvent::Orbit { dx, dy });
-                        }
-                    }
-                }
-                None => {
-                    // Hover: mesh pick first (same ray the GPU camera
-                    // used), ground-plane fallback when nothing pickable
-                    // is under the cursor.
-                    let g = hover_geom.get();
-                    let vpx = [g.viewport_px[0].max(1.0), g.viewport_px[1].max(1.0)];
-                    let a = Frame3d::aspect(g.viewport_px);
-                    let vp = Vec2::new(vpx[0], vpx[1]);
-                    let p = Vec2::new(p.x, p.y);
-                    let (origin, dir) = hover_input.cam.screen_ray(a, vp, p);
-                    let mesh: Option<MeshHit> = pick_ray(origin, dir, &hover_input.groups);
-                    let ground = hover_input.cam.ground_point(a, vp, p);
-                    match (mesh, ground) {
-                        (Some(hit), _) => on_hover(View3dEvent::HoverMesh {
-                            pick_id: Some(hit.pick_id),
-                            x: hit.point[0],
-                            z: hit.point[2],
-                        }),
-                        (None, Some(gp)) => on_hover(View3dEvent::HoverMesh {
-                            pick_id: None,
-                            x: gp.x,
-                            z: gp.y,
-                        }),
-                        (None, None) => on_hover(View3dEvent::Hover { x: None, z: None }),
-                    }
-                }
+            let g = hover_geom.get();
+            let mut d = drag_move.take();
+            let events = resolve_move(
+                d.as_ref(),
+                &hover_input.cam,
+                g.viewport_px,
+                [p.x, p.y],
+                &hover_input.groups,
+            );
+            if let Some(d) = d.as_mut() {
+                d.last = [p.x, p.y];
+            }
+            drag_move.set(d);
+            for event in events {
+                on_move(event);
             }
         })
         .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
@@ -556,7 +615,7 @@ impl WgpuCallback for GpuViewport3d {
 
 #[cfg(test)]
 mod tests {
-    use super::super::camera::OrbitCamera;
+    use super::super::camera::{NEAR, OrbitCamera};
     use super::*;
 
     fn orbit() -> OrbitCamera {
@@ -641,5 +700,90 @@ mod tests {
             event.is_none() || matches!(event, Some(View3dEvent::GroundClick { .. })),
             "{event:?}"
         );
+    }
+
+    #[test]
+    fn drag_carries_button_and_delta_per_pressed_move() {
+        for (button, pan) in [
+            (PointerButton::Primary, false),
+            (PointerButton::Secondary, true),
+            (PointerButton::Tertiary, true),
+        ] {
+            let mut d = DragState {
+                start: [100.0, 100.0],
+                last: [100.0, 100.0],
+                pan,
+                button,
+            };
+            let evs = resolve_move(Some(&d), &orbit(), [800.0, 600.0], [112.0, 95.0], &[]);
+            assert_eq!(evs.len(), 3, "{button:?}: {evs:?}");
+            assert!(matches!(evs[0], View3dEvent::HoverRay { .. }), "{evs:?}");
+            if pan {
+                assert!(
+                    matches!(evs[1], View3dEvent::Pan { dx: 12.0, dy: -5.0 }),
+                    "{button:?}: {evs:?}"
+                );
+            } else {
+                assert!(
+                    matches!(evs[1], View3dEvent::Orbit { dx: 12.0, dy: -5.0 }),
+                    "{button:?}: {evs:?}"
+                );
+            }
+            assert!(
+                matches!(
+                    evs[2],
+                    View3dEvent::Drag { button: b, dx: 12.0, dy: -5.0 } if b == button
+                ),
+                "{button:?}: {evs:?}"
+            );
+            d.last = [112.0, 95.0];
+            let evs = resolve_move(Some(&d), &orbit(), [800.0, 600.0], [110.0, 100.0], &[]);
+            assert!(
+                matches!(
+                    evs[2],
+                    View3dEvent::Drag { button: b, dx: -2.0, dy: 5.0 } if b == button
+                ),
+                "second move: {evs:?}"
+            );
+        }
+        let still = DragState {
+            start: [100.0, 100.0],
+            last: [100.0, 100.0],
+            pan: false,
+            button: PointerButton::Primary,
+        };
+        let evs = resolve_move(Some(&still), &orbit(), [800.0, 600.0], [100.0, 100.0], &[]);
+        assert!(evs.is_empty(), "{evs:?}");
+    }
+
+    #[test]
+    fn hover_ray_leads_the_hover_pair_with_unit_dir_into_scene() {
+        let cam = orbit();
+        let evs = resolve_move(None, &cam, [800.0, 600.0], [400.0, 300.0], &[slab()]);
+        assert_eq!(evs.len(), 2, "{evs:?}");
+        let View3dEvent::HoverRay { eye, dir } = evs[0] else {
+            panic!("ray must lead the hover pair: {evs:?}");
+        };
+        assert!(
+            matches!(
+                evs[1],
+                View3dEvent::HoverMesh {
+                    pick_id: Some(7),
+                    ..
+                }
+            ),
+            "{evs:?}"
+        );
+        let eye = Vec3::from_array(eye);
+        let dir = Vec3::from_array(dir);
+        assert!((dir.length() - 1.0).abs() < 1e-5, "unit dir: {dir:?}");
+        // Ray origin sits on the near plane (the origin resolve_click
+        // picks through), so the center ray starts NEAR from the eye.
+        assert!(
+            ((eye - cam.eye()).length() - NEAR).abs() < 1e-4,
+            "eye: {eye:?} vs {:?}",
+            cam.eye()
+        );
+        assert!(dir.dot(cam.target - eye) > 0.0, "into the scene: {dir:?}");
     }
 }

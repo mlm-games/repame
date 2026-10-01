@@ -3,13 +3,14 @@
 //! window; `duck` dips under dialog and releases. `update(dt)` advances
 //! the duck envelope.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
 use web_workers::sync::mpsc::Sender;
 
 use crate::command::{PlayCmd, RealtimeCommand, SharedFrames};
+use crate::loader::{DecodeDone, DecodeJob, Loader, spawn as spawn_loader};
 use crate::{AudioChannel, AudioState, decode_bytes, retarget_to, to_device_rate};
 
 /// One intensity stem: audible across `[lo, hi]` with a linear ramp.
@@ -65,6 +66,12 @@ pub struct Music {
     last_sent_factor: f32,
     tx: Option<Sender<RealtimeCommand>>,
     state: Option<Arc<AudioState>>,
+    /// Background decode worker (`None` on noop/thread-less targets).
+    loader: Option<Loader>,
+    /// Track names queued on the loader but not decoded yet.
+    pending: HashSet<String>,
+    /// `play` requested while the track was still decoding.
+    desired: Option<(String, f32)>,
 }
 
 impl Music {
@@ -80,6 +87,9 @@ impl Music {
             last_sent_factor: 1.0,
             tx: None,
             state: None,
+            loader: None,
+            pending: HashSet::new(),
+            desired: None,
         }
     }
 
@@ -93,11 +103,30 @@ impl Music {
             }
         }
         self.tx = Some(tx);
+        self.loader = spawn_loader(state.clone());
         self.state = Some(state);
     }
 
-    /// Register a looping track (main mix).
+    /// Register a looping track (main mix). With a live engine the decode
+    /// runs on the loader worker: `Ok` means queued (or already present)
+    /// and [`Music::update`] completes it. No worker (noop, thread-less
+    /// targets) decodes inline as before.
     pub fn load_track(&mut self, name: &str, gain: f32, main: &[u8]) -> Result<()> {
+        if self.tracks.contains_key(name) || self.pending.contains(name) {
+            return Ok(());
+        }
+        if let Some(loader) = &self.loader {
+            loader
+                .jobs
+                .send_block(DecodeJob::Track {
+                    name: name.to_owned(),
+                    gain,
+                    bytes: main.to_vec(),
+                })
+                .map_err(|_| anyhow::anyhow!("audio loader stopped"))?;
+            self.pending.insert(name.to_owned());
+            return Ok(());
+        }
         let main = Arc::new(to_device_rate(decode_bytes(main)?, self.state.as_deref())?);
         self.tracks.insert(
             name.to_string(),
@@ -110,8 +139,24 @@ impl Music {
         Ok(())
     }
 
-    /// Add an intensity stem to a registered track.
+    /// Add an intensity stem to a registered (or queued) track. With a
+    /// worker the stem queues FIFO behind its track; without one it decodes
+    /// inline.
     pub fn add_stem(&mut self, name: &str, bytes: &[u8], def: StemDef) -> Result<()> {
+        if !self.tracks.contains_key(name) && !self.pending.contains(name) {
+            anyhow::bail!("unknown music track `{name}`");
+        }
+        if let Some(loader) = &self.loader {
+            loader
+                .jobs
+                .send_block(DecodeJob::Stem {
+                    track: name.to_owned(),
+                    bytes: bytes.to_vec(),
+                    def,
+                })
+                .map_err(|_| anyhow::anyhow!("audio loader stopped"))?;
+            return Ok(());
+        }
         let sound = Arc::new(to_device_rate(decode_bytes(bytes)?, self.state.as_deref())?);
         let track = self
             .tracks
@@ -140,7 +185,8 @@ impl Music {
         self.current.as_ref().map(|c| c.name.as_str())
     }
 
-    /// Crossfade to a track (`0.0` is a hard cut). Unknown names return false.
+    /// Crossfade to a track (`0.0` is a hard cut). Unknown names return
+    /// false; a track still decoding queues the play and returns true.
     pub fn play(&mut self, name: &str, fade_secs: f32) -> bool {
         let (tx, state) = match (&self.tx, &self.state) {
             (Some(tx), Some(state)) => (tx, state),
@@ -149,10 +195,18 @@ impl Music {
         let track = match self.tracks.get(name) {
             Some(t) => t,
             None => {
+                if self.pending.contains(name) {
+                    // Still on the loader worker: start when it lands.
+                    self.desired = Some((name.to_owned(), fade_secs));
+                    return true;
+                }
+                self.desired = None;
                 log::warn!("unknown music track `{name}`");
                 return false;
             }
         };
+        // A decided play supersedes any deferred one.
+        self.desired = None;
         let fade = fade_secs.max(0.0);
         // Out with the old.
         if let Some(old) = self.current.take() {
@@ -205,8 +259,9 @@ impl Music {
         true
     }
 
-    /// Hard stop with a fade-out.
+    /// Hard stop with a fade-out. Also cancels a deferred play.
     pub fn stop(&mut self, fade_secs: f32) {
+        self.desired = None;
         if let (Some(tx), Some(old)) = (&self.tx, self.current.take()) {
             for (voice, _) in old.voices {
                 let _ = tx.send_spin(RealtimeCommand::Fade {
@@ -235,8 +290,63 @@ impl Music {
         self.retarget(0.05);
     }
 
+    /// Pull finished decodes off the loader worker and start any `play`
+    /// that was requested while its track was still decoding (stems from
+    /// the same batch are attached first).
+    fn drain_loader(&mut self) {
+        let mut done = Vec::new();
+        if let Some(loader) = &self.loader {
+            while let Ok(outcome) = loader.done.try_recv() {
+                done.push(outcome);
+            }
+        }
+        for outcome in done {
+            match outcome {
+                DecodeDone::Track { name, gain, main } => {
+                    self.pending.remove(&name);
+                    self.tracks.insert(
+                        name,
+                        Track {
+                            gain: gain.max(0.0),
+                            main,
+                            stems: Vec::new(),
+                        },
+                    );
+                }
+                DecodeDone::Stem { track, sound, def } => match self.tracks.get_mut(&track) {
+                    Some(t) => t.stems.push(Stem {
+                        sound,
+                        lo: def.lo.clamp(0.0, 1.0),
+                        hi: def.hi.clamp(0.0, 1.0).max(def.lo.clamp(0.0, 1.0)),
+                        gain: def.gain.max(0.0),
+                    }),
+                    None => log::warn!("music stem `{track}` arrived without its track"),
+                },
+                DecodeDone::TrackFailed { name, error } => {
+                    self.pending.remove(&name);
+                    if self.desired.as_ref().is_some_and(|(n, _)| n == &name) {
+                        self.desired = None;
+                    }
+                    log::warn!("music track `{name}` failed to load: {error}");
+                }
+                DecodeDone::StemFailed { track, error } => {
+                    log::warn!("music stem `{track}` failed to load: {error}");
+                }
+            }
+        }
+        if self
+            .desired
+            .as_ref()
+            .is_some_and(|(n, _)| self.tracks.contains_key(n))
+        {
+            let (name, fade) = self.desired.take().expect("checked above");
+            let _ = self.play(&name, fade);
+        }
+    }
+
     /// Advance the duck envelope. Call from the frame pump with real dt.
     pub fn update(&mut self, dt_secs: f32) {
+        self.drain_loader();
         let dt = dt_secs.max(0.0);
         match &mut self.duck_env {
             DuckEnv::Idle => return,
@@ -357,6 +467,18 @@ mod tests {
         synth_sine_wav(freq, 0.2, 22050)
     }
 
+    /// Pump `update` until an async decode has landed on the loader worker.
+    fn settle(music: &mut Music, ready: impl Fn(&Music) -> bool) {
+        for _ in 0..5000 {
+            music.update(0.0);
+            if ready(music) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("async music load never settled");
+    }
+
     fn load_two_stems(music: &mut Music) {
         let main = wav(220.0);
         let drums = wav(330.0);
@@ -384,6 +506,10 @@ mod tests {
                 },
             )
             .unwrap();
+        // FIFO worker: track first, then both stems.
+        settle(music, |m| {
+            m.tracks.get("battle").is_some_and(|t| t.stems.len() == 2)
+        });
     }
 
     fn drain(thread: &crate::ThreadAudioLink) -> Vec<RealtimeCommand> {
@@ -414,6 +540,9 @@ mod tests {
                 },
             )
             .unwrap();
+        settle(&mut music, |m| {
+            m.tracks.get("battle").is_some_and(|t| t.stems.len() == 1)
+        });
         assert!(music.play("battle", 0.0));
         let mut played = Vec::new();
         while let Ok(cmd) = thread.rx.try_recv() {
@@ -460,6 +589,7 @@ mod tests {
         load_two_stems(&mut music);
         let calm = wav(110.0);
         music.load_track("calm", 0.6, &calm).unwrap();
+        settle(&mut music, |m| m.tracks.contains_key("calm"));
         music.play("battle", 1.0);
         let _ = drain(&thread);
         music.play("calm", 3.0);

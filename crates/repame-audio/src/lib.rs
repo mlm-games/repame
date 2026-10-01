@@ -10,6 +10,7 @@ mod command;
 mod cue;
 mod decode;
 mod engine;
+mod loader;
 mod music;
 mod rig;
 mod source;

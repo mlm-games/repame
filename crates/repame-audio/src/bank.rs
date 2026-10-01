@@ -11,8 +11,7 @@ use anyhow::Result;
 use web_workers::sync::mpsc::Sender;
 
 use crate::command::{PlayCmd, RealtimeCommand, SharedFrames};
-use crate::decode_bytes;
-use crate::{AudioChannel, AudioState};
+use crate::{AudioChannel, AudioState, decode_bytes, retarget_to, to_device_rate};
 
 /// How a cue picks among its variations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -144,6 +143,12 @@ impl SoundBank {
 
     /// Wire to an audio thread.
     pub fn attach(&mut self, tx: Sender<RealtimeCommand>, state: Arc<AudioState>) {
+        let target = state.sample_rate();
+        for cue in self.cues.values_mut() {
+            for sound in &mut cue.sounds {
+                retarget_to(sound, target);
+            }
+        }
         self.tx = Some(tx);
         self.state = Some(state);
     }
@@ -155,7 +160,10 @@ impl SoundBank {
         }
         let mut sounds = Vec::with_capacity(files.len());
         for bytes in files {
-            sounds.push(Arc::new(decode_bytes(bytes)?));
+            sounds.push(Arc::new(to_device_rate(
+                decode_bytes(bytes)?,
+                self.state.as_deref(),
+            )?));
         }
         self.cues.insert(
             name.to_string(),
@@ -308,6 +316,28 @@ mod tests {
         let (mut bank, _game, _thread) = banked();
         assert_eq!(bank.play("nope"), None);
         assert_eq!(bank.live_count("nope"), 0);
+    }
+
+    #[test]
+    fn cues_convert_to_device_rate_on_load_and_attach() {
+        let (game, thread) = audio_link();
+        thread.state.set_sample_rate(48000);
+        let mut bank = SoundBank::new();
+        let early = synth_sine_wav(440.0, 0.05, 32000);
+        bank.load("early", CueDef::default(), &[&early]).unwrap();
+        bank.attach(game.tx.clone(), game.state.clone());
+        let late = synth_sine_wav(440.0, 0.05, 32000);
+        bank.load("late", CueDef::default(), &[&late]).unwrap();
+        assert!(bank.play("early").is_some());
+        assert!(bank.play("late").is_some());
+        let mut played = Vec::new();
+        while let Ok(cmd) = thread.rx.try_recv() {
+            if let RealtimeCommand::Play(p) = cmd {
+                played.push((p.sound.sample_rate, p.sound.len_frames()));
+            }
+        }
+        // 0.05 s at 32 kHz = 1600 frames; 48 kHz holds 2400.
+        assert_eq!(played, vec![(48000, 2400), (48000, 2400)]);
     }
 
     #[test]

@@ -57,6 +57,15 @@ fn pan_gains(pan: f32) -> (f32, f32) {
     (angle.cos(), angle.sin())
 }
 
+/// Catmull-Rom through `p1`..`p2` at fractional offset `t`. Exact at
+/// `t = 0`, so integer steps stay sample-identical.
+fn catmull(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
+    let b = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+    let c = 0.5 * (p2 - p0);
+    ((a * t + b) * t + c) * t + p1
+}
+
 /// Drain one command batch, then mix all voices into `out`.
 pub(crate) fn render_block(core: &mut EngineCore, out: &mut [f32], out_channels: usize) {
     while let Ok(cmd) = core.link.rx.try_recv() {
@@ -160,19 +169,33 @@ pub(crate) fn render_block(core: &mut EngineCore, out: &mut [f32], out_channels:
             }
             let i0 = voice.pos as usize;
             let frac = (voice.pos - i0 as f64) as f32;
+            let im1 = i0.saturating_sub(1);
             let i1 = (i0 + 1).min(len - 1);
+            let i2 = (i0 + 2).min(len - 1);
             let (l, r) = if n_ch >= 2 {
-                let base0 = i0 * 2;
-                let base1 = i1 * 2;
-                let l = voice.sound.frames[base0]
-                    + (voice.sound.frames[base1] - voice.sound.frames[base0]) * frac;
-                let r = voice.sound.frames[base0 + 1]
-                    + (voice.sound.frames[base1 + 1] - voice.sound.frames[base0 + 1]) * frac;
+                let l = catmull(
+                    voice.sound.frames[im1 * 2],
+                    voice.sound.frames[i0 * 2],
+                    voice.sound.frames[i1 * 2],
+                    voice.sound.frames[i2 * 2],
+                    frac,
+                );
+                let r = catmull(
+                    voice.sound.frames[im1 * 2 + 1],
+                    voice.sound.frames[i0 * 2 + 1],
+                    voice.sound.frames[i1 * 2 + 1],
+                    voice.sound.frames[i2 * 2 + 1],
+                    frac,
+                );
                 (l, r)
             } else {
-                let a = voice.sound.frames[i0];
-                let b = voice.sound.frames[i1];
-                let m = a + (b - a) * frac;
+                let m = catmull(
+                    voice.sound.frames[im1],
+                    voice.sound.frames[i0],
+                    voice.sound.frames[i1],
+                    voice.sound.frames[i2],
+                    frac,
+                );
                 (m, m)
             };
             if g > 0.0 {
@@ -390,6 +413,38 @@ mod tests {
             game.events.try_recv().expect("completion"),
             EngineEvent::Finished(id)
         );
+    }
+
+    #[test]
+    fn cubic_step_hits_exact_taps() {
+        let (game, thread) = audio_link();
+        thread.state.set_sample_rate(48000);
+        let mut core = EngineCore::new(thread);
+        let id = game.state.alloc_voice();
+        let mut frames = vec![0.0f32; 8];
+        frames[3] = 1.0;
+        game.tx
+            .send_spin(RealtimeCommand::Play(PlayCmd {
+                voice: id,
+                sound: Arc::new(SharedFrames {
+                    sample_rate: 24000,
+                    channels: 1,
+                    frames,
+                }),
+                gain: 1.0,
+                rate: 1.0,
+                pan: 0.0,
+                bus: AudioChannel::Sfx,
+                looping: false,
+            }))
+            .expect("send");
+        // Step 24000/48000 = 0.5: frame 5 lands half a frame before the
+        // impulse, where Catmull-Rom gives 0.5625 (linear would give 0.5).
+        let out = render(&mut core, 7);
+        let p = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((out[4 * 2] - 0.0).abs() < 1e-6, "integer taps stay exact");
+        assert!((out[5 * 2] - 0.5625 * p).abs() < 1e-4, "cubic = 0.5625");
+        assert!((out[6 * 2] - p).abs() < 1e-4, "integer taps stay exact");
     }
 
     #[test]

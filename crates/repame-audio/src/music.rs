@@ -10,8 +10,7 @@ use anyhow::Result;
 use web_workers::sync::mpsc::Sender;
 
 use crate::command::{PlayCmd, RealtimeCommand, SharedFrames};
-use crate::decode_bytes;
-use crate::{AudioChannel, AudioState};
+use crate::{AudioChannel, AudioState, decode_bytes, retarget_to, to_device_rate};
 
 /// One intensity stem: audible across `[lo, hi]` with a linear ramp.
 #[derive(Debug, Clone)]
@@ -86,13 +85,20 @@ impl Music {
 
     /// Wire to an audio thread.
     pub fn attach(&mut self, tx: Sender<RealtimeCommand>, state: Arc<AudioState>) {
+        let target = state.sample_rate();
+        for track in self.tracks.values_mut() {
+            retarget_to(&mut track.main, target);
+            for stem in &mut track.stems {
+                retarget_to(&mut stem.sound, target);
+            }
+        }
         self.tx = Some(tx);
         self.state = Some(state);
     }
 
     /// Register a looping track (main mix).
     pub fn load_track(&mut self, name: &str, gain: f32, main: &[u8]) -> Result<()> {
-        let main = Arc::new(decode_bytes(main)?);
+        let main = Arc::new(to_device_rate(decode_bytes(main)?, self.state.as_deref())?);
         self.tracks.insert(
             name.to_string(),
             Track {
@@ -106,12 +112,13 @@ impl Music {
 
     /// Add an intensity stem to a registered track.
     pub fn add_stem(&mut self, name: &str, bytes: &[u8], def: StemDef) -> Result<()> {
+        let sound = Arc::new(to_device_rate(decode_bytes(bytes)?, self.state.as_deref())?);
         let track = self
             .tracks
             .get_mut(name)
             .ok_or_else(|| anyhow::anyhow!("unknown music track `{name}`"))?;
         track.stems.push(Stem {
-            sound: Arc::new(decode_bytes(bytes)?),
+            sound,
             lo: def.lo.clamp(0.0, 1.0),
             hi: def.hi.clamp(0.0, 1.0).max(def.lo.clamp(0.0, 1.0)),
             gain: def.gain.max(0.0),
@@ -385,6 +392,37 @@ mod tests {
             out.push(cmd);
         }
         out
+    }
+
+    #[test]
+    fn tracks_convert_to_device_rate_on_load_and_attach() {
+        let (game, thread) = audio_link();
+        thread.state.set_sample_rate(48000);
+        let mut music = Music::new();
+        let main = synth_sine_wav(220.0, 0.2, 32000);
+        music.load_track("battle", 0.8, &main).unwrap();
+        music.attach(game.tx.clone(), game.state.clone());
+        let drums = synth_sine_wav(330.0, 0.2, 32000);
+        music
+            .add_stem(
+                "battle",
+                &drums,
+                StemDef {
+                    lo: 0.0,
+                    hi: 1.0,
+                    gain: 1.0,
+                },
+            )
+            .unwrap();
+        assert!(music.play("battle", 0.0));
+        let mut played = Vec::new();
+        while let Ok(cmd) = thread.rx.try_recv() {
+            if let RealtimeCommand::Play(p) = cmd {
+                played.push((p.sound.sample_rate, p.sound.len_frames()));
+            }
+        }
+        // 0.2 s at 32 kHz = 6400 frames; 48 kHz holds 9600.
+        assert_eq!(played, vec![(48000, 9600), (48000, 9600)]);
     }
 
     #[test]

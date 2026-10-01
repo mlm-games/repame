@@ -4,8 +4,8 @@ use std::sync::Arc;
 use repose_core::locals::effective_density_scale;
 use repose_core::{
     Color, ControlVisual, ControlVisualState, Dp, ImageAlignment, ImageFilter, ImageFit,
-    ImageHandle, ImageHandleGuard, ImagePaintStyle, ImageSourceRect, Modifier, Rect,
-    RenderContext, Scene, SceneNode, View,
+    ImageHandle, ImageHandleGuard, ImagePaintStyle, ImageSourceRect, Modifier, Rect, RenderContext,
+    Scene, SceneNode, View,
 };
 use repose_ui::Box as UiBox;
 
@@ -471,7 +471,9 @@ mod tests {
             rect,
             style:
                 ImagePaintStyle {
-                    source_rect, filter, ..
+                    source_rect,
+                    filter,
+                    ..
                 },
             ..
         }) = scene.nodes.first()

@@ -1,8 +1,10 @@
 //! [`decode_bytes`]: encoded bytes to [`SharedFrames`] via symphonia.
 //! Supports the Vorbis, MP3, FLAC, WAV, and AAC inputs in the pin.
-//! Also hosts [`resample_linear`], the device-rate matcher per voice.
+//! Also hosts the device-rate converters: `resample` (windowed-sinc,
+//! load time) and [`resample_linear`] (legacy realtime matcher).
 
 use std::io::Cursor;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use symphonia::core::codecs::audio::AudioDecoderOptions;
@@ -14,6 +16,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::default::get_codecs;
 
 use crate::command::SharedFrames;
+use crate::state::AudioState;
 
 /// Decoded-output cap in frames. Music tracks pass; accidents do not.
 const MAX_FRAMES: usize = 32_000_000;
@@ -130,6 +133,122 @@ pub fn resample_linear(sound: &SharedFrames, target_hz: u32) -> SharedFrames {
     }
 }
 
+/// Phase-table resolution of the windowed-sinc converter (linear interp
+/// between rows keeps phase error near -120 dB).
+const SINC_PHASES: usize = 1024;
+/// Sinc zero crossings per side at cutoff 0.5; stretched when decimating.
+const SINC_CROSSINGS: f32 = 24.0;
+
+/// Four-term Blackman-Harris window over `x` in `-1..=1`.
+fn blackman_harris(x: f32) -> f32 {
+    0.35875
+        + 0.48829 * (std::f32::consts::PI * x).cos()
+        + 0.14128 * (2.0 * std::f32::consts::PI * x).cos()
+        + 0.01168 * (3.0 * std::f32::consts::PI * x).cos()
+}
+
+/// Windowed-sinc resample to `target_hz`. Each phase-table row is
+/// normalized to unit DC gain; input edges replicate. Empty, zero-rate,
+/// and matching-rate inputs pass through.
+fn resample(sound: &SharedFrames, target_hz: u32) -> Result<SharedFrames> {
+    if target_hz == 0 || sound.sample_rate == 0 || sound.sample_rate == target_hz {
+        return Ok(sound.clone());
+    }
+    let n_ch = sound.channels.max(1) as usize;
+    let n_in = sound.len_frames();
+    if n_in == 0 {
+        return Ok(SharedFrames {
+            sample_rate: target_hz,
+            channels: sound.channels,
+            frames: Vec::new(),
+        });
+    }
+    let ratio = sound.sample_rate as f64 / target_hz as f64;
+    let n_out = ((n_in as f64 / ratio).round() as usize).max(1);
+    if n_out > MAX_FRAMES {
+        anyhow::bail!("resampled audio exceeds the {MAX_FRAMES}-frame cap");
+    }
+    let cutoff = 0.5f32 * (target_hz as f32 / sound.sample_rate as f32).min(1.0);
+    let half = ((SINC_CROSSINGS / (2.0 * cutoff)).ceil() as usize).max(2);
+    let taps = half * 2 + 1;
+    let mut table = vec![0.0f32; (SINC_PHASES + 1) * taps];
+    for p in 0..=SINC_PHASES {
+        let frac = p as f32 / SINC_PHASES as f32;
+        let row = p * taps;
+        let mut sum = 0.0f32;
+        for (j, v) in table[row..row + taps].iter_mut().enumerate() {
+            let u = j as f32 - half as f32 - frac;
+            *v = if u.abs() <= half as f32 {
+                let s = 2.0 * cutoff * u;
+                let sinc = if s.abs() < 1e-6 {
+                    1.0
+                } else {
+                    (std::f32::consts::PI * s).sin() / (std::f32::consts::PI * s)
+                };
+                2.0 * cutoff * sinc * blackman_harris(u / half as f32)
+            } else {
+                0.0
+            };
+            sum += *v;
+        }
+        if sum.is_finite() && sum.abs() > 1e-6 {
+            for v in &mut table[row..row + taps] {
+                *v /= sum;
+            }
+        }
+    }
+    let mut frames = vec![0.0f32; n_out * n_ch];
+    let mut coefs = Vec::with_capacity(taps);
+    let last = (n_in - 1) as i64;
+    for m in 0..n_out {
+        let pos = m as f64 * ratio;
+        let base = pos.floor();
+        let ph = ((pos - base) as f32) * SINC_PHASES as f32;
+        let p = (ph as usize).min(SINC_PHASES - 1);
+        let a = ph - p as f32;
+        let row0 = p * taps;
+        let row1 = row0 + taps;
+        coefs.clear();
+        for j in 0..taps {
+            let v0 = table[row0 + j];
+            coefs.push(v0 + a * (table[row1 + j] - v0));
+        }
+        let start = base as i64 - half as i64;
+        for (j, &gain) in coefs.iter().enumerate() {
+            let frame = (start + j as i64).clamp(0, last) as usize * n_ch;
+            for c in 0..n_ch {
+                frames[m * n_ch + c] += gain * sound.frames[frame + c];
+            }
+        }
+    }
+    Ok(SharedFrames {
+        sample_rate: target_hz,
+        channels: sound.channels,
+        frames,
+    })
+}
+
+/// Convert `sound` to the device rate in `state` when one is known.
+pub fn to_device_rate(sound: SharedFrames, state: Option<&AudioState>) -> Result<SharedFrames> {
+    let Some(state) = state else { return Ok(sound) };
+    let target = state.sample_rate();
+    if target == 0 || target == sound.sample_rate {
+        return Ok(sound);
+    }
+    resample(&sound, target)
+}
+
+/// Swap `sound` to `target` in place; failures keep the original.
+pub fn retarget_to(sound: &mut Arc<SharedFrames>, target: u32) {
+    if target == 0 || sound.sample_rate == target {
+        return;
+    }
+    match resample(sound, target) {
+        Ok(frames) => *sound = Arc::new(frames),
+        Err(e) => log::warn!("sample-rate conversion skipped: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +298,56 @@ mod tests {
         assert!(peak > 0.3, "peak = {peak}");
         let same = resample_linear(&decoded, 44100);
         assert_eq!(same.frames, decoded.frames);
+    }
+
+    fn sine_at(hz: f32, rate: u32) -> SharedFrames {
+        SharedFrames {
+            sample_rate: rate,
+            channels: 1,
+            frames: (0..rate as usize)
+                .map(|i| {
+                    (2.0 * std::f64::consts::PI * hz as f64 * i as f64 / rate as f64).sin() as f32
+                        * 0.5
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn sinc_resample_keeps_sine_intact() {
+        for (src, dst) in [(32000u32, 48000u32), (48000, 32000), (44100, 48000)] {
+            let sound = sine_at(1000.0, src);
+            let out = resample(&sound, dst).unwrap();
+            assert_eq!(out.sample_rate, dst);
+            let expect = (sound.len_frames() as f64 * dst as f64 / src as f64).round() as usize;
+            assert_eq!(out.len_frames(), expect, "{src} -> {dst}");
+            // Skip the replicated-edge transient; compare against the ideal sine.
+            let skip = 512;
+            let (mut sig, mut err) = (0.0f64, 0.0f64);
+            for m in skip..out.len_frames() - skip {
+                let ideal =
+                    0.5 * (2.0 * std::f64::consts::PI * 1000.0 * m as f64 / dst as f64).sin();
+                let d = out.frames[m] as f64 - ideal;
+                sig += ideal * ideal;
+                err += d * d;
+            }
+            let snr = 10.0 * (sig / err).log10();
+            assert!(snr > 60.0, "{src} -> {dst}: snr = {snr:.1} dB");
+        }
+    }
+
+    #[test]
+    fn sinc_resample_passes_through_noop_and_empty() {
+        let sound = sine_at(440.0, 32000);
+        let same = resample(&sound, 32000).unwrap();
+        assert!(same.frames == sound.frames);
+        let empty = SharedFrames {
+            sample_rate: 44100,
+            channels: 1,
+            frames: Vec::new(),
+        };
+        let out = resample(&empty, 48000).unwrap();
+        assert_eq!(out.sample_rate, 48000);
+        assert!(out.frames.is_empty());
     }
 }

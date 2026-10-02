@@ -1514,7 +1514,7 @@ dependencies = [
  "directories",
  "fluent-bundle",
  "getrandom 0.4.3",
- "glam 0.33.11",
+ "glam 0.33.12",
  "js-sys",
  "rand 0.10.3",
  "ron",
@@ -1633,9 +1633,9 @@ dependencies = [
 
 [[package]]
 name = "glam"
-version = "0.33.11"
+version = "0.33.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35b4e837a1d133645d1dcf283e146a4b9901e390a1c13545f959cfed3a72f24f"
+checksum = "37bfe73dc8ec21f54d181e5a60554327ec3f1c600c455a75ccbfc65d2106a6c4"
 dependencies = [
  "approx",
  "libm",
@@ -1649,7 +1649,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d74079318e3a077bd3d15faa90fde24fa37bb9f157f92f853e6019a15fd413"
 dependencies = [
  "approx",
- "glam 0.33.11",
+ "glam 0.33.12",
  "nalgebra",
  "num-traits",
  "simba",
@@ -2479,7 +2479,7 @@ dependencies = [
  "glam 0.30.10",
  "glam 0.31.1",
  "glam 0.32.1",
- "glam 0.33.11",
+ "glam 0.33.12",
  "matrixmultiply",
  "nalgebra-macros",
  "num-complex",
@@ -3702,7 +3702,7 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f6425a7a7150e571e302df3f316ccc77aa7636482537ffd1fce9c8b8a894cb1"
 dependencies = [
- "glam 0.33.11",
+ "glam 0.33.12",
  "renamite-geometry",
  "serde",
 ]
@@ -3713,7 +3713,7 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12a1a7be878056a1c679757468833e1ac88388064586789009f4282ee65c41a6"
 dependencies = [
- "glam 0.33.11",
+ "glam 0.33.12",
  "kurbo",
  "renamite-animation",
  "renamite-history",
@@ -3730,7 +3730,7 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e47028a94af6fb394df7722a9293ba6e3d0a6adb9208860862224df6689868e7"
 dependencies = [
- "glam 0.33.11",
+ "glam 0.33.12",
  "kurbo",
  "linesweeper",
  "serde",
@@ -3743,7 +3743,7 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "863ceb44b119fd4191a5ff5ed69995343320e1cffb2ccd142b0e9652d4691ccb"
 dependencies = [
- "glam 0.33.11",
+ "glam 0.33.12",
  "renamite-animation",
  "renamite-geometry",
  "renamite-machine",
@@ -3773,7 +3773,7 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78de1883b841343d316393054097afcd56d3d864f232fcbf216f962a265234f8"
 dependencies = [
- "glam 0.33.11",
+ "glam 0.33.12",
  "renamite-animation",
  "renamite-geometry",
  "renamite-model",
@@ -3788,7 +3788,7 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7d0a24cd098232486663b4cd28f0883c67759ed4194c42964ccff0d06633f91"
 dependencies = [
- "glam 0.33.11",
+ "glam 0.33.12",
  "kurbo",
  "renamite-animation",
  "renamite-geometry",
@@ -3805,7 +3805,7 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62cafdb3f8aba8e2000f094738e4ee296b16794aa371b9588eb9497985fcde1a"
 dependencies = [
- "glam 0.33.11",
+ "glam 0.33.12",
  "kurbo",
  "renamite-animation",
  "renamite-geometry",
@@ -3821,7 +3821,7 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfb6bb958b65a01a7e0706313dca2011cb4ea2a14af7ba0d78069ccd2313dfcb"
 dependencies = [
- "glam 0.33.11",
+ "glam 0.33.12",
  "renamite-behavior-common",
  "renamite-player",
  "renamite-render-bridge",
@@ -3836,7 +3836,7 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536cdef6351d1ecb470c2050290eaa7039ef0f2630615871201c859f7726f24a"
 dependencies = [
- "glam 0.33.11",
+ "glam 0.33.12",
  "kurbo",
  "lyon_path",
  "lyon_tessellation",
@@ -3873,7 +3873,7 @@ name = "repame-actors"
 version = "0.3.5"
 dependencies = [
  "anyhow",
- "glam 0.33.11",
+ "glam 0.33.12",
  "log",
  "renamite-player",
  "renamite-player-ui",
@@ -3929,7 +3929,7 @@ version = "0.3.5"
 dependencies = [
  "bevy_ecs",
  "getrandom 0.4.3",
- "glam 0.33.11",
+ "glam 0.33.12",
  "noise",
  "rand 0.10.3",
  "repame-atlas",
@@ -3945,7 +3945,7 @@ name = "repame-input"
 version = "0.3.5"
 dependencies = [
  "bevy_ecs",
- "glam 0.33.11",
+ "glam 0.33.12",
  "repame-sim",
  "repose-core",
  "serde",
@@ -3956,7 +3956,7 @@ name = "repame-physics"
 version = "0.3.5"
 dependencies = [
  "bevy_ecs",
- "glam 0.33.11",
+ "glam 0.33.12",
  "log",
  "repame-sim",
 ]
@@ -3966,7 +3966,7 @@ name = "repame-rapier2d"
 version = "0.3.5"
 dependencies = [
  "bevy_ecs",
- "glam 0.33.11",
+ "glam 0.33.12",
  "log",
  "rapier2d",
  "repame-sim",
@@ -3977,7 +3977,7 @@ name = "repame-rapier3d"
 version = "0.3.5"
 dependencies = [
  "bevy_ecs",
- "glam 0.33.11",
+ "glam 0.33.12",
  "log",
  "rapier3d",
  "repame-sim",
@@ -3988,7 +3988,7 @@ name = "repame-shell"
 version = "0.3.5"
 dependencies = [
  "anyhow",
- "glam 0.33.11",
+ "glam 0.33.12",
  "log",
  "repame-audio",
  "repame-input",
@@ -4008,7 +4008,7 @@ name = "repame-sim"
 version = "0.3.5"
 dependencies = [
  "bevy_ecs",
- "glam 0.33.11",
+ "glam 0.33.12",
  "log",
  "web-time",
 ]
@@ -4019,7 +4019,7 @@ version = "0.3.5"
 dependencies = [
  "anyhow",
  "bytemuck",
- "glam 0.33.11",
+ "glam 0.33.12",
  "log",
  "repame-atlas",
  "repose-canvas",
@@ -4034,7 +4034,7 @@ name = "repame-view3d"
 version = "0.3.5"
 dependencies = [
  "bytemuck",
- "glam 0.33.11",
+ "glam 0.33.12",
  "gltf",
  "image",
  "log",

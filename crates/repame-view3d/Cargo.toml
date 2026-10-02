@@ -18,3 +18,6 @@ log.workspace = true
 gltf = { workspace = true, features = ["KHR_materials_unlit", "KHR_materials_emissive_strength", "KHR_texture_transform"] }
 image.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+repame-input = { path = "../repame-input", version = "0.3.5" }

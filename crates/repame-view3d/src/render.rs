@@ -625,6 +625,11 @@ pub struct SceneBatch {
     /// Staged point lights in rig order (uniform mirrors this; the cube
     /// pass reads the caster entry for position/range/size).
     staged_points: Vec<super::shadow::PointLight>,
+    /// Counters for the frame in flight, read after `finish`.
+    stats: super::stats::FrameStats,
+    /// Pages replaced at runtime by the game's override table; consulted
+    /// when uploads are applied, after the queue-time range check.
+    overrides: super::texfmt::TextureOverrides,
 }
 
 impl SceneBatch {
@@ -680,6 +685,8 @@ impl SceneBatch {
             culled: 0,
             pending: Vec::new(),
             uploads: Vec::new(),
+            stats: super::stats::FrameStats::new(),
+            overrides: super::texfmt::TextureOverrides::new(),
             verts: Vec::new(),
             indices: Vec::new(),
             ranges: Vec::new(),
@@ -1018,6 +1025,23 @@ impl SceneBatch {
         }
     }
 
+    /// Replaces a page's pixels for every later upload of it, letting a game
+    /// swap a page without re-deriving it. Removal restores queued uploads.
+    pub fn set_overrides(&mut self, overrides: super::texfmt::TextureOverrides) {
+        self.overrides = overrides;
+    }
+
+    /// Counters for the frame last finished.
+    pub fn stats(&self) -> super::stats::FrameStats {
+        self.stats
+    }
+
+    /// Publishes the last frame's counters, then clears them.
+    pub fn take_stats(&mut self, sink: &mut dyn super::stats::StatsSink) {
+        sink.publish(self.stats);
+        self.stats = super::stats::FrameStats::new();
+    }
+
     /// Append one group. Malformed groups (index out of range, or
     /// position/color length mismatch, partial normals/uvs, page past the
     /// batch layers, non-finite alpha) are dropped with a warning, never
@@ -1268,6 +1292,9 @@ impl SceneBatch {
         self.indices.clear();
         self.ranges.clear();
         self.culled = 0;
+        self.stats = super::stats::FrameStats::new();
+        self.stats.culled_groups = self.culled as u32;
+        self.stats.passes = 1;
         let planes = Self::frustum_planes(&self.view_proj);
         let culling = self.view_proj != Mat4::IDENTITY;
         let eye = glam::Vec3::from(self.camera_pos);
@@ -1282,6 +1309,7 @@ impl SceneBatch {
             // draw even off-screen).
             if culling && g.depth_test && Self::group_outside(&planes, &g.positions) {
                 self.culled += 1;
+                self.stats.culled_groups = self.culled as u32;
                 continue;
             }
             if g.transparent {

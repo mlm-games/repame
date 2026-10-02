@@ -4038,6 +4038,7 @@ dependencies = [
  "gltf",
  "image",
  "log",
+ "repame-input",
  "repose-core",
  "repose-render-wgpu",
  "repose-ui",

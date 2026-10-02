@@ -4,7 +4,7 @@
 //! Texture array is fed from [`SceneUpload`]s, one page per group.
 //! Frustum cull runs per group in `finish`. `depth_test = false` overlays skip cull.
 const SCENE_TARGET_SAMPLE_COUNT: u32 = 1;
-const SHADER: &str = r#"
+const SHADER_PREFIX: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
     light_dir: vec3<f32>,
@@ -51,6 +51,24 @@ struct SkinPalette {
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> skin_palette: SkinPalette;
+struct Material {
+    kcolors: array<vec4<f32>, 4>,
+    fog: vec4<f32>,
+    fog_range: vec2<f32>,
+    _pad: vec2<f32>,
+    pages: array<vec4<f32>, 2>,
+};
+
+fn page_of(unit: u32) -> f32 {
+    return material.pages[unit / 4u][unit % 4u];
+}
+
+const COMBINE_LO: f32 = -4.0;
+const COMBINE_HI: f32 = 4.0;
+const COMBINE_UNIT: f32 = 1.0;
+const COMBINE_ZERO: f32 = 0.0;
+const COMBINE_ONE: f32 = 1.0;
+
 @group(1) @binding(0) var scene_tex: texture_2d_array<f32>;
 @group(1) @binding(1) var scene_smp: sampler;
 @group(2) @binding(0) var shadow_tex: texture_depth_2d;
@@ -59,6 +77,7 @@ struct SkinPalette {
 @group(2) @binding(3) var cascade_smp: sampler_comparison;
 @group(2) @binding(4) var point_tex: texture_depth_cube;
 @group(2) @binding(5) var point_smp: sampler_comparison;
+@group(3) @binding(0) var<uniform> material: Material;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -138,6 +157,11 @@ fn vs_main(
     return out;
 }
 
+"#;
+
+/// Legacy PBR-lite fragment stage. Prepended to [`SHADER_PREFIX`] for the
+/// default pipeline and to each material program's module for its own.
+const SHADER_LEGACY_FS: &str = r#"
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var base = in.color;
@@ -270,6 +294,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// The default pipeline's module: shared prefix plus the legacy fragment
+/// stage. Material programs reuse the same prefix with their own fragment
+/// stage, so the vertex path and every binding stay identical.
+fn default_shader() -> String {
+    String::from(SHADER_PREFIX) + SHADER_LEGACY_FS
+}
+
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
@@ -327,7 +358,114 @@ struct CameraUniform {
     point_params: [f32; 4],
 }
 
+/// The scene vertex layout, shared by the default and material pipelines.
+const VERTEX_ATTRIBUTES: &[wgpu::VertexAttribute] = &[
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 12,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 24,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 36,
+        shader_location: 3,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 40,
+        shader_location: 4,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 48,
+        shader_location: 5,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 52,
+        shader_location: 6,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 56,
+        shader_location: 7,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 60,
+        shader_location: 8,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 64,
+        shader_location: 9,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 68,
+        shader_location: 10,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 72,
+        shader_location: 11,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32x4,
+        offset: 84,
+        shader_location: 12,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 100,
+        shader_location: 13,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 116,
+        shader_location: 14,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 120,
+        shader_location: 15,
+    },
+];
+
 const _: () = assert!(size_of::<CameraUniform>() == 816);
+
+/// Lowers a material's shading uniform into the GPU block, resolving the
+/// texture page each unit samples.
+pub fn material_uniform_for(
+    uniform: &super::shading::ShadingUniform,
+    pages: &[u32],
+) -> MaterialUniform {
+    let mut slots = [[0.0_f32; 4]; 2];
+    for (unit, slot) in slots
+        .iter_mut()
+        .flat_map(|pair| pair.iter_mut())
+        .enumerate()
+    {
+        *slot = pages.get(unit).copied().unwrap_or(unit as u32) as f32;
+    }
+    MaterialUniform {
+        kcolors: uniform.kcolors,
+        fog: uniform.fog,
+        fog_range: [uniform.fog_range[0], uniform.fog_range[1]],
+        _pad: [0.0; 2],
+        pages: slots,
+    }
+}
 
 /// Frame light rig: one directional sun plus up to
 /// [`MAX_POINTS`](crate::MAX_POINTS) point lights. The directional light
@@ -433,6 +571,42 @@ struct Vert {
     weights: [f32; 4],
     skin_mix: f32,
     skin_base: f32,
+}
+
+/// Uniform block one lowered material program reads: its constant color
+/// registers, its fog window, and the texture pages each unit samples.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct MaterialUniform {
+    pub kcolors: [[f32; 4]; 4],
+    pub fog: [f32; 4],
+    pub fog_range: [f32; 2],
+    pub _pad: [f32; 2],
+    /// Texture page per unit, carried as vec4 pairs because uniform arrays
+    /// need a 16-byte stride: unit `u` reads `pages[u / 4][u % 4]`.
+    pub pages: [[f32; 4]; 2],
+}
+
+const _: () = assert!(size_of::<MaterialUniform>() == 128);
+const _: () = assert!(super::material::MAX_TEX_UNITS == 8);
+
+/// GPU state for one lowered material program.
+struct MaterialPipelines {
+    key: u64,
+    depth: wgpu::RenderPipeline,
+    flat: wgpu::RenderPipeline,
+    transparent: wgpu::RenderPipeline,
+    transparent_flat: wgpu::RenderPipeline,
+    buffer: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
+/// One material program registered on the batch, lowered to WGSL and packed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialEntry {
+    pub model: super::material::ShadingModel,
+    pub cache_key: u64,
+    pub uniform: super::shading::ShadingUniform,
 }
 
 /// Texture sampling for batch layers (same shape as `repame-sprite`).
@@ -559,6 +733,9 @@ struct Pending {
     alpha: f32,
     alpha_cutoff: f32,
     depth_test: bool,
+    /// Material program slot stamped into every vertex of the group; 0 is
+    /// the legacy PBR-lite path.
+    material_slot: u32,
 }
 
 /// One draw call's layer: index range + whether depth testing applies.
@@ -573,6 +750,8 @@ struct DrawRange {
     index_end: u32,
     depth_test: bool,
     transparent: bool,
+    /// Material program that drew this range; 0 = legacy path.
+    material: u32,
 }
 
 /// Per-frame snapshot batch. `Send + Sync` so it can cross into the
@@ -630,6 +809,9 @@ pub struct SceneBatch {
     /// Pages replaced at runtime by the game's override table; consulted
     /// when uploads are applied, after the queue-time range check.
     overrides: super::texfmt::TextureOverrides,
+    /// Material programs registered for this frame; index 0 is the legacy
+    /// PBR-lite path, so slot `n` reads `materials[n - 1]`.
+    materials: Vec<MaterialEntry>,
 }
 
 impl SceneBatch {
@@ -687,6 +869,7 @@ impl SceneBatch {
             uploads: Vec::new(),
             stats: super::stats::FrameStats::new(),
             overrides: super::texfmt::TextureOverrides::new(),
+            materials: Vec::new(),
             verts: Vec::new(),
             indices: Vec::new(),
             ranges: Vec::new(),
@@ -1051,7 +1234,16 @@ impl SceneBatch {
     /// all-or-nothing per group. Shares
     /// [`validate_group`](crate::validate_group) with the chunk
     /// cache so both paths agree on malformed.
+    /// Appends one group drawn by the given material program (0 = legacy).
+    pub fn push_group_with_material(&mut self, group: &MeshGroup, material: u32) {
+        self.push_group_inner(group, material);
+    }
+
     pub fn push_group(&mut self, group: &MeshGroup) {
+        self.push_group_inner(group, 0);
+    }
+
+    fn push_group_inner(&mut self, group: &MeshGroup, material_slot: u32) {
         if !super::chunk::validate_group(group) {
             return;
         }
@@ -1093,7 +1285,174 @@ impl SceneBatch {
             alpha: group.alpha.clamp(0.0, 1.0),
             alpha_cutoff: group.alpha_cutoff.clamp(0.0, 1.0),
             depth_test: group.depth_test,
+            material_slot,
         });
+    }
+
+    /// Registers a material program, returning the slot later groups stamp
+    /// into their vertices. Repeat registrations of the same program (same
+    /// [`ShadingModel::cache_key`]) reuse the slot, so a frame of groups
+    /// sharing a material lowers one module and binds one uniform.
+    pub fn register_material(&mut self, model: &super::material::ShadingModel) -> u32 {
+        if let Some((slot, _)) = self
+            .materials
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.cache_key == model.cache_key())
+        {
+            return slot as u32 + 1;
+        }
+        let entry = MaterialEntry {
+            model: model.clone(),
+            cache_key: model.cache_key(),
+            uniform: super::shading::ShadingUniform::pack(model, &[], model.material_fog.enabled),
+        };
+        self.materials.push(entry);
+        self.materials.len() as u32
+    }
+
+    /// The interleaved vertex layout both the default and the material
+    /// pipelines bind: 16 slots, at their fixed struct offsets.
+    fn vertex_buffer_layout(&self) -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: size_of::<Vert>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: VERTEX_ATTRIBUTES,
+        }
+    }
+
+    /// (Re)builds one pipeline set per material program registered this
+    /// frame. Pipelines are keyed by program identity, so a frame reusing the
+    /// same programs keeps its modules and bind groups.
+    fn sync_material_pipelines(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        res: &mut SceneEntry,
+    ) {
+        if self.materials.is_empty() {
+            res.material_pipelines.clear();
+            return;
+        }
+        let layout = res.pipe_layout.clone();
+        let format = res.key.0;
+        let rebuild = res.material_pipelines.len() != self.materials.len()
+            || res
+                .material_pipelines
+                .iter()
+                .zip(self.materials.iter())
+                .any(|(gpu, entry)| gpu.key != entry.cache_key);
+        if !rebuild {
+            return;
+        }
+        let mut built = Vec::with_capacity(self.materials.len());
+        for entry in &self.materials {
+            let fragment = super::shading::material_fragment(&entry.model)
+                .expect("registered materials validate");
+            let source = String::from(SHADER_PREFIX) + &fragment;
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("repame_view3d_material"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            let buffers = [Some(self.vertex_buffer_layout())];
+            let pipeline = |_depth_test: bool, transparent: bool| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("repame_view3d_material_pipeline"),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs_main"),
+                        buffers: &buffers,
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: Some(if transparent {
+                                wgpu::BlendState::ALPHA_BLENDING
+                            } else {
+                                wgpu::BlendState::REPLACE
+                            }),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: Some(wgpu::Face::Back),
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth24PlusStencil8,
+                        depth_write_enabled: Some(!transparent),
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: SCENE_TARGET_SAMPLE_COUNT,
+                        mask: !0,
+                        alpha_to_coverage_enabled: false,
+                    },
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
+            let mut pages: Vec<u32> = vec![0; super::material::MAX_TEX_UNITS];
+            for stage in &entry.model.stages {
+                if let Some(slot) = pages.get_mut(usize::from(stage.tex_unit)) {
+                    *slot = stage.page as u32;
+                }
+            }
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("repame_view3d_material_program"),
+                size: size_of::<MaterialUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("repame_view3d_material_program_bg"),
+                layout: &res.material_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            });
+            let uniform = material_uniform_for(&entry.uniform, &pages);
+            queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&[uniform]));
+            built.push(MaterialPipelines {
+                depth: pipeline(true, false),
+                flat: pipeline(false, false),
+                transparent: pipeline(true, true),
+                transparent_flat: pipeline(false, true),
+                buffer,
+                bind,
+                key: entry.cache_key,
+            });
+        }
+        res.material_pipelines = built;
+    }
+
+    /// The material block uploaded when a frame registers no program: white
+    /// kcolors, no fog, every unit on page 0.
+    fn material_uniform(&self) -> MaterialUniform {
+        let default = super::material::ShadingModel::default();
+        match self.materials.first() {
+            Some(entry) => material_uniform_for(&entry.uniform, &[]),
+            None => material_uniform_for(
+                &super::shading::ShadingUniform::pack(&default, &[], false),
+                &[],
+            ),
+        }
+    }
+
+    /// Material programs registered this frame, in slot order (slot 0 is the
+    /// legacy path, so `materials[i]` serves slot `i + 1`).
+    pub fn materials(&self) -> &[MaterialEntry] {
+        &self.materials
     }
 
     /// Append one GPU-skinned draw: bind-pose geometry plus the sampled
@@ -1374,6 +1733,7 @@ impl SceneBatch {
                 index_end: self.indices.len() as u32,
                 depth_test: g.depth_test,
                 transparent: g.transparent,
+                material: g.material_slot,
             });
         }
         self.palette.clear();
@@ -1457,6 +1817,7 @@ impl SceneBatch {
                 index_end: self.indices.len() as u32,
                 depth_test,
                 transparent,
+                material: 0,
             });
         }
     }
@@ -1550,7 +1911,7 @@ impl SceneBatch {
         }
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("repame_view3d"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(default_shader().into()),
         });
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("repame_view3d_camera"),
@@ -1852,109 +2213,57 @@ impl SceneBatch {
                 },
             ],
         });
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("repame_view3d_material_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let material_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("repame_view3d_material"),
+            size: size_of::<MaterialUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let material_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("repame_view3d_material_bg"),
+            layout: &material_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: material_buffer.as_entire_binding(),
+            }],
+        });
         let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("repame_view3d_pl"),
-            bind_group_layouts: &[Some(&cam_layout), Some(&tex_layout), Some(&shadow_layout)],
+            bind_group_layouts: &[
+                Some(&cam_layout),
+                Some(&tex_layout),
+                Some(&shadow_layout),
+                Some(&material_layout),
+            ],
             immediate_size: 0,
         });
-        let buffers = [Some(wgpu::VertexBufferLayout {
-            array_stride: size_of::<Vert>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
-                    offset: 0,
-                    shader_location: 0,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
-                    offset: 12,
-                    shader_location: 1,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
-                    offset: 24,
-                    shader_location: 2,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 36,
-                    shader_location: 3,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x2,
-                    offset: 40,
-                    shader_location: 4,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 48,
-                    shader_location: 5,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 52,
-                    shader_location: 6,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 56,
-                    shader_location: 7,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 60,
-                    shader_location: 8,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 64,
-                    shader_location: 9,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 68,
-                    shader_location: 10,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
-                    offset: 72,
-                    shader_location: 11,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Uint32x4,
-                    offset: 84,
-                    shader_location: 12,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 100,
-                    shader_location: 13,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 116,
-                    shader_location: 14,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 120,
-                    shader_location: 15,
-                },
-            ],
-        })];
-        let mk = |label: &'static str, depth_test: bool, transparent: bool| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
+        let buffers = [Some(self.vertex_buffer_layout())];
+
+        let mk_with = |module: &wgpu::ShaderModule, depth_test: bool, transparent: bool| {
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("repame_view3d_pipeline"),
                 layout: Some(&pipe_layout),
                 vertex: wgpu::VertexState {
-                    module: &shader,
+                    module,
                     entry_point: Some("vs_main"),
                     buffers: &buffers,
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &shader,
+                    module,
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: screen.target_format,
@@ -2009,7 +2318,11 @@ impl SceneBatch {
                 },
                 multiview_mask: None,
                 cache: None,
-            })
+            });
+            (pipeline, depth_test)
+        };
+        let mk = |_label: &'static str, depth_test: bool, transparent: bool| {
+            mk_with(&shader, depth_test, transparent).0
         };
         /// Depth-only vertex shader for the shadow pass: skinned position
         /// through the shadow matrix (bind pose + palette, same blend as
@@ -2165,6 +2478,8 @@ fn vs_main(
             pipeline_transparent: mk("repame_view3d_transparent", true, true),
             pipeline_transparent_flat: mk("repame_view3d_transparent_flat", false, true),
             shadow_depth_pipeline,
+            material_pipelines: Vec::new(),
+            pipe_layout,
             shadow_cam_bind,
             shadow_camera_buf,
             shadow_bind,
@@ -2193,6 +2508,9 @@ fn vs_main(
             index_cap: 0,
             camera,
             cam_bind,
+            material_buffer,
+            material_bind,
+            material_layout,
             tex_bind,
             texture,
             camera_mat: self.camera,
@@ -2251,6 +2569,15 @@ fn vs_main(
             res.index_cap = cap;
         }
         queue.write_buffer(&res.camera, 0, bytemuck::cast_slice(&[self.camera]));
+        self.sync_material_pipelines(device, queue, res);
+        let program = self.materials.first().map(|entry| entry.cache_key);
+        if program.is_some() {
+            queue.write_buffer(
+                &res.material_buffer,
+                0,
+                bytemuck::cast_slice(&[self.material_uniform()]),
+            );
+        }
         res.camera_mat = self.camera;
         res.point_faces = self
             .point_caster
@@ -2362,6 +2689,10 @@ struct SceneEntry {
     pipeline_transparent: wgpu::RenderPipeline,
     pipeline_transparent_flat: wgpu::RenderPipeline,
     shadow_depth_pipeline: wgpu::RenderPipeline,
+    /// One set of pipelines, uniform and bind group per material program
+    /// registered this frame, indexed by `DrawRange::material - 1`.
+    material_pipelines: Vec<MaterialPipelines>,
+    pipe_layout: wgpu::PipelineLayout,
     shadow_cam_bind: wgpu::BindGroup,
     shadow_camera_buf: wgpu::Buffer,
     shadow_bind: wgpu::BindGroup,
@@ -2384,6 +2715,9 @@ struct SceneEntry {
     index_cap: usize,
     camera: wgpu::Buffer,
     cam_bind: wgpu::BindGroup,
+    material_buffer: wgpu::Buffer,
+    material_bind: wgpu::BindGroup,
+    material_layout: wgpu::BindGroupLayout,
     tex_bind: wgpu::BindGroup,
     texture: wgpu::Texture,
     camera_mat: CameraUniform,
@@ -2419,6 +2753,8 @@ pub fn prepare_scene_with_id(
     // before beginning the mutable scene pass.
     struct Snapshot {
         cam_bind: wgpu::BindGroup,
+        material_bind: wgpu::BindGroup,
+        material_pipelines: Vec<MaterialPipelines>,
         tex_bind: wgpu::BindGroup,
         shadow_bind: wgpu::BindGroup,
         shadow_depth_pipeline: wgpu::RenderPipeline,
@@ -2468,6 +2804,20 @@ pub fn prepare_scene_with_id(
         };
         Some(Snapshot {
             cam_bind: res.cam_bind.clone(),
+            material_bind: res.material_bind.clone(),
+            material_pipelines: res
+                .material_pipelines
+                .iter()
+                .map(|pipes| MaterialPipelines {
+                    key: pipes.key,
+                    depth: pipes.depth.clone(),
+                    flat: pipes.flat.clone(),
+                    transparent: pipes.transparent.clone(),
+                    transparent_flat: pipes.transparent_flat.clone(),
+                    buffer: pipes.buffer.clone(),
+                    bind: pipes.bind.clone(),
+                })
+                .collect(),
             tex_bind: res.tex_bind.clone(),
             shadow_bind: res.shadow_bind.clone(),
             shadow_depth_pipeline: res.shadow_depth_pipeline.clone(),
@@ -2635,14 +2985,43 @@ pub fn prepare_scene_with_id(
     pass.set_bind_group(0, &snap.cam_bind, &[]);
     pass.set_bind_group(1, &snap.tex_bind, &[]);
     pass.set_bind_group(2, &snap.shadow_bind, &[]);
+    pass.set_bind_group(3, &snap.material_bind, &[]);
     pass.set_vertex_buffer(0, snap.verts.slice(..));
     pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+    let mut bound_material: Option<u32> = None;
     for r in &snap.ranges {
+        let program = snap
+            .material_pipelines
+            .get(r.material.saturating_sub(1) as usize)
+            .filter(|_| r.material > 0);
+        if bound_material != Some(r.material) {
+            match program {
+                Some(pipes) => {
+                    pass.set_bind_group(3, &pipes.bind, &[]);
+                }
+                None => {
+                    pass.set_bind_group(3, &snap.material_bind, &[]);
+                }
+            }
+            bound_material = Some(r.material);
+        }
         pass.set_pipeline(match (r.transparent, r.depth_test) {
-            (true, true) => &snap.pipeline_transparent,
-            (true, false) => &snap.pipeline_transparent_flat,
-            (false, true) => &snap.pipeline_depth,
-            (false, false) => &snap.pipeline_flat,
+            (true, true) => match program {
+                Some(pipes) => &pipes.transparent,
+                None => &snap.pipeline_transparent,
+            },
+            (true, false) => match program {
+                Some(pipes) => &pipes.transparent_flat,
+                None => &snap.pipeline_transparent_flat,
+            },
+            (false, true) => match program {
+                Some(pipes) => &pipes.depth,
+                None => &snap.pipeline_depth,
+            },
+            (false, false) => match program {
+                Some(pipes) => &pipes.flat,
+                None => &snap.pipeline_flat,
+            },
         });
         pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
     }
@@ -3314,6 +3693,143 @@ mod tests {
         };
         // Primaries are sRGB fixed points, so asserts are exact.
         assert_eq!(at(32, 32), [0, 255, 0, 255], "near quad wins by depth");
+    }
+
+    /// End-to-end GPU proof for the material path: a group registered
+    /// against a lowered stage program renders through that program's own
+    /// pipeline and uniform, not the legacy one. The program multiplies the
+    /// vertex color by a constant register, so the read-back pixel proves
+    /// the chain ran (and not merely that the draw was issued).
+    #[test]
+    fn offscreen_material_program_renders_through_its_pipeline() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+        use super::super::material::{ShadingModel, TevArg, TevMode, TevOp, TevOperand};
+
+        struct Mat {
+            cam: OrbitCamera,
+            group: MeshGroup,
+            model: ShadingModel,
+        }
+
+        impl WgpuCallback for Mat {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.material");
+                batch.set_camera(self.cam.view_proj(1.0));
+                let slot = batch.register_material(&self.model);
+                batch.push_group_with_material(&self.group, slot);
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.material",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut CallbackRenderPass<'_, '_>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_callback("test.material", rpass, resources);
+            }
+        }
+
+        let mut group = MeshGroup {
+            depth_test: true,
+            ..Default::default()
+        };
+        group.push_quad(
+            [-5.0, 0.0, 5.0],
+            [5.0, 0.0, 5.0],
+            [5.0, 0.0, -5.0],
+            [-5.0, 0.0, -5.0],
+            [1.0, 1.0, 1.0],
+        );
+
+        // kcolor 0 is half red; the stage multiplies the incoming color by
+        // it, so a white quad must read back half red through this program.
+        let mut model = ShadingModel::default();
+        model.kcolors[0] = [0.5, 0.0, 0.0, 1.0];
+        let stage = &mut model.stages[0];
+        stage.color_arg = [
+            TevOperand::rgb(TevArg::Color, 4, 0),
+            TevOperand::rgb(TevArg::KColor(0), 4, 0),
+            TevOperand::rgb(TevArg::One, 4, 0),
+            TevOperand::rgb(TevArg::One, 4, 0),
+        ];
+        stage.alpha_arg = [
+            TevOperand::alpha(TevArg::Alpha, 4, 0),
+            TevOperand::alpha(TevArg::One, 4, 0),
+            TevOperand::alpha(TevArg::One, 4, 0),
+        ];
+        stage.color_op = [TevOp::ATimesB; 4];
+        stage.alpha_op = [TevOp::ATimesB; 3];
+        stage.color_mode = TevMode::Replace;
+        stage.alpha_mode = TevMode::Replace;
+
+        let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SKIP material test (no GPU): {e}");
+                return;
+            }
+        };
+        let scene = Scene {
+            clear_color: Color::from_rgba(0, 0, 0, 255),
+            nodes: vec![SceneNode::Callback {
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 64.0,
+                    h: 64.0,
+                },
+                payload: Callback::new(Mat {
+                    cam: OrbitCamera {
+                        target: glam::Vec3::ZERO,
+                        yaw: 0.0,
+                        pitch: 0.9,
+                        dist: 30.0,
+                        fov_y_deg: 30.0,
+                    },
+                    group,
+                    model,
+                }),
+            }],
+        };
+        let px = renderer
+            .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+            .expect("offscreen render");
+        let i = ((32 * 64 + 32) * 4) as usize;
+        let center = [px[i], px[i + 1], px[i + 2], px[i + 3]];
+        assert_eq!(center[3], 255, "quad covers the center: {center:?}");
+        assert!(
+            center[0] > 100 && center[0] < 160,
+            "half-red register reached the pixel: {center:?}"
+        );
+        assert!(
+            center[1] < 24 && center[2] < 24,
+            "green and blue are zeroed: {center:?}"
+        );
     }
 
     /// End-to-end GPU proof for the lit path: one up-facing white quad

@@ -264,6 +264,8 @@ impl Default for TevOperand {
 pub struct TevStage {
     /// Texture unit this stage samples.
     pub tex_unit: u8,
+    /// Texture array layer that unit samples.
+    pub page: u8,
     /// Pre-sampled color/alpha written by the texture stage.
     pub color_arg: [TevOperand; 4],
     pub alpha_arg: [TevOperand; 3],
@@ -281,6 +283,7 @@ impl Default for TevStage {
     fn default() -> Self {
         Self {
             tex_unit: 0,
+            page: 0,
             color_arg: [TevOperand::new(TevArg::Color); 4],
             alpha_arg: [TevOperand::new(TevArg::Color); 3],
             color_op: [TevOp::APlusB; 4],

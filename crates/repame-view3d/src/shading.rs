@@ -158,6 +158,52 @@ impl ShadedBatch {
     }
 }
 
+/// Fragment stage for one material program, ready to append to the renderer's
+/// shared shader prefix.
+///
+/// The stage samples the texels the program reads, lights the vertex color
+/// with the frame's sun (same inputs the legacy path uses, no shadow term),
+/// then runs the combinator chain over that result and applies material fog
+/// and the renderer's exposure curve - the order [`tev::evaluate`] uses.
+pub fn material_fragment(model: &ShadingModel) -> Result<String, ShadingError> {
+    model.validate()?;
+    let mut units: Vec<u8> = Vec::new();
+    for stage in &model.stages {
+        if !units.contains(&stage.tex_unit) {
+            units.push(stage.tex_unit);
+        }
+    }
+    let mut body = String::from("    var outColor: vec4<f32>;\n");
+    for unit in &units {
+        body.push_str(&format!(
+            "    let tex{unit} = textureSample(scene_tex, scene_smp, in.uv, i32(page_of({unit}u) + 0.5)).rgb;\n"
+        ));
+        body.push_str(&format!("    let lod{unit} = 0.0;\n"));
+    }
+    body.push_str("    let kcolor = material.kcolors;\n");
+    body.push_str("    var lit_in = vec4<f32>(in.color, in.alpha);\n");
+    body.push_str("    if (in.lit_flag > 0.5) {\n");
+    body.push_str("        let n = normalize(in.normal);\n");
+    body.push_str("        let ndl = max(dot(n, camera.light_dir), 0.0);\n");
+    body.push_str("        lit_in = vec4<f32>(in.color * (camera.ambient + camera.light_color * ndl * camera.diffuse), in.alpha);\n");
+    body.push_str("    }\n");
+    for line in wgsl_program(model).lines() {
+        if !line.trim().is_empty() {
+            body.push_str(&format!("    {line}\n"));
+        }
+    }
+    body.push_str("    let view = length(camera.cam_pos - in.world_pos);\n");
+    body.push_str("    let fog_t = clamp((view - material.fog_range.x) / max(material.fog_range.y - material.fog_range.x, 1e-6), 0.0, 1.0) * material.fog.a;\n");
+    body.push_str(
+        "    outColor = mix(outColor, vec4<f32>(material.fog.rgb, outColor.a), fog_t);\n",
+    );
+    body.push_str("    let e = camera.fog_range.z;\n");
+    body.push_str("    outColor = vec4<f32>((outColor.rgb * e) / (outColor.rgb * (e - 1.0) + vec3<f32>(1.0)), outColor.a);\n");
+    Ok(format!(
+        "@fragment\nfn fs_main(in: VsOut) -> @location(0) vec4<f32> {{\n{body}    return outColor;\n}}\n"
+    ))
+}
+
 /// Constant colors a model reads, for uniform packing.
 pub fn kcolor_view(model: &ShadingModel) -> &KColors {
     &model.kcolors

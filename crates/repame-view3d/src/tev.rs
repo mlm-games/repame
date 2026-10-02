@@ -300,35 +300,42 @@ pub fn evaluate(
     out
 }
 
-fn arg_wgsl(arg: TevArg, unit: usize, alpha_channel: bool) -> String {
+fn arg_wgsl(arg: TevArg, unit: usize, channel: usize) -> String {
+    let alpha_channel = channel == 3;
     match arg {
-        TevArg::Zero => "0.0".to_string(),
-        TevArg::One => "1.0".to_string(),
+        TevArg::Zero => "COMBINE_ZERO".to_string(),
+        TevArg::One => "COMBINE_UNIT".to_string(),
         TevArg::Half => "0.5".to_string(),
         TevArg::Two => "2.0".to_string(),
-        TevArg::Color => "src".to_string(),
-        TevArg::Alpha => "src.a".to_string(),
-        TevArg::KColor(index) => format!("kcolor[{}]", index.min(3)),
+        TevArg::Color => format!("src[{}]", channel.min(3)),
+        TevArg::Alpha => "src[3]".to_string(),
+        TevArg::KColor(index) => format!("kcolor[{}][{}]", index.min(3), channel.min(3)),
         TevArg::TexColor => format!("tex{}", unit),
         TevArg::TexAlpha => format!("tex{}.a", unit),
         TevArg::LodFrac => format!("lod{}", unit),
         TevArg::Stub => {
             if alpha_channel {
-                "0.0".to_string()
+                "COMBINE_ZERO".to_string()
             } else {
-                "1.0".to_string()
+                "COMBINE_UNIT".to_string()
             }
         }
         TevArg::TexColorOf(other) => format!("tex{}", usize::from(other).min(7)),
     }
 }
 
+/// Renders an f32 as a WGSL float literal: `Debug` always keeps the decimal
+/// point, where `Display` would emit a bare integer and break `clamp`.
+fn wgsl_float(value: f32) -> String {
+    format!("{value:?}")
+}
+
 fn operand_wgsl(operand: TevOperand, unit: usize, channel: usize) -> String {
-    let raw = arg_wgsl(operand.arg, unit, channel == 3);
+    let raw = arg_wgsl(operand.arg, unit, channel);
     let mut expr = format!(
         "({raw} * {} + {})",
-        operand.scale.multiplier(),
-        operand.scale.offset()
+        wgsl_float(operand.scale.multiplier()),
+        wgsl_float(operand.scale.offset())
     );
     if operand.negate {
         expr = format!("(-{expr})");
@@ -339,9 +346,9 @@ fn operand_wgsl(operand: TevOperand, unit: usize, channel: usize) -> String {
 fn op_wgsl(op: TevOp, a: &str, b: &str, c: &str) -> String {
     let expr = match op {
         TevOp::A => a.to_string(),
-        TevOp::OneMinusA => format!("(1.0 - {a})"),
+        TevOp::OneMinusA => format!("(COMBINE_UNIT - {a})"),
         TevOp::C => c.to_string(),
-        TevOp::OneMinusC => format!("(1.0 - {c})"),
+        TevOp::OneMinusC => format!("(COMBINE_UNIT - {c})"),
         TevOp::APlusB => format!("({a} + {b})"),
         TevOp::AMinusB => format!("({a} - {b})"),
         TevOp::AMinusC => format!("({a} - {c})"),
@@ -350,22 +357,22 @@ fn op_wgsl(op: TevOp, a: &str, b: &str, c: &str) -> String {
         TevOp::BPlusCHalf => format!("(({b} + {c}) * 0.5)"),
         TevOp::BMinusCHalf => format!("(({b} - {c}) * 0.5)"),
     };
-    format!("clamp({expr}, -4.0, 4.0)")
+    format!("clamp({expr}, COMBINE_LO, COMBINE_HI)")
 }
 
 fn op2_wgsl(op: TevOp2, a: &str, d: &str) -> String {
     let expr = match op {
         TevOp2::D => d.to_string(),
-        TevOp2::OneMinusD => format!("(1.0 - {d})"),
+        TevOp2::OneMinusD => format!("(COMBINE_UNIT - {d})"),
         TevOp2::APlusD => format!("({a} + {d})"),
-        TevOp2::APlusOneMinusD => format!("({a} + (1.0 - {d}))"),
+        TevOp2::APlusOneMinusD => format!("({a} + (COMBINE_UNIT - {d}))"),
         TevOp2::ATimesD => format!("({a} * {d})"),
-        TevOp2::ATimesOneMinusD => format!("({a} * (1.0 - {d}))"),
+        TevOp2::ATimesOneMinusD => format!("({a} * (COMBINE_UNIT - {d}))"),
         TevOp2::APlusB => format!("({a} + {a})"),
         TevOp2::AMinusB => format!("({a} - {a})"),
         TevOp2::ATimesA => format!("({a} * {a})"),
     };
-    format!("clamp({expr}, -4.0, 4.0)")
+    format!("clamp({expr}, COMBINE_LO, COMBINE_HI)")
 }
 
 fn mode_wgsl(mode: TevMode, a: &str, b: &str) -> String {
@@ -375,7 +382,7 @@ fn mode_wgsl(mode: TevMode, a: &str, b: &str) -> String {
         TevMode::Add => format!("({a} + {b})"),
         TevMode::Subtract => format!("({a} - {b})"),
     };
-    format!("clamp({expr}, 0.0, 1.0)")
+    format!("clamp({expr}, COMBINE_ZERO, COMBINE_ONE)")
 }
 
 fn stage_channel_wgsl(stage: &TevStage, channel: usize) -> String {
@@ -420,10 +427,10 @@ fn stage_channel_wgsl(stage: &TevStage, channel: usize) -> String {
         stage.color_scale
     };
     format!(
-        "clamp(({} * {} + {}), 0.0, 1.0)",
+        "clamp(({} * {} + {}), COMBINE_ZERO, COMBINE_ONE)",
         mode_wgsl(mode, &combined, &second),
-        scale.multiplier(),
-        scale.offset()
+        wgsl_float(scale.multiplier()),
+        wgsl_float(scale.offset())
     )
 }
 
@@ -433,7 +440,7 @@ fn stage_channel_wgsl(stage: &TevStage, channel: usize) -> String {
 /// `kcolor` (4 RGBA constants) and the incoming `src` color. Assigns `outColor`.
 pub fn wgsl_program(model: &ShadingModel) -> String {
     let mut body = String::new();
-    body.push_str("var src: vec4<f32> = stage_in;\n");
+    body.push_str("var src: vec4<f32> = lit_in;\n");
     for stage in &model.stages {
         body.push_str("var dst: vec4<f32> = src;\n");
         for channel in 0..4 {

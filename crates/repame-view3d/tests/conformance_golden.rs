@@ -163,8 +163,10 @@ fn golden_textured_stage_multiplies_vertex_color_by_texel() {
 
 #[test]
 fn golden_second_stage_reads_the_first_stages_output() {
-    let mut halve = TevStage::default();
-    halve.color_arg = [TevArg::Zero, TevArg::Color, TevArg::Half, TevArg::Zero];
+    let halve = TevStage {
+        color_arg: [TevArg::Zero, TevArg::Color, TevArg::Half, TevArg::Zero],
+        ..TevStage::default()
+    };
     let model = ShadingModel {
         stages: vec![ShadingModel::textured(0).stages[0], halve],
         ..Default::default()
@@ -534,7 +536,7 @@ fn golden_mip_chain_halves_down_to_one_by_one() {
             .all(|(_, _, data)| data.iter().all(|b| *b == 200))
     );
 
-    let odd = mip_chain(&vec![200_u8; 4 * 2 * 4], 4, 2);
+    let odd = mip_chain(&[200_u8; 4 * 2 * 4], 4, 2);
     assert_eq!(odd.len(), 3);
     assert_eq!((odd[2].0, odd[2].1), (1, 1));
     for (w, h, data) in &odd {
@@ -706,6 +708,15 @@ fn golden_pass_validation_rejects_bad_declarations() {
     let mut orphan = render_pass("a");
     orphan.kind = PassKind::Fullscreen;
     assert_eq!(validate_passes(&[orphan]), Err(PassError::MissingSource));
+    let mut narrow = render_pass("scene");
+    narrow.target.width = 32;
+    let mut copy = render_pass("copy");
+    copy.kind = PassKind::Resolve;
+    copy.source = Some("scene".to_string());
+    assert_eq!(
+        validate_passes(&[narrow, copy]),
+        Err(PassError::SizeMismatch)
+    );
 }
 
 #[test]

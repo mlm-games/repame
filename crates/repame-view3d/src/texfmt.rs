@@ -495,11 +495,7 @@ pub fn resample_half(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
             }
             let out_at = (y * w + x) * 4;
             for channel in 0..4 {
-                out[out_at + channel] = if count == 0 {
-                    0
-                } else {
-                    (sum[channel] / count) as u8
-                };
+                out[out_at + channel] = sum[channel].checked_div(count).unwrap_or(0) as u8;
             }
         }
     }

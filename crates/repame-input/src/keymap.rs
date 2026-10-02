@@ -6,20 +6,18 @@ use repose_core::shortcuts::KeyChord;
 
 /// One side of a remappable control: what the keyboard/mouse entry or
 /// the gamepad entry currently holds.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum KeymapEntry {
+    #[default]
     None,
     Key(KeyChord),
     Physical(PhysicalKey),
     Mouse(PointerButton),
     Pad(GamepadButton),
-    Axis { axis: GamepadAxis, threshold: f32 },
-}
-
-impl Default for KeymapEntry {
-    fn default() -> Self {
-        KeymapEntry::None
-    }
+    Axis {
+        axis: GamepadAxis,
+        threshold: f32,
+    },
 }
 
 impl std::hash::Hash for KeymapEntry {

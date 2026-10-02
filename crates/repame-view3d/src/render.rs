@@ -625,10 +625,13 @@ const _: () = assert!(super::material::MAX_TEX_UNITS == 8);
 /// GPU state for fullscreen passes.
 struct FullscreenState {
     pipeline: wgpu::RenderPipeline,
+    overlay_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     binds: HashMap<String, wgpu::BindGroup>,
     layout: wgpu::BindGroupLayout,
     tints: HashMap<String, wgpu::Buffer>,
+    present: Option<(String, wgpu::BindGroup)>,
+    present_tint: Option<wgpu::Buffer>,
 }
 
 /// One pass as the frame executor sees it: its declaration plus the GPU
@@ -1589,6 +1592,9 @@ impl SceneBatch {
             if !stale {
                 continue;
             }
+            if let Some(state) = res.fullscreen.as_mut() {
+                state.binds.remove(&spec.target.name);
+            }
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("repame_view3d_pass_target"),
                 size: wgpu::Extent3d {
@@ -1638,6 +1644,9 @@ impl SceneBatch {
             .map(|spec| &spec.target.name)
             .collect();
         res.pass_targets.retain(|name, _| live.contains(&name));
+        if let Some(state) = res.fullscreen.as_mut() {
+            state.binds.retain(|name, _| live.contains(&name));
+        }
     }
 
     /// Declares the frame's passes, replacing any previous list. Pass
@@ -1676,11 +1685,7 @@ impl SceneBatch {
         let needs = self
             .passes
             .iter()
-            .any(|spec| spec.kind == super::pass::PassKind::Fullscreen)
-            || res
-                .presenting
-                .as_ref()
-                .is_some_and(|spec| spec.kind == super::pass::PassKind::Fullscreen);
+            .any(|spec| spec.kind == super::pass::PassKind::Fullscreen || spec.presents);
         if !needs {
             res.fullscreen = None;
             return;
@@ -1728,44 +1733,45 @@ impl SceneBatch {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("repame_view3d_fullscreen"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: res.key.0,
-                    blend,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                ..Default::default()
-            },
-            // The shared UI pass carries a depth buffer, so a composite must
-            // declare one too: depth-tested but never writing.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24PlusStencil8,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let make_pipeline = |blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("repame_view3d_fullscreen"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: res.key.0,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth24PlusStencil8,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = make_pipeline(None);
+        let overlay_pipeline = make_pipeline(Some(wgpu::BlendState::ALPHA_BLENDING));
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("repame_view3d_fullscreen_smp"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -1776,10 +1782,13 @@ impl SceneBatch {
         });
         res.fullscreen = Some(FullscreenState {
             pipeline,
+            overlay_pipeline,
             sampler,
             binds: HashMap::new(),
             layout,
             tints: HashMap::new(),
+            present: None,
+            present_tint: None,
         });
     }
 
@@ -1791,25 +1800,58 @@ impl SceneBatch {
         queue: &wgpu::Queue,
         res: &mut SceneEntry,
     ) {
-        if res.fullscreen.is_none() {
-            return;
-        }
-        let mut wanted: Vec<(String, [f32; 4])> = Vec::new();
         for spec in &self.passes {
-            // A fullscreen pass samples its source; a presenting pass
-            // composites its own output at paint time. Both need a bind.
-            if let Some(source) = spec.source.clone() {
-                wanted.push((source, spec.overlay));
-            }
-            if spec.presents {
-                wanted.push((spec.target.name.clone(), spec.overlay));
+            if spec.kind == super::pass::PassKind::Fullscreen
+                && let Some(source) = spec.source.as_deref()
+            {
+                SceneBatch::fullscreen_bind(device, queue, res, source);
             }
         }
-        wanted.sort_by(|a, b| a.0.cmp(&b.0));
-        wanted.dedup_by(|a, b| a.0 == b.0);
-        for (source, overlay) in wanted {
-            SceneBatch::fullscreen_bind(device, queue, res, &source, overlay);
-        }
+        let Some(spec) = res.presenting.clone() else {
+            if let Some(state) = res.fullscreen.as_mut() {
+                state.present = None;
+            }
+            return;
+        };
+        let view = res
+            .pass_targets
+            .get(&spec.target.name)
+            .map(|target| target.view.clone());
+        let Some(state) = res.fullscreen.as_mut() else {
+            return;
+        };
+        let Some(view) = view else {
+            state.present = None;
+            return;
+        };
+        let buffer = state.present_tint.get_or_insert_with(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("repame_view3d_present_tint"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        queue.write_buffer(buffer, 0, bytemuck::cast_slice(&spec.overlay));
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("repame_view3d_present_bg"),
+            layout: &state.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&state.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        });
+        state.present = Some((spec.target.name.clone(), bind));
     }
 
     /// Bind group sampling `source`, cached per target name.
@@ -1818,7 +1860,6 @@ impl SceneBatch {
         queue: &wgpu::Queue,
         res: &mut SceneEntry,
         source: &str,
-        tint: [f32; 4],
     ) -> Option<wgpu::BindGroup> {
         let state = res.fullscreen.as_mut()?;
         let existing = state.binds.get(source).cloned();
@@ -1834,7 +1875,7 @@ impl SceneBatch {
                 mapped_at_creation: false,
             })
         });
-        queue.write_buffer(buffer, 0, bytemuck::cast_slice(&tint));
+        queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[1.0f32; 4]));
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("repame_view3d_fullscreen_bg"),
             layout: &state.layout,
@@ -3568,6 +3609,71 @@ pub fn prepare_scene_with_id(
         let (spec, view, depth_view) = (&entry.spec, &entry.view, &entry.depth_view);
         let pass_index = spec.index;
         let target = spec.target.clear;
+        if spec.kind == super::pass::PassKind::Fullscreen {
+            if let (Some(bind), Some(pipeline)) = (
+                spec.source
+                    .as_deref()
+                    .and_then(|name| snap.fullscreen_binds.get(name)),
+                snap.fullscreen_pipeline.as_ref(),
+            ) {
+                let mut full = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("repame_view3d_fullscreen"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: target[0] as f64,
+                                g: target[1] as f64,
+                                b: target[2] as f64,
+                                a: target[3] as f64,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                full.set_pipeline(pipeline);
+                full.set_bind_group(0, bind, &[]);
+                full.draw(0..3, 0..1);
+            }
+            continue;
+        }
+        if spec.kind == super::pass::PassKind::Resolve {
+            if let Some(from) = entry.source_texture.as_ref() {
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: from,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &entry.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: spec.target.width.max(1),
+                        height: spec.target.height.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            continue;
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("repame_view3d_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -3610,80 +3716,6 @@ pub fn prepare_scene_with_id(
             0.0,
             1.0,
         );
-        // Fullscreen and resolve passes do not draw geometry: one samples a
-        // source target, the other copies it. Both close this pass first.
-        if spec.kind != super::pass::PassKind::Render {
-            drop(pass);
-            match spec.kind {
-                super::pass::PassKind::Fullscreen => {
-                    if let (Some(bind), Some(pipeline)) = (
-                        spec.source
-                            .as_deref()
-                            .and_then(|name| snap.fullscreen_binds.get(name)),
-                        snap.fullscreen_pipeline.as_ref(),
-                    ) {
-                        let mut full = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("repame_view3d_fullscreen"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view,
-                                resolve_target: None,
-                                depth_slice: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                                        r: target[0] as f64,
-                                        g: target[1] as f64,
-                                        b: target[2] as f64,
-                                        a: target[3] as f64,
-                                    }),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: depth_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Clear(1.0),
-                                        store: wgpu::StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        });
-                        full.set_pipeline(pipeline);
-                        full.set_bind_group(0, bind, &[]);
-                        full.draw(0..3, 0..1);
-                    }
-                }
-                super::pass::PassKind::Resolve => {
-                    if let Some(from) = entry.source_texture.as_ref() {
-                        encoder.copy_texture_to_texture(
-                            wgpu::TexelCopyTextureInfo {
-                                texture: from,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            wgpu::TexelCopyTextureInfo {
-                                texture: &entry.texture,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            wgpu::Extent3d {
-                                width: spec.target.width.max(1),
-                                height: spec.target.height.max(1),
-                                depth_or_array_layers: 1,
-                            },
-                        );
-                    }
-                }
-                super::pass::PassKind::Render => {}
-            }
-            continue;
-        }
         for r in snap.ranges.iter().filter(|r| r.pass == pass_index) {
             let program = snap
                 .material_pipelines
@@ -3757,14 +3789,13 @@ fn paint_presenting<P: BlitRenderPass>(id: &str, rpass: &mut P, resources: &Call
     let Some(entry) = all.batches.get(id) else {
         return;
     };
-    let (Some(presenting), Some(state)) = (entry.presenting.as_ref(), entry.fullscreen.as_ref())
-    else {
+    let Some(state) = entry.fullscreen.as_ref() else {
         return;
     };
-    let Some(bind) = state.binds.get(&presenting.target.name) else {
+    let Some((_, bind)) = state.present.as_ref() else {
         return;
     };
-    rpass.set_blit_pipeline(&state.pipeline);
+    rpass.set_blit_pipeline(&state.overlay_pipeline);
     rpass.set_blit_bind_group(0, bind, &[]);
     rpass.draw_blit_triangle();
 }
@@ -4411,6 +4442,135 @@ mod tests {
         assert_eq!(at(32, 32), [0, 255, 0, 255], "near quad wins by depth");
     }
 
+    /// A presenting Render pass reaches the screen with no fullscreen pass
+    /// anywhere in the frame: half-opacity blue over the red scene must read
+    /// back as a half-half mix, proving the composite and its single tint ran.
+    #[test]
+    fn offscreen_presenting_render_pass_composites_over_the_scene() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+        use super::super::pass::{RenderPass, RenderTarget, RenderTargetFormat, TargetSemantics};
+
+        const SIZE: u32 = 32;
+
+        struct Present {
+            cam: OrbitCamera,
+            scene_group: MeshGroup,
+            hud_group: MeshGroup,
+        }
+
+        impl WgpuCallback for Present {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.present");
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.push_group(&self.scene_group);
+                let hud = RenderTarget::new(
+                    "hud",
+                    SIZE,
+                    SIZE,
+                    RenderTargetFormat::Rgba8UnormSrgb,
+                    TargetSemantics::SceneColor,
+                )
+                .with_clear([0.0, 0.0, 0.0, 1.0]);
+                batch
+                    .set_passes(&[
+                        RenderPass::render(hud, Vec::new()).presenting([1.0, 1.0, 1.0, 0.5])
+                    ])
+                    .expect("valid present pass");
+                batch.push_group_for_pass(&self.hud_group, 1);
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.present",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    SIZE,
+                    SIZE,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut CallbackRenderPass<'_, '_>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_callback("test.present", rpass, resources);
+            }
+        }
+
+        fn quad(color: [f32; 3]) -> MeshGroup {
+            let mut group = MeshGroup {
+                depth_test: true,
+                ..Default::default()
+            };
+            group.push_quad(
+                [-5.0, 0.0, 5.0],
+                [5.0, 0.0, 5.0],
+                [5.0, 0.0, -5.0],
+                [-5.0, 0.0, -5.0],
+                color,
+            );
+            group
+        }
+
+        let mut renderer = match OffscreenRenderer::new_blocking(SIZE, SIZE, 1) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SKIP present test (no GPU): {e}");
+                return;
+            }
+        };
+        let scene = Scene {
+            clear_color: Color::from_rgba(0, 0, 0, 255),
+            nodes: vec![SceneNode::Callback {
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: SIZE as f32,
+                    h: SIZE as f32,
+                },
+                payload: Callback::new(Present {
+                    cam: OrbitCamera {
+                        target: glam::Vec3::ZERO,
+                        yaw: 0.0,
+                        pitch: 0.9,
+                        dist: 30.0,
+                        fov_y_deg: 30.0,
+                    },
+                    scene_group: quad([1.0, 0.0, 0.0]),
+                    hud_group: quad([0.0, 0.0, 1.0]),
+                }),
+            }],
+        };
+        let px = renderer
+            .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+            .expect("offscreen render");
+        let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+        let center = [px[i], px[i + 1], px[i + 2], px[i + 3]];
+        assert_eq!(center[3], 255, "the overlay covers the center: {center:?}");
+        assert!(
+            center[0] > 175 && center[0] < 200 && center[2] > 175 && center[2] < 200,
+            "half-opacity blue blended over the red scene: {center:?}"
+        );
+        assert!(center[1] < 20, "green stays untouched: {center:?}");
+    }
+
     /// End-to-end GPU proof for the fullscreen/present path: a pass renders
     /// geometry, a fullscreen pass samples it, and the presenting pass
     /// composites it over the scene. A green quad that started as blue must
@@ -4821,7 +4981,7 @@ mod tests {
         let center = [px[i], px[i + 1], px[i + 2], px[i + 3]];
         assert_eq!(center[3], 255, "quad covers the center: {center:?}");
         assert!(
-            center[0] > 120,
+            center[0] > 175 && center[0] < 200,
             "half-red register reached the pixel: {center:?}"
         );
         assert!(

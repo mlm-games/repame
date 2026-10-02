@@ -183,6 +183,7 @@ pub enum PassError {
     UnknownSource,
     DuplicateTarget,
     TooManyTargets,
+    SizeMismatch,
 }
 
 /// Hardware ceiling on simultaneously bound targets in one pass list.
@@ -193,27 +194,36 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
     if passes.len() > MAX_PASS_TARGETS {
         return Err(PassError::TooManyTargets);
     }
-    let mut names: Vec<&str> = Vec::with_capacity(passes.len());
+    let mut names: Vec<(&str, &RenderTarget)> = Vec::with_capacity(passes.len());
     for pass in passes {
         if pass.target.width == 0 || pass.target.height == 0 {
             return Err(PassError::ZeroSized);
         }
-        if pass.target.samples != 1 && pass.target.samples != 4 {
+        if pass.target.samples != 1 {
             return Err(PassError::SampleCountUnsupported);
         }
-        if names.contains(&pass.target.name.as_str()) {
+        if names
+            .iter()
+            .any(|(name, _)| *name == pass.target.name.as_str())
+        {
             return Err(PassError::DuplicateTarget);
         }
         match pass.kind {
             PassKind::Render => {}
             PassKind::Resolve | PassKind::Fullscreen => {
                 let source = pass.source.as_deref().ok_or(PassError::MissingSource)?;
-                if !names.contains(&source) {
-                    return Err(PassError::UnknownSource);
+                let (_, source) = names
+                    .iter()
+                    .find(|(name, _)| *name == source)
+                    .ok_or(PassError::UnknownSource)?;
+                if pass.kind == PassKind::Resolve
+                    && (source.width != pass.target.width || source.height != pass.target.height)
+                {
+                    return Err(PassError::SizeMismatch);
                 }
             }
         }
-        names.push(pass.target.name.as_str());
+        names.push((&pass.target.name, &pass.target));
     }
     Ok(())
 }

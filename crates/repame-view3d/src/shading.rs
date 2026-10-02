@@ -176,7 +176,7 @@ pub fn material_fragment(model: &ShadingModel) -> Result<String, ShadingError> {
     let mut body = String::from("    var outColor: vec4<f32>;\n");
     for unit in &units {
         body.push_str(&format!(
-            "    let tex{unit} = textureSample(scene_tex, scene_smp, in.uv, i32(page_of({unit}u) + 0.5)).rgb;\n"
+            "    let tex{unit} = textureSample(scene_tex, scene_smp, in.uv, i32(page_of({unit}u) + 0.5));\n"
         ));
         body.push_str(&format!("    let lod{unit} = 0.0;\n"));
     }

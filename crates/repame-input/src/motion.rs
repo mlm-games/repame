@@ -37,6 +37,7 @@ pub trait MotionSource {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MotionSnapshot {
     pub kind: SensorKind,
+    /// Device-to-world orientation.
     pub orientation: Quat,
     pub angular_velocity: Vec3,
     pub acceleration: Vec3,
@@ -46,8 +47,9 @@ pub struct MotionSnapshot {
 pub const GRAVITY: f32 = 9.806_65;
 
 /// Integrates gyro readings into a device orientation, as console SDKs do for
-/// motion controllers: orientation advances by the angular velocity over the
-/// frame, and the accelerometer is reported in the device frame alongside it.
+/// motion controllers: `orientation` maps the device frame into the world,
+/// device-frame angular velocity composes on its right, and the accelerometer
+/// is reported in the device frame alongside it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MotionTracker {
     kind: SensorKind,
@@ -76,7 +78,7 @@ impl MotionTracker {
         if dt_seconds > 0.0 && self.kind.has_gyroscope() {
             let spin = sample.angular_velocity * dt_seconds;
             if spin.length_squared() > 0.0 {
-                self.orientation = (Quat::from_scaled_axis(spin) * self.orientation).normalize();
+                self.orientation = (self.orientation * Quat::from_scaled_axis(spin)).normalize();
             }
             self.angular_velocity = sample.angular_velocity;
         }
@@ -104,9 +106,10 @@ impl MotionTracker {
         self.acceleration
     }
 
-    /// Gravity direction in the device frame, from the tracked orientation.
+    /// Gravity direction in the device frame: world down through the
+    /// orientation's inverse, since `orientation` maps device into world.
     pub fn gravity(&self) -> Vec3 {
-        self.orientation * Vec3::new(0.0, -GRAVITY, 0.0)
+        self.orientation.inverse() * Vec3::new(0.0, -GRAVITY, 0.0)
     }
 
     pub fn snapshot(&self) -> MotionSnapshot {

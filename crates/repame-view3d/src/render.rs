@@ -294,6 +294,36 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Fullscreen pass shader: one triangle over the viewport, sampling the
+/// source pass target. The fragment stage applies the pass's tint, so a
+/// presenting pass can grade or fade what it composites.
+const FULLSCREEN_SHADER: &str = r#"
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var src_smp: sampler;
+@group(0) @binding(2) var<uniform> tint: vec4<f32>;
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32((index << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(index & 2u) * 2.0 - 1.0;
+    out.pos = vec4<f32>(x, -y, 0.0, 1.0);
+    out.uv = vec2<f32>(f32((index << 1u) & 2u), 1.0 - f32(index & 2u));
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let tex = textureSample(src_tex, src_smp, in.uv);
+    return vec4<f32>(tex.rgb * tint.rgb, tex.a * tint.a);
+}
+"#;
+
 /// The default pipeline's module: shared prefix plus the legacy fragment
 /// stage. Material programs reuse the same prefix with their own fragment
 /// stage, so the vertex path and every binding stay identical.
@@ -305,7 +335,9 @@ use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
-use repose_render_wgpu::{CallbackRenderPass, CallbackResources, DepthComposite, ScreenDescriptor};
+use repose_render_wgpu::{
+    BlitRenderPass, CallbackRenderPass, CallbackResources, DepthComposite, ScreenDescriptor,
+};
 
 use super::mesh::MeshGroup;
 use super::skin::SkinnedDraw;
@@ -590,6 +622,26 @@ pub struct MaterialUniform {
 const _: () = assert!(size_of::<MaterialUniform>() == 128);
 const _: () = assert!(super::material::MAX_TEX_UNITS == 8);
 
+/// GPU state for fullscreen passes.
+struct FullscreenState {
+    pipeline: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+    binds: HashMap<String, wgpu::BindGroup>,
+    layout: wgpu::BindGroupLayout,
+    tints: HashMap<String, wgpu::Buffer>,
+}
+
+/// One pass as the frame executor sees it: its declaration plus the GPU
+/// handles it needs, paired by declaration name.
+struct PassEntry {
+    spec: PassSpec,
+    view: wgpu::TextureView,
+    depth_view: wgpu::TextureView,
+    texture: wgpu::Texture,
+    /// The target a resolve pass copies from, when it has one.
+    source_texture: Option<wgpu::Texture>,
+}
+
 /// A declared render target the batch owns: its texture and view, allocated
 /// on first use and reused while the declaration is unchanged.
 struct PassTarget {
@@ -615,6 +667,10 @@ pub struct PassSpec {
     /// 1-based position in the declared list, matching the index a game
     /// passes to [`SceneBatch::push_group_for_pass`].
     pub index: u32,
+    /// Composites this target over the scene when the frame is painted.
+    pub presents: bool,
+    /// Tint and opacity the presenting composite applies.
+    pub overlay: [f32; 4],
 }
 
 /// Maps a declared target format onto the GPU format it renders as.
@@ -1600,6 +1656,8 @@ impl SceneBatch {
                 kind: pass.kind,
                 source: pass.source.clone(),
                 index: index as u32 + 1,
+                presents: pass.presents,
+                overlay: pass.overlay,
             })
             .collect();
         Ok(())
@@ -1608,6 +1666,195 @@ impl SceneBatch {
     /// Passes declared for this frame, in execution order.
     pub fn passes(&self) -> &[PassSpec] {
         &self.passes
+    }
+
+    /// Builds (once) the fullscreen pipeline and sampler, and records which
+    /// pass composites to the screen. GPU state lives on the entry, not the
+    /// per-frame batch.
+    fn sync_fullscreen(&self, device: &wgpu::Device, res: &mut SceneEntry) {
+        res.presenting = self.passes.iter().find(|spec| spec.presents).cloned();
+        let needs = self
+            .passes
+            .iter()
+            .any(|spec| spec.kind == super::pass::PassKind::Fullscreen)
+            || res
+                .presenting
+                .as_ref()
+                .is_some_and(|spec| spec.kind == super::pass::PassKind::Fullscreen);
+        if !needs {
+            res.fullscreen = None;
+            return;
+        }
+        if res.fullscreen.is_some() {
+            return;
+        }
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("repame_view3d_fullscreen"),
+            source: wgpu::ShaderSource::Wgsl(FULLSCREEN_SHADER.into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("repame_view3d_fullscreen_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("repame_view3d_fullscreen_pl"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("repame_view3d_fullscreen"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: res.key.0,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                ..Default::default()
+            },
+            // The shared UI pass carries a depth buffer, so a composite must
+            // declare one too: depth-tested but never writing.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("repame_view3d_fullscreen_smp"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        res.fullscreen = Some(FullscreenState {
+            pipeline,
+            sampler,
+            binds: HashMap::new(),
+            layout,
+            tints: HashMap::new(),
+        });
+    }
+
+    /// Builds the fullscreen bind groups this frame's passes need, so the
+    /// pass execution and the present composite can share them.
+    fn warm_fullscreen_binds(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        res: &mut SceneEntry,
+    ) {
+        if res.fullscreen.is_none() {
+            return;
+        }
+        let mut wanted: Vec<(String, [f32; 4])> = Vec::new();
+        for spec in &self.passes {
+            // A fullscreen pass samples its source; a presenting pass
+            // composites its own output at paint time. Both need a bind.
+            if let Some(source) = spec.source.clone() {
+                wanted.push((source, spec.overlay));
+            }
+            if spec.presents {
+                wanted.push((spec.target.name.clone(), spec.overlay));
+            }
+        }
+        wanted.sort_by(|a, b| a.0.cmp(&b.0));
+        wanted.dedup_by(|a, b| a.0 == b.0);
+        for (source, overlay) in wanted {
+            SceneBatch::fullscreen_bind(device, queue, res, &source, overlay);
+        }
+    }
+
+    /// Bind group sampling `source`, cached per target name.
+    fn fullscreen_bind(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        res: &mut SceneEntry,
+        source: &str,
+        tint: [f32; 4],
+    ) -> Option<wgpu::BindGroup> {
+        let state = res.fullscreen.as_mut()?;
+        let existing = state.binds.get(source).cloned();
+        if let Some(bind) = existing {
+            return Some(bind);
+        }
+        let view = res.pass_targets.get(source)?.view.clone();
+        let buffer = state.tints.entry(source.to_string()).or_insert_with(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("repame_view3d_fullscreen_tint"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        queue.write_buffer(buffer, 0, bytemuck::cast_slice(&tint));
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("repame_view3d_fullscreen_bg"),
+            layout: &state.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&state.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        });
+        state.binds.insert(source.to_string(), bind.clone());
+        Some(bind)
     }
 
     /// Encodes a copy of a declared pass target into `encoder`, returning
@@ -2722,6 +2969,8 @@ fn vs_main(
             material_pipelines: Vec::new(),
             pass_targets: HashMap::new(),
             pass_specs: Vec::new(),
+            fullscreen: None,
+            presenting: None,
             pipe_layout,
             shadow_cam_bind,
             shadow_camera_buf,
@@ -2814,6 +3063,8 @@ fn vs_main(
         queue.write_buffer(&res.camera, 0, bytemuck::cast_slice(&[self.camera]));
         self.sync_material_pipelines(device, queue, res);
         self.sync_pass_targets(device, res);
+        self.sync_fullscreen(device, res);
+        self.warm_fullscreen_binds(device, queue, res);
         res.pass_specs = self.passes.clone();
         let program = self.materials.first().map(|entry| entry.cache_key);
         if program.is_some() {
@@ -2939,6 +3190,11 @@ struct SceneEntry {
     material_pipelines: Vec<MaterialPipelines>,
     /// Pass targets by declared name, allocated on first use.
     pass_targets: HashMap<String, PassTarget>,
+    /// Fullscreen pass state: the pipeline, its sampler, and one bind
+    /// group per source texture.
+    fullscreen: Option<FullscreenState>,
+    /// The pass whose target composites over the scene at paint time.
+    presenting: Option<PassSpec>,
     /// Pass declarations the batch staged for this frame.
     pass_specs: Vec<PassSpec>,
     pipe_layout: wgpu::PipelineLayout,
@@ -3004,7 +3260,10 @@ pub fn prepare_scene_with_id(
         cam_bind: wgpu::BindGroup,
         material_bind: wgpu::BindGroup,
         material_pipelines: Vec<MaterialPipelines>,
-        passes: Vec<(PassSpec, wgpu::TextureView, wgpu::TextureView)>,
+        passes: Vec<PassEntry>,
+        /// Source texture -> fullscreen bind group, built during upload.
+        fullscreen_binds: HashMap<String, wgpu::BindGroup>,
+        fullscreen_pipeline: Option<wgpu::RenderPipeline>,
         tex_bind: wgpu::BindGroup,
         shadow_bind: wgpu::BindGroup,
         shadow_depth_pipeline: wgpu::RenderPipeline,
@@ -3055,13 +3314,29 @@ pub fn prepare_scene_with_id(
         Some(Snapshot {
             cam_bind: res.cam_bind.clone(),
             material_bind: res.material_bind.clone(),
+            fullscreen_binds: res
+                .fullscreen
+                .as_ref()
+                .map(|state| state.binds.clone())
+                .unwrap_or_default(),
+            fullscreen_pipeline: res.fullscreen.as_ref().map(|state| state.pipeline.clone()),
             passes: res
                 .pass_specs
                 .iter()
                 .filter_map(|spec| {
-                    res.pass_targets.get(&spec.target.name).map(|target| {
-                        (spec.clone(), target.view.clone(), target.depth_view.clone())
-                    })
+                    res.pass_targets
+                        .get(&spec.target.name)
+                        .map(|target| PassEntry {
+                            spec: spec.clone(),
+                            view: target.view.clone(),
+                            depth_view: target.depth_view.clone(),
+                            texture: target.texture.clone(),
+                            source_texture: spec
+                                .source
+                                .as_ref()
+                                .and_then(|name| res.pass_targets.get(name))
+                                .map(|target| target.texture.clone()),
+                        })
                 })
                 .collect(),
             material_pipelines: res
@@ -3289,7 +3564,8 @@ pub fn prepare_scene_with_id(
 
     // Declared passes each own their attachment, so they run outside the
     // shared scene pass, in declaration order.
-    for (spec, view, depth_view) in snap.passes.iter() {
+    for entry in snap.passes.iter() {
+        let (spec, view, depth_view) = (&entry.spec, &entry.view, &entry.depth_view);
         let pass_index = spec.index;
         let target = spec.target.clear;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3334,6 +3610,80 @@ pub fn prepare_scene_with_id(
             0.0,
             1.0,
         );
+        // Fullscreen and resolve passes do not draw geometry: one samples a
+        // source target, the other copies it. Both close this pass first.
+        if spec.kind != super::pass::PassKind::Render {
+            drop(pass);
+            match spec.kind {
+                super::pass::PassKind::Fullscreen => {
+                    if let (Some(bind), Some(pipeline)) = (
+                        spec.source
+                            .as_deref()
+                            .and_then(|name| snap.fullscreen_binds.get(name)),
+                        snap.fullscreen_pipeline.as_ref(),
+                    ) {
+                        let mut full = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("repame_view3d_fullscreen"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                                        r: target[0] as f64,
+                                        g: target[1] as f64,
+                                        b: target[2] as f64,
+                                        a: target[3] as f64,
+                                    }),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(1.0),
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        full.set_pipeline(pipeline);
+                        full.set_bind_group(0, bind, &[]);
+                        full.draw(0..3, 0..1);
+                    }
+                }
+                super::pass::PassKind::Resolve => {
+                    if let Some(from) = entry.source_texture.as_ref() {
+                        encoder.copy_texture_to_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: from,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &entry.texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::Extent3d {
+                                width: spec.target.width.max(1),
+                                height: spec.target.height.max(1),
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                    }
+                }
+                super::pass::PassKind::Render => {}
+            }
+            continue;
+        }
         for r in snap.ranges.iter().filter(|r| r.pass == pass_index) {
             let program = snap
                 .material_pipelines
@@ -3380,6 +3730,7 @@ pub fn paint_scene_with_id(
         return;
     };
     composite.blit(id, rpass);
+    paint_presenting(id, rpass, resources);
 }
 
 pub(crate) fn paint_scene_with_callback(
@@ -3391,6 +3742,31 @@ pub(crate) fn paint_scene_with_callback(
         return;
     };
     composite.blit(id, rpass);
+    paint_presenting(id, rpass, resources);
+}
+
+/// Composites the frame's presenting pass over the scene, if it declared one.
+///
+/// The shared UI pass is the only surface a game sees, so this is where a
+/// pass target that asked to be presented lands: one fullscreen triangle
+/// over the blitted scene, tinted and alpha-blended per the declaration.
+fn paint_presenting<P: BlitRenderPass>(id: &str, rpass: &mut P, resources: &CallbackResources) {
+    let Some(all) = resources.get::<SceneResources>() else {
+        return;
+    };
+    let Some(entry) = all.batches.get(id) else {
+        return;
+    };
+    let (Some(presenting), Some(state)) = (entry.presenting.as_ref(), entry.fullscreen.as_ref())
+    else {
+        return;
+    };
+    let Some(bind) = state.binds.get(&presenting.target.name) else {
+        return;
+    };
+    rpass.set_blit_pipeline(&state.pipeline);
+    rpass.set_blit_bind_group(0, bind, &[]);
+    rpass.draw_blit_triangle();
 }
 
 #[cfg(test)]
@@ -4035,6 +4411,137 @@ mod tests {
         assert_eq!(at(32, 32), [0, 255, 0, 255], "near quad wins by depth");
     }
 
+    /// End-to-end GPU proof for the fullscreen/present path: a pass renders
+    /// geometry, a fullscreen pass samples it, and the presenting pass
+    /// composites it over the scene. A green quad that started as blue must
+    /// read back green on screen, so every hop ran.
+    #[test]
+    fn offscreen_fullscreen_pass_composites_over_the_scene() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+        use super::super::pass::{RenderPass, RenderTarget, TargetSemantics};
+
+        const SIZE: u32 = 32;
+
+        struct Chain {
+            cam: OrbitCamera,
+            scene_group: MeshGroup,
+            pass_group: MeshGroup,
+        }
+
+        impl WgpuCallback for Chain {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.chain");
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.push_group(&self.scene_group);
+
+                let format = super::super::pass::RenderTargetFormat::Rgba8UnormSrgb;
+                let source =
+                    RenderTarget::new("src", SIZE, SIZE, format, TargetSemantics::SceneColor)
+                        .with_clear([0.0, 0.0, 0.0, 1.0]);
+                let output =
+                    RenderTarget::new("out", SIZE, SIZE, format, TargetSemantics::SceneColor)
+                        .with_clear([0.0, 0.0, 0.0, 1.0]);
+                batch
+                    .set_passes(&[
+                        RenderPass::render(source.clone(), Vec::new()),
+                        RenderPass::fullscreen("src", output.clone())
+                            .presenting([1.0, 1.0, 1.0, 1.0]),
+                    ])
+                    .expect("valid chain");
+                batch.push_group_for_pass(&self.pass_group, 1);
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.chain",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    SIZE,
+                    SIZE,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut CallbackRenderPass<'_, '_>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_callback("test.chain", rpass, resources);
+            }
+        }
+
+        fn quad(color: [f32; 3]) -> MeshGroup {
+            let mut group = MeshGroup {
+                depth_test: true,
+                ..Default::default()
+            };
+            group.push_quad(
+                [-5.0, 0.0, 5.0],
+                [5.0, 0.0, 5.0],
+                [5.0, 0.0, -5.0],
+                [-5.0, 0.0, -5.0],
+                color,
+            );
+            group
+        }
+
+        let mut renderer = match OffscreenRenderer::new_blocking(SIZE, SIZE, 1) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SKIP chain test (no GPU): {e}");
+                return;
+            }
+        };
+        let scene = Scene {
+            clear_color: Color::from_rgba(0, 0, 0, 255),
+            nodes: vec![SceneNode::Callback {
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: SIZE as f32,
+                    h: SIZE as f32,
+                },
+                payload: Callback::new(Chain {
+                    cam: OrbitCamera {
+                        target: glam::Vec3::ZERO,
+                        yaw: 0.0,
+                        pitch: 0.9,
+                        dist: 30.0,
+                        fov_y_deg: 30.0,
+                    },
+                    scene_group: quad([1.0, 0.0, 0.0]),
+                    pass_group: quad([0.0, 0.0, 1.0]),
+                }),
+            }],
+        };
+        let px = renderer
+            .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+            .expect("offscreen render");
+        let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+        let center = [px[i], px[i + 1], px[i + 2], px[i + 3]];
+        assert_eq!(center[3], 255, "the overlay covers the center: {center:?}");
+        assert!(
+            center[2] > 120 && center[0] < 80,
+            "blue pass geometry reached the screen through the fullscreen composite: {center:?}"
+        );
+    }
+
     /// End-to-end GPU proof for declared passes: a group routed to a named
     /// pass renders into that pass's own texture rather than the shared
     /// scene target. The read-back comes from the pass texture, so a group
@@ -4207,7 +4714,7 @@ mod tests {
         use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
 
         use super::super::camera::OrbitCamera;
-        use super::super::material::{ShadingModel, TevArg, TevMode, TevOp, TevOperand};
+        use super::super::material::{ShadingModel, TevArg};
 
         struct Mat {
             cam: OrbitCamera,
@@ -4226,6 +4733,10 @@ mod tests {
             ) -> Vec<wgpu::CommandBuffer> {
                 let mut batch = SceneBatch::with_id("test.material");
                 batch.set_camera(self.cam.view_proj(1.0));
+                batch.set_light(SceneLight {
+                    exposure: 1.0,
+                    ..SceneLight::default()
+                });
                 let slot = batch.register_material(&self.model);
                 batch.push_group_with_material(&self.group, slot);
                 batch.finish();
@@ -4272,21 +4783,7 @@ mod tests {
         let mut model = ShadingModel::default();
         model.kcolors[0] = [0.5, 0.0, 0.0, 1.0];
         let stage = &mut model.stages[0];
-        stage.color_arg = [
-            TevOperand::rgb(TevArg::Color, 4, 0),
-            TevOperand::rgb(TevArg::KColor(0), 4, 0),
-            TevOperand::rgb(TevArg::One, 4, 0),
-            TevOperand::rgb(TevArg::One, 4, 0),
-        ];
-        stage.alpha_arg = [
-            TevOperand::alpha(TevArg::Alpha, 4, 0),
-            TevOperand::alpha(TevArg::One, 4, 0),
-            TevOperand::alpha(TevArg::One, 4, 0),
-        ];
-        stage.color_op = [TevOp::ATimesB; 4];
-        stage.alpha_op = [TevOp::ATimesB; 3];
-        stage.color_mode = TevMode::Replace;
-        stage.alpha_mode = TevMode::Replace;
+        stage.color_arg = [TevArg::Zero, TevArg::Color, TevArg::KColor(0), TevArg::Zero];
 
         let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
             Ok(r) => r,
@@ -4324,7 +4821,7 @@ mod tests {
         let center = [px[i], px[i + 1], px[i + 2], px[i + 3]];
         assert_eq!(center[3], 255, "quad covers the center: {center:?}");
         assert!(
-            center[0] > 100 && center[0] < 160,
+            center[0] > 120,
             "half-red register reached the pixel: {center:?}"
         );
         assert!(

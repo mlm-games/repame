@@ -51,7 +51,7 @@ impl TexFormat {
             Self::I4 => 0,
             Self::I8 => 1,
             Self::Ia4 => 1,
-            Self::Ia8 => 1,
+            Self::Ia8 => 2,
             Self::R4 => 0,
             Self::Rgb565 => 2,
             Self::Rgb5A3 => 2,
@@ -74,12 +74,39 @@ impl TexFormat {
         }
     }
 
-    /// Byte size of a `width` x `height` image, row-aligned.
-    pub fn image_size(self, width: usize, height: usize) -> usize {
-        let row = self.row_bytes(width);
-        row * height
+    /// Console tile a format is stored in: block width, block height, block
+    /// bytes. `None` for the engine's linear formats.
+    pub const fn tile(self) -> Option<(usize, usize, usize)> {
+        match self {
+            Self::I4
+            | Self::Indexed {
+                bits: PaletteBits::I4,
+            } => Some((8, 8, 32)),
+            Self::I8
+            | Self::Ia4
+            | Self::Indexed {
+                bits: PaletteBits::I8,
+            } => Some((8, 4, 32)),
+            Self::Ia8 | Self::Rgb565 | Self::Rgb5A3 => Some((4, 4, 32)),
+            Self::Rgba8 => Some((4, 4, 64)),
+            Self::R4 | Self::IndexedAlpha { .. } => None,
+        }
     }
 
+    /// Byte size of a `width` x `height` image.
+    ///
+    /// Tiled formats charge whole blocks, so a partial block at the right or
+    /// bottom edge still costs its full tile; linear formats stay row-aligned.
+    pub fn image_size(self, width: usize, height: usize) -> usize {
+        match self.tile() {
+            Some((block_w, block_h, block_bytes)) => {
+                width.div_ceil(block_w) * height.div_ceil(block_h) * block_bytes
+            }
+            None => self.row_bytes(width) * height,
+        }
+    }
+
+    /// Bytes per row of the linear storage; tiled formats use [`Self::tile`].
     pub fn row_bytes(self, width: usize) -> usize {
         match self {
             Self::I4
@@ -90,6 +117,9 @@ impl TexFormat {
             Self::IndexedAlpha {
                 bits: PaletteBits::I4,
             } => width,
+            Self::IndexedAlpha {
+                bits: PaletteBits::I8,
+            } => width * 2,
             _ => self.bytes_per_texel() * width,
         }
     }
@@ -158,6 +188,91 @@ pub enum TexError {
     PaletteOutOfRange,
 }
 
+/// Visits every texel of a page in storage order with the byte offset of its
+/// index or texel bytes. Tiled formats walk whole blocks, padding included.
+fn walk_texels(
+    format: TexFormat,
+    width: usize,
+    height: usize,
+    mut visit: impl FnMut(usize, usize, usize),
+) {
+    let Some((block_w, block_h, block_bytes)) = format.tile() else {
+        let row = format.row_bytes(width);
+        for y in 0..height {
+            for x in 0..width {
+                let offset = match format {
+                    TexFormat::R4 => y * row + x / 2,
+                    _ => y * row + x * format.row_bytes(1),
+                };
+                visit(x, y, offset);
+            }
+        }
+        return;
+    };
+    let block_row = block_bytes / block_h;
+    let mut block = 0;
+    for block_y in 0..height.div_ceil(block_h) {
+        for block_x in 0..width.div_ceil(block_w) {
+            let rows = block_h.min(height - block_y * block_h);
+            let cols = block_w.min(width - block_x * block_w);
+            for row in 0..rows {
+                for col in 0..cols {
+                    let offset = match format {
+                        TexFormat::I4
+                        | TexFormat::Indexed {
+                            bits: PaletteBits::I4,
+                        } => block + row * block_row + col / 2,
+                        TexFormat::Rgba8 => block + row * 8 + col * 2,
+                        TexFormat::Ia8 | TexFormat::Rgb565 | TexFormat::Rgb5A3 => {
+                            block + row * block_row + col * 2
+                        }
+                        _ => block + row * block_row + col,
+                    };
+                    visit(block_x * block_w + col, block_y * block_h + row, offset);
+                }
+            }
+            block += block_bytes;
+        }
+    }
+}
+
+/// Replicates a 3-bit value across the byte: 0 -> 0, 7 -> 255.
+const fn expand3(value: u8) -> u8 {
+    (value << 5) | (value << 2) | (value >> 1)
+}
+
+/// Index and alpha a texel stores; `alpha` is opaque for plain indexes.
+fn texel_index(format: TexFormat, data: &[u8], x: usize, offset: usize) -> (u8, u8) {
+    match format {
+        TexFormat::Indexed {
+            bits: PaletteBits::I4,
+        }
+        | TexFormat::I4 => {
+            let byte = data[offset];
+            let value = if x.is_multiple_of(2) {
+                byte >> 4
+            } else {
+                byte & 0xF
+            };
+            (value, 0xFF)
+        }
+        TexFormat::Indexed {
+            bits: PaletteBits::I8,
+        }
+        | TexFormat::I8 => (data[offset], 0xFF),
+        TexFormat::IndexedAlpha {
+            bits: PaletteBits::I4,
+        } => {
+            let byte = data[offset];
+            (byte & 0xF, expand3(byte >> 5))
+        }
+        TexFormat::IndexedAlpha {
+            bits: PaletteBits::I8,
+        } => (data[offset], data[offset + 1]),
+        _ => (0, 0xFF),
+    }
+}
+
 /// Decodes a palette's packed texel data into RGBA8.
 pub fn decode_palette(
     data: &[u8],
@@ -170,72 +285,46 @@ pub fn decode_palette(
         return Err(TexError::Truncated);
     }
     let mut out = vec![0_u8; width * height * 4];
-    for y in 0..height {
-        for x in 0..width {
-            let index = index_at(data, format, y * width + x);
-            if usize::from(index) >= palette.len() {
-                return Err(TexError::PaletteOutOfRange);
-            }
-            let color = palette.color(index);
-            let at = (y * width + x) * 4;
-            out[at..at + 3].copy_from_slice(&color);
-            out[at + 3] = if matches!(format, TexFormat::IndexedAlpha { .. }) {
-                (index >> 5) << 5
-            } else {
-                0xFF
-            };
+    let mut error = None;
+    walk_texels(format, width, height, |x, y, offset| {
+        if error.is_some() {
+            return;
         }
-    }
-    Ok(out)
-}
-
-fn index_at(data: &[u8], format: TexFormat, linear: usize) -> u8 {
-    match format {
-        TexFormat::Indexed {
-            bits: PaletteBits::I4,
+        let (index, alpha) = texel_index(format, data, x, offset);
+        if usize::from(index) >= palette.len() {
+            error = Some(TexError::PaletteOutOfRange);
+            return;
         }
-        | TexFormat::I4 => {
-            let byte = data[linear / 2];
-            if linear.is_multiple_of(2) {
-                byte >> 4
-            } else {
-                byte & 0xF
-            }
-        }
-        TexFormat::Indexed {
-            bits: PaletteBits::I8,
-        }
-        | TexFormat::I8 => data[linear],
-        TexFormat::IndexedAlpha {
-            bits: PaletteBits::I4,
-        }
-        | TexFormat::IndexedAlpha {
-            bits: PaletteBits::I8,
-        } => data[linear] & 0xF,
-        _ => 0,
+        let at = (y * width + x) * 4;
+        out[at..at + 3].copy_from_slice(&palette.color(index));
+        out[at + 3] = alpha;
+    });
+    match error {
+        Some(err) => Err(err),
+        None => Ok(out),
     }
 }
 
 /// Expands one packed texel to linear-ish RGBA8 bytes.
+///
+/// Bytes arrive in the format's own storage order: intensity formats are
+/// gray with their level as alpha, IA4 keeps alpha in the high nibble, IA8
+/// stores alpha first, RGBA8 the A/R then G/B planes.
 pub fn rgba_from_texel(bytes: &[u8], format: TexFormat) -> [u8; 4] {
     match format {
         TexFormat::I4 | TexFormat::I8 | TexFormat::R4 => {
-            let v = match format {
-                TexFormat::I4 => (bytes[0] >> 4) & 0xF,
+            let level = match format {
+                TexFormat::I4 | TexFormat::R4 => ((bytes[0] >> 4) & 0xF) * 0x11,
                 _ => bytes[0],
             };
-            let max = if format == TexFormat::I4 { 15.0 } else { 255.0 };
-            let level = ((v as f32 / max) * 255.0).round() as u8;
-            [level, level, level, 0xFF]
+            [level, level, level, level]
         }
         TexFormat::Ia4 => {
-            let packed = bytes[0];
-            let index = (packed >> 4) & 0xF;
-            let alpha = (packed & 0xF) * 0x11;
-            let level = (index as f32 / 15.0 * 255.0).round() as u8;
+            let alpha = ((bytes[0] >> 4) & 0xF) * 0x11;
+            let level = (bytes[0] & 0xF) * 0x11;
             [level, level, level, alpha]
         }
-        TexFormat::Ia8 => [bytes[0], bytes[0], bytes[0], bytes[1]],
+        TexFormat::Ia8 => [bytes[1], bytes[1], bytes[1], bytes[0]],
         TexFormat::Rgb565 => {
             let packed = u16::from_be_bytes([bytes[0], bytes[1]]);
             let r = (packed >> 11) & 0x1F;
@@ -265,11 +354,11 @@ pub fn rgba_from_texel(bytes: &[u8], format: TexFormat) -> [u8; 4] {
                     ((packed >> 8) & 0xF) as u8 * 0x11,
                     ((packed >> 4) & 0xF) as u8 * 0x11,
                     (packed & 0xF) as u8 * 0x11,
-                    ((packed >> 15) & 0x1) as u8,
+                    expand3(((packed >> 12) & 0x7) as u8),
                 ]
             }
         }
-        TexFormat::Rgba8 => [bytes[0], bytes[1], bytes[2], bytes[3]],
+        TexFormat::Rgba8 => [bytes[1], bytes[2], bytes[3], bytes[0]],
         TexFormat::Indexed { .. } | TexFormat::IndexedAlpha { .. } => {
             [bytes[0], bytes[0], bytes[0], 0xFF]
         }
@@ -279,13 +368,10 @@ pub fn rgba_from_texel(bytes: &[u8], format: TexFormat) -> [u8; 4] {
 /// Packs one RGBA8 texel back into a source format, for palette baking.
 pub fn texel_from_rgba(rgba: [u8; 4], format: TexFormat) -> Vec<u8> {
     match format {
-        TexFormat::I4 | TexFormat::R4 => vec![rgba[0] >> 4],
+        TexFormat::I4 | TexFormat::R4 => vec![(rgba[0] >> 4) << 4],
         TexFormat::I8 => vec![rgba[0]],
-        TexFormat::Ia4 => {
-            let level = rgba[0] >> 4;
-            vec![(level << 4) | (rgba[3] >> 4)]
-        }
-        TexFormat::Ia8 => vec![rgba[0], rgba[3]],
+        TexFormat::Ia4 => vec![((rgba[3] >> 4) << 4) | (rgba[0] >> 4)],
+        TexFormat::Ia8 => vec![rgba[3], rgba[0]],
         TexFormat::Rgb565 => {
             let r = (u32::from(rgba[0]) * 31 / 255) as u16 & 0x1F;
             let g = (u32::from(rgba[1]) * 63 / 255) as u16 & 0x3F;
@@ -305,13 +391,13 @@ pub fn texel_from_rgba(rgba: [u8; 4], format: TexFormat) -> Vec<u8> {
                 let r = (u32::from(rgba[0]) >> 4) & 0xF;
                 let g = (u32::from(rgba[1]) >> 4) & 0xF;
                 let b = (u32::from(rgba[2]) >> 4) & 0xF;
-                let a = (u32::from(rgba[3]) >> 5) & 0x1;
-                (((r << 12) | (g << 8) | (b << 4) | a) as u16)
+                let a = (u32::from(rgba[3]) * 7 / 255) & 0x7;
+                (((a << 12) | (r << 8) | (g << 4) | b) as u16)
                     .to_be_bytes()
                     .to_vec()
             }
         }
-        TexFormat::Rgba8 => rgba.to_vec(),
+        TexFormat::Rgba8 => vec![rgba[3], rgba[0], rgba[1], rgba[2]],
         TexFormat::Indexed { bits } | TexFormat::IndexedAlpha { bits } => match bits {
             PaletteBits::I4 => vec![rgba[0] >> 4],
             PaletteBits::I8 => vec![rgba[0]],
@@ -319,7 +405,7 @@ pub fn texel_from_rgba(rgba: [u8; 4], format: TexFormat) -> Vec<u8> {
     }
 }
 
-/// Decodes a full page to RGBA8, resolving palettes and 4-bit row packing.
+/// Decodes a full page to RGBA8, resolving palettes and block tiles.
 pub fn decode_texels(source: &TextureSource) -> Result<Vec<u8>, TexError> {
     if source.width == 0 || source.height == 0 {
         return Err(TexError::DimensionMismatch);
@@ -334,51 +420,74 @@ pub fn decode_texels(source: &TextureSource) -> Result<Vec<u8>, TexError> {
             source.height,
         );
     }
-    let row = source.format.row_bytes(source.width);
-    if source.data.len() < row * source.height {
+    if source.data.len() < source.format.image_size(source.width, source.height) {
         return Err(TexError::Truncated);
     }
-    let bpt = source.format.bytes_per_texel();
-    if bpt == 0 {
-        return decode_palette(
-            &source.data,
-            source.format,
-            &Palette::new(vec![], PaletteBits::I4),
-            source.width,
-            source.height,
-        );
-    }
     let mut out = vec![0_u8; source.width * source.height * 4];
-    for y in 0..source.height {
-        for x in 0..source.width {
-            let at = y * row + x * bpt;
-            let rgba = rgba_from_texel(&source.data[at..at + bpt], source.format);
-            let out_at = (y * source.width + x) * 4;
-            out[out_at..out_at + 4].copy_from_slice(&rgba);
-        }
-    }
+    walk_texels(
+        source.format,
+        source.width,
+        source.height,
+        |x, y, offset| {
+            let bytes: [u8; 4] = match source.format {
+                TexFormat::I4 | TexFormat::R4 => {
+                    let byte = source.data[offset];
+                    let normalized = if x.is_multiple_of(2) {
+                        byte & 0xF0
+                    } else {
+                        (byte & 0xF) << 4
+                    };
+                    [normalized, 0, 0, 0]
+                }
+                TexFormat::Rgba8 => [
+                    source.data[offset],
+                    source.data[offset + 1],
+                    source.data[offset + 32],
+                    source.data[offset + 33],
+                ],
+                format => {
+                    let size = match format {
+                        TexFormat::Ia8 | TexFormat::Rgb565 | TexFormat::Rgb5A3 => 2,
+                        _ => format.bytes_per_texel().max(1),
+                    };
+                    let mut bytes = [0_u8; 4];
+                    bytes[..size].copy_from_slice(&source.data[offset..offset + size]);
+                    bytes
+                }
+            };
+            let at = (y * source.width + x) * 4;
+            out[at..at + 4].copy_from_slice(&rgba_from_texel(&bytes, source.format));
+        },
+    );
     Ok(out)
 }
 
-/// Nearest-neighbor index of the source texel a mip level samples.
-fn resample_half_index(x: usize, y: usize) -> (usize, usize) {
-    (x * 2, y * 2)
-}
-
 /// Box-filters an RGBA8 image down one mip level.
+///
+/// Each destination texel averages the source texels covering it, so odd
+/// dimensions keep their last row or column instead of dropping it — the
+/// result is always `(width / 2).max(1)` x `(height / 2).max(1)`.
 pub fn resample_half(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
-    if width < 2 || height < 2 {
+    let (w, h) = ((width / 2).max(1), (height / 2).max(1));
+    if w == width && h == height {
         return rgba.to_vec();
     }
-    let (w, h) = (width / 2, height / 2);
     let mut out = vec![0_u8; w * h * 4];
     for y in 0..h {
         for x in 0..w {
             let mut sum = [0_u32; 4];
-            for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                let (sx, sy) = resample_half_index(x, y);
-                let at = ((sy + dy) * width + sx + dx) * 4;
-                if at + 3 < rgba.len() {
+            let mut count = 0_u32;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let (sx, sy) = (x * 2 + dx, y * 2 + dy);
+                    if sx >= width || sy >= height {
+                        continue;
+                    }
+                    let at = (sy * width + sx) * 4;
+                    if at + 3 >= rgba.len() {
+                        continue;
+                    }
+                    count += 1;
                     for channel in 0..4 {
                         sum[channel] += u32::from(rgba[at + channel]);
                     }
@@ -386,7 +495,11 @@ pub fn resample_half(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
             }
             let out_at = (y * w + x) * 4;
             for channel in 0..4 {
-                out[out_at + channel] = (sum[channel] / 4) as u8;
+                out[out_at + channel] = if count == 0 {
+                    0
+                } else {
+                    (sum[channel] / count) as u8
+                };
             }
         }
     }

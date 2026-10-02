@@ -135,6 +135,11 @@ pub struct RenderPass {
     pub source: Option<String>,
     /// Groups drawn by [`PassKind::Render`]; empty for the other kinds.
     pub groups: Vec<crate::MeshGroup>,
+    /// Composites this pass's target over the scene when the frame is
+    /// painted. Only the presenting pass reaches the screen.
+    pub presents: bool,
+    /// Tint and opacity applied by a presenting composite.
+    pub overlay: [f32; 4],
 }
 
 impl RenderPass {
@@ -144,7 +149,28 @@ impl RenderPass {
             kind: PassKind::Render,
             source: None,
             groups,
+            presents: false,
+            overlay: [1.0, 1.0, 1.0, 1.0],
         }
+    }
+
+    /// A fullscreen pass sampling `source` into `target`.
+    pub fn fullscreen(source: impl Into<String>, target: RenderTarget) -> Self {
+        Self {
+            target,
+            kind: PassKind::Fullscreen,
+            source: Some(source.into()),
+            groups: Vec::new(),
+            presents: false,
+            overlay: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+
+    /// Marks this pass as the one composited to the screen.
+    pub fn presenting(mut self, overlay: [f32; 4]) -> Self {
+        self.presents = true;
+        self.overlay = overlay;
+        self
     }
 }
 

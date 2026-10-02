@@ -30,14 +30,16 @@ pub enum VertexFormat {
 }
 
 impl VertexFormat {
-    /// Bytes one component occupies inside a packed format.
+    /// Bytes the format occupies: scalar component width, or the packed
+    /// word four-bit formats share.
     pub const fn size(self) -> u32 {
         match self {
             Self::F32 => 4,
             Self::F16 | Self::U16 | Self::S16 => 2,
-            Self::U8x4Pair | Self::S8x4Pair => 2,
+            Self::U8x4 | Self::S8x4 => 2,
+            Self::U8x4Pair | Self::S8x4Pair => 4,
             Self::U10x10x10x2 | Self::S10x10x10x2 => 4,
-            Self::U8 | Self::S8 | Self::U8x4 | Self::S8x4 => 1,
+            Self::U8 | Self::S8 => 1,
         }
     }
 
@@ -81,7 +83,8 @@ pub enum VertexSemantic {
 pub struct VertexAttribute {
     pub semantic: VertexSemantic,
     pub format: VertexFormat,
-    /// Component count when the format is scalar (`F32` x3 for positions).
+    /// Element count: scalar formats count components (`F32` x3 for
+    /// positions), packed formats count words.
     pub count: u8,
     pub offset: u32,
 }
@@ -97,11 +100,7 @@ impl VertexAttribute {
     }
 
     pub fn byte_size(&self) -> u32 {
-        match self.format {
-            VertexFormat::U8x4Pair | VertexFormat::S8x4Pair => 2,
-            VertexFormat::U10x10x10x2 | VertexFormat::S10x10x10x2 => 4,
-            _ => self.format.size() * u32::from(self.count),
-        }
+        self.format.size() * u32::from(self.count)
     }
 }
 
@@ -180,11 +179,12 @@ impl VertexLayout {
             offset += size;
             packed.push(attribute);
         }
-        if offset > 0xFFFF {
+        let stride = offset.next_multiple_of(align);
+        if stride > 0xFFFF {
             return Err(LayoutError::StrideOverflow);
         }
         let layout = Self {
-            stride: offset,
+            stride,
             attributes: packed,
         };
         layout.check_overlap()?;
@@ -192,7 +192,7 @@ impl VertexLayout {
     }
 
     /// The common console vertex: 3 floats position, packed normal and
-    /// binormal, 2 packed colors, 2 half uvs — 20 bytes.
+    /// binormal, 2 packed colors, 2 half uvs — 24 bytes.
     pub fn console_standard() -> Self {
         let attributes = vec![
             VertexAttribute::new(VertexSemantic::Position, VertexFormat::F32, 3),
@@ -264,22 +264,28 @@ impl VertexLayout {
 /// Expands one packed component to a float in the format's declared range.
 pub fn expand_component(raw: u32, format: VertexFormat, component: u32) -> f32 {
     match format {
-        VertexFormat::U8x4 | VertexFormat::S8x4 => {
-            let shift = component * 4;
-            let nibble = (raw >> shift) & 0xF;
-            if format.is_signed() {
-                ((nibble as f32) - 8.0) / 7.0
-            } else {
-                nibble as f32 / 15.0
-            }
-        }
+        VertexFormat::F32 => f32::from_bits(raw),
+        VertexFormat::F16 => f16_to_f32(raw as u16),
         VertexFormat::U8 => (raw & 0xFF) as f32 / 255.0,
-        VertexFormat::S8 => (((raw & 0xFF) as i8) as f32) / 127.0,
-        _ => raw as f32,
+        VertexFormat::S8 => (((raw & 0xFF) as i8) as f32 / 127.0).clamp(-1.0, 1.0),
+        VertexFormat::U16 => (raw & 0xFFFF) as f32 / 65_535.0,
+        VertexFormat::S16 => (((raw & 0xFFFF) as i16) as f32 / 32_767.0).clamp(-1.0, 1.0),
+        VertexFormat::U8x4 | VertexFormat::U8x4Pair => {
+            ((raw >> (component * 4)) & 0xF) as f32 / 15.0
+        }
+        VertexFormat::S8x4 | VertexFormat::S8x4Pair => {
+            let nibble = (raw >> (component * 4)) & 0xF;
+            (((nibble as f32) - 8.0) / 7.0).clamp(-1.0, 1.0)
+        }
+        VertexFormat::U10x10x10x2 => expand_10_10_10_2(raw, component, false),
+        VertexFormat::S10x10x10x2 => expand_10_10_10_2(raw, component, true),
     }
 }
 
 /// Extracts a 10-bit field out of a packed 10/10/10/2 word.
+///
+/// The three 10-bit fields are two's complement when `signed`; the trailing
+/// 2-bit field is unsigned in both variants.
 pub fn expand_10_10_10_2(raw: u32, component: u32, signed: bool) -> f32 {
     let (shift, mask) = match component {
         0 => (0, 0x3FF),
@@ -288,12 +294,32 @@ pub fn expand_10_10_10_2(raw: u32, component: u32, signed: bool) -> f32 {
         _ => (30, 0x3),
     };
     let value = (raw >> shift) & mask;
+    if component == 3 {
+        return value as f32 / 3.0;
+    }
     if signed {
-        let max = if component == 3 { 1.0 } else { 1023.0 };
-        (value as f32) * 2.0 / max - 1.0
-    } else if component == 3 {
-        value as f32
+        let twos = ((value << 22) as i32) >> 22;
+        ((twos as f32) / 511.0).clamp(-1.0, 1.0)
     } else {
         value as f32 / 1023.0
     }
+}
+
+/// Decodes an IEEE half word into its f32 value.
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = (bits >> 15) & 1;
+    let exponent = (bits >> 10) & 0x1F;
+    let fraction = bits & 0x3FF;
+    let value = match exponent {
+        0 => f32::from(fraction) * 2.0_f32.powi(-24),
+        0x1F => {
+            if fraction == 0 {
+                f32::INFINITY
+            } else {
+                f32::NAN
+            }
+        }
+        _ => (1.0 + f32::from(fraction) / 1024.0) * 2.0_f32.powi(i32::from(exponent) - 15),
+    };
+    if sign == 1 { -value } else { value }
 }

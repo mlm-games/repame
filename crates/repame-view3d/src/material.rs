@@ -1,12 +1,14 @@
 //! Console-era material model: texture-environment stages, light objects,
 //! constant colors and fog, described as plain data and lowered to WGSL.
 //!
-//! The combinator algebra mirrors the hardware the ports target: every
-//! channel of a stage resolves three operands (`a`, `b`, `c`) through one
-//! of 64 operations, combines them with an RGB/alpha mode, then scales and
-//! offsets the result. A program is an ordered list of stages writing the
-//! output register, so a game maps its own shading script onto [`TevProgram`]
-//! without the engine hard-coding one material set.
+//! A stage is one combiner equation per channel: four arguments fold through
+//! the texture-environment interpolation `reg = clamp(scale * (d + (1 - c) *
+//! a + c * b + bias))`, and the channel writes one of four output registers.
+//! [`TevMode`] expands to the five programs the console SDK's `GX_SetTevOp`
+//! names, so the common texture cases stay one call while a port can still
+//! declare any equation the hardware runs. A program is an ordered list of
+//! stages, so a game maps its own shading script onto [`TevStage`] without
+//! the engine hard-coding one material set.
 //!
 //! [`crate::tev::evaluate`] is the reference implementation used by games that
 //! need CPU-side colors (previews, minimaps, baked lighting) and by tests;
@@ -28,148 +30,203 @@ pub const MAX_LIGHTS: usize = 8;
 /// Texture coordinate sets a program may read.
 pub const MAX_TEXCOORD_SETS: usize = 8;
 
-/// One of the 64 ways three operands fold into an intermediate value.
+/// Combiner operation: the two arithmetic codes the hardware models.
 ///
-/// Named for the hardware's operand encoding rather than the arithmetic, so a
-/// port's register dump can be transcribed directly.
+/// Code 0 adds the interpolated term, code 1 subtracts it. The compare codes
+/// 8..15 exist in hardware but retail games do not rely on them, so they are
+/// not modeled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TevOp {
-    A,
-    OneMinusA,
-    C,
-    OneMinusC,
-    APlusB,
-    AMinusB,
-    AMinusC,
-    ATimesB,
-    APlusBHalf,
-    BPlusCHalf,
-    BMinusCHalf,
+    Add,
+    Sub,
 }
 
 impl TevOp {
-    /// Hardware operand code (0..12) used by register dumps.
     pub const fn code(self) -> u8 {
         match self {
-            Self::A => 0,
-            Self::OneMinusA => 1,
-            Self::C => 2,
-            Self::OneMinusC => 3,
-            Self::APlusB => 4,
-            Self::AMinusB => 5,
-            Self::AMinusC => 6,
-            Self::ATimesB => 7,
-            Self::APlusBHalf => 8,
-            Self::BPlusCHalf => 9,
-            Self::BMinusCHalf => 10,
+            Self::Add => 0,
+            Self::Sub => 1,
         }
     }
 
     pub fn from_code(code: u8) -> Option<Self> {
-        Some(match code {
-            0 => Self::A,
-            1 => Self::OneMinusA,
-            2 => Self::C,
-            3 => Self::OneMinusC,
-            4 => Self::APlusB,
-            5 => Self::AMinusB,
-            6 => Self::AMinusC,
-            7 => Self::ATimesB,
-            8 => Self::APlusBHalf,
-            9 => Self::BPlusCHalf,
-            10 => Self::BMinusCHalf,
-            _ => return None,
-        })
+        match code {
+            0 => Some(Self::Add),
+            1 => Some(Self::Sub),
+            _ => None,
+        }
     }
 }
 
-/// How the first fold combines with the second and the destination register.
+/// Bias added after the interpolation, in halves of the channel range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TevBias {
+    Zero,
+    AddHalf,
+    SubHalf,
+}
+
+impl TevBias {
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Zero => 0,
+            Self::AddHalf => 1,
+            Self::SubHalf => 2,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Zero),
+            1 => Some(Self::AddHalf),
+            2 => Some(Self::SubHalf),
+            _ => None,
+        }
+    }
+
+    pub const fn offset(self) -> f32 {
+        match self {
+            Self::Zero => 0.0,
+            Self::AddHalf => 0.5,
+            Self::SubHalf => -0.5,
+        }
+    }
+}
+
+/// Output scale of a stage, as the hardware encodes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TevScale {
+    X1,
+    X2,
+    X4,
+    Divide2,
+}
+
+impl TevScale {
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::X1 => 0,
+            Self::X2 => 1,
+            Self::X4 => 2,
+            Self::Divide2 => 3,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::X1),
+            1 => Some(Self::X2),
+            2 => Some(Self::X4),
+            3 => Some(Self::Divide2),
+            _ => None,
+        }
+    }
+
+    pub const fn multiplier(self) -> f32 {
+        match self {
+            Self::X1 => 1.0,
+            Self::X2 => 2.0,
+            Self::X4 => 4.0,
+            Self::Divide2 => 0.5,
+        }
+    }
+}
+
+/// Register a stage's channel writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TevDest {
+    /// The previous-stage register every later stage reads.
+    Prev,
+    Reg0,
+    Reg1,
+    Reg2,
+}
+
+impl TevDest {
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Prev => 0,
+            Self::Reg0 => 1,
+            Self::Reg1 => 2,
+            Self::Reg2 => 3,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Prev),
+            1 => Some(Self::Reg0),
+            2 => Some(Self::Reg1),
+            3 => Some(Self::Reg2),
+            _ => None,
+        }
+    }
+
+    /// Register slot index the evaluators write.
+    pub const fn index(self) -> usize {
+        self.code() as usize
+    }
+}
+
+/// The five programs `GX_SetTevOp` names, as the hardware encodes them.
+///
+/// Each expands through [`TevStage::with_mode`] into the equation below,
+/// with `C` the previous register, `A` its alpha and `T` the texel:
+///
+/// - `Modulate`: `C * T` and `A * At`
+/// - `Decal`: `(1 - At) * C + At * T` and `A`
+/// - `Blend`: `(1 - T) * C + T` and `A * At`
+/// - `Replace`: `T` and `At`
+/// - `PassClr`: `C` and `A`
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TevMode {
-    Replace,
     Modulate,
-    Add,
-    Subtract,
+    Decal,
+    Blend,
+    Replace,
+    PassClr,
 }
 
 impl TevMode {
     pub const fn code(self) -> u8 {
         match self {
-            Self::Replace => 0,
-            Self::Modulate => 1,
-            Self::Add => 2,
-            Self::Subtract => 3,
+            Self::Modulate => 0,
+            Self::Decal => 1,
+            Self::Blend => 2,
+            Self::Replace => 3,
+            Self::PassClr => 4,
         }
     }
 
     pub fn from_code(code: u8) -> Option<Self> {
-        Some(match code {
-            0 => Self::Replace,
-            1 => Self::Modulate,
-            2 => Self::Add,
-            3 => Self::Subtract,
-            _ => return None,
-        })
-    }
-}
-
-/// Second fold against the destination (`d`), as used by the hardware's
-/// post-`c` combiner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum TevOp2 {
-    D,
-    OneMinusD,
-    APlusD,
-    APlusOneMinusD,
-    ATimesD,
-    ATimesOneMinusD,
-    APlusB,
-    AMinusB,
-    ATimesA,
-}
-
-impl TevOp2 {
-    pub const fn code(self) -> u8 {
-        match self {
-            Self::D => 0,
-            Self::OneMinusD => 1,
-            Self::APlusD => 2,
-            Self::APlusOneMinusD => 3,
-            Self::ATimesD => 4,
-            Self::ATimesOneMinusD => 5,
-            Self::APlusB => 6,
-            Self::AMinusB => 7,
-            Self::ATimesA => 8,
+        match code {
+            0 => Some(Self::Modulate),
+            1 => Some(Self::Decal),
+            2 => Some(Self::Blend),
+            3 => Some(Self::Replace),
+            4 => Some(Self::PassClr),
+            _ => None,
         }
     }
-
-    pub fn from_code(code: u8) -> Option<Self> {
-        Some(match code {
-            0 => Self::D,
-            1 => Self::OneMinusD,
-            2 => Self::APlusD,
-            3 => Self::APlusOneMinusD,
-            4 => Self::ATimesD,
-            5 => Self::ATimesOneMinusD,
-            6 => Self::APlusB,
-            7 => Self::AMinusB,
-            8 => Self::ATimesA,
-            _ => return None,
-        })
-    }
 }
 
-/// A source value a stage operand can read.
+/// A source value a stage argument can read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TevArg {
     Zero,
     One,
     Half,
     Two,
-    /// Incoming color, premultiplied by the stage alpha.
+    /// Previous register: its color in color channels, alpha in the alpha one.
     Color,
-    /// Incoming alpha.
+    /// Previous register alpha.
     Alpha,
+    /// Output register 0, in the channel being computed.
+    Reg0,
+    /// Output register 1, in the channel being computed.
+    Reg1,
+    /// Output register 2, in the channel being computed.
+    Reg2,
     /// Constant color register.
     KColor(u8),
     /// Sampled texture color of the stage's unit.
@@ -184,99 +241,28 @@ pub enum TevArg {
     TexColorOf(u8),
 }
 
-/// Scale/offset pair applied to an argument before it folds, in quarters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TevScale {
-    /// Multiplier in quarters: -4..4 maps to -1.0, -0.75, .. 1.0.
-    pub scale: i8,
-    /// Additive bias in quarters, 0..=7 mapping to 0.0, 0.25, .. 1.75.
-    pub bias: u8,
-}
-
-impl Default for TevScale {
-    fn default() -> Self {
-        Self { scale: 4, bias: 0 }
-    }
-}
-
-impl TevScale {
-    pub const IDENTITY: Self = Self { scale: 4, bias: 0 };
-
-    /// Hardware encoding: signed scale in quarters, bias clamped to 7/4.
-    pub fn new(scale: i8, bias: u8) -> Self {
-        Self {
-            scale: scale.clamp(-4, 4),
-            bias: bias.min(7),
-        }
-    }
-
-    pub fn multiplier(self) -> f32 {
-        f32::from(self.scale) * 0.25
-    }
-
-    pub fn offset(self) -> f32 {
-        f32::from(self.bias) * 0.25
-    }
-}
-
-/// One channel of one operand slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TevOperand {
-    pub arg: TevArg,
-    pub negate: bool,
-    pub scale: TevScale,
-}
-
-impl TevOperand {
-    pub const fn new(arg: TevArg) -> Self {
-        Self {
-            arg,
-            negate: false,
-            scale: TevScale::IDENTITY,
-        }
-    }
-
-    pub const fn rgb(arg: TevArg, scale: i8, bias: u8) -> Self {
-        Self {
-            arg,
-            negate: false,
-            scale: TevScale { scale, bias },
-        }
-    }
-
-    pub const fn alpha(arg: TevArg, scale: i8, bias: u8) -> Self {
-        Self {
-            arg,
-            negate: false,
-            scale: TevScale { scale, bias },
-        }
-    }
-}
-
-impl Default for TevOperand {
-    fn default() -> Self {
-        Self::new(TevArg::Color)
-    }
-}
-
-/// A texture-environment stage.
+/// One texture-environment stage: the combiner equation and where it writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TevStage {
     /// Texture unit this stage samples.
     pub tex_unit: u8,
     /// Texture array layer that unit samples.
     pub page: u8,
-    /// Pre-sampled color/alpha written by the texture stage.
-    pub color_arg: [TevOperand; 4],
-    pub alpha_arg: [TevOperand; 3],
-    pub color_op: [TevOp; 4],
-    pub alpha_op: [TevOp; 3],
-    pub op2: [TevOp2; 4],
-    pub color_mode: TevMode,
-    pub alpha_mode: TevMode,
-    /// Scale/offset applied to the incoming color, per channel.
+    /// Color-channel arguments `a`, `b`, `c`, `d`.
+    pub color_arg: [TevArg; 4],
+    /// Alpha-channel arguments `a`, `b`, `c`, `d`.
+    pub alpha_arg: [TevArg; 4],
+    pub color_op: TevOp,
+    pub alpha_op: TevOp,
+    pub color_bias: TevBias,
+    pub alpha_bias: TevBias,
     pub color_scale: TevScale,
     pub alpha_scale: TevScale,
+    /// Clamp the channel into `0..1`, or else into the 10-bit range below.
+    pub color_clamp: bool,
+    pub alpha_clamp: bool,
+    pub color_dest: TevDest,
+    pub alpha_dest: TevDest,
 }
 
 impl Default for TevStage {
@@ -284,16 +270,57 @@ impl Default for TevStage {
         Self {
             tex_unit: 0,
             page: 0,
-            color_arg: [TevOperand::new(TevArg::Color); 4],
-            alpha_arg: [TevOperand::new(TevArg::Color); 3],
-            color_op: [TevOp::APlusB; 4],
-            alpha_op: [TevOp::APlusB; 3],
-            op2: [TevOp2::D; 4],
-            color_mode: TevMode::Modulate,
-            alpha_mode: TevMode::Modulate,
-            color_scale: TevScale::IDENTITY,
-            alpha_scale: TevScale::IDENTITY,
+            color_arg: [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::Color],
+            alpha_arg: [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::Alpha],
+            color_op: TevOp::Add,
+            alpha_op: TevOp::Add,
+            color_bias: TevBias::Zero,
+            alpha_bias: TevBias::Zero,
+            color_scale: TevScale::X1,
+            alpha_scale: TevScale::X1,
+            color_clamp: true,
+            alpha_clamp: true,
+            color_dest: TevDest::Prev,
+            alpha_dest: TevDest::Prev,
         }
+    }
+}
+
+impl TevStage {
+    /// The stage sampling `tex_unit` under one of the SDK's [`TevMode`] programs.
+    ///
+    /// Default bias, scale, clamping and destination are left in place; only
+    /// the argument selects differ per program (see [`TevMode`]).
+    pub fn with_mode(tex_unit: u8, mode: TevMode) -> Self {
+        let mut stage = Self {
+            tex_unit,
+            ..Self::default()
+        };
+        match mode {
+            TevMode::Modulate => {
+                stage.color_arg = [TevArg::Zero, TevArg::Color, TevArg::TexColor, TevArg::Zero];
+                stage.alpha_arg = [TevArg::Zero, TevArg::Alpha, TevArg::TexAlpha, TevArg::Zero];
+            }
+            TevMode::Decal => {
+                stage.color_arg = [
+                    TevArg::Color,
+                    TevArg::TexColor,
+                    TevArg::TexAlpha,
+                    TevArg::Zero,
+                ];
+                stage.alpha_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::Alpha];
+            }
+            TevMode::Blend => {
+                stage.color_arg = [TevArg::Color, TevArg::One, TevArg::TexColor, TevArg::Zero];
+                stage.alpha_arg = [TevArg::Zero, TevArg::Alpha, TevArg::TexAlpha, TevArg::Zero];
+            }
+            TevMode::Replace => {
+                stage.color_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::TexColor];
+                stage.alpha_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::TexAlpha];
+            }
+            TevMode::PassClr => {}
+        }
+        stage
     }
 }
 
@@ -311,7 +338,7 @@ pub const DEFAULT_KCOLORS: KColors = [
     [0.0, 0.0, 0.0, 1.0],
 ];
 
-/// One hardware light object.
+/// One light the shading evaluates: direction or position with its kcolor pair.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Light {
     /// Two color indices into [`KColors`], or None for the material ambient.
@@ -357,7 +384,7 @@ impl Light {
     }
 }
 
-/// Material fog: start/end distance and a color register.
+/// Material fog: start/end distance and its blend color.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFog {
     pub near: f32,
@@ -406,22 +433,8 @@ impl Default for ShadingModel {
 impl ShadingModel {
     /// A single-stage modulate-texture model, the common opaque surface.
     pub fn textured(unit: u8) -> Self {
-        let mut stage = TevStage {
-            tex_unit: unit,
-            ..TevStage::default()
-        };
-        stage.color_arg[0] = TevOperand::new(TevArg::Color);
-        stage.color_arg[1] = TevOperand::new(TevArg::TexColor);
-        stage.color_arg[2] = TevOperand::new(TevArg::One);
-        stage.alpha_arg[0] = TevOperand::new(TevArg::Color);
-        stage.alpha_arg[1] = TevOperand::new(TevArg::TexAlpha);
-        stage.alpha_arg[2] = TevOperand::new(TevArg::One);
-        stage.color_op = [TevOp::ATimesB; 4];
-        stage.alpha_op = [TevOp::ATimesB; 3];
-        stage.color_mode = TevMode::Replace;
-        stage.alpha_mode = TevMode::Replace;
         Self {
-            stages: vec![stage],
+            stages: vec![TevStage::with_mode(unit, TevMode::Modulate)],
             ..Self::default()
         }
     }
@@ -437,12 +450,32 @@ impl ShadingModel {
         if self.lights.len() > MAX_LIGHTS {
             return Err(ShadingError::TooManyLights);
         }
+        let kc = |i: u8| usize::from(i) < MAX_KCOLORS;
         for stage in &self.stages {
             if usize::from(stage.tex_unit) >= MAX_TEX_UNITS {
                 return Err(ShadingError::TexUnitOutOfRange(stage.tex_unit));
             }
+            let check = |arg: TevArg, alpha: bool| -> Result<(), ShadingError> {
+                match arg {
+                    TevArg::KColor(index) if !kc(index) => {
+                        Err(ShadingError::KColorOutOfRange(index))
+                    }
+                    TevArg::TexColorOf(unit) if usize::from(unit) >= MAX_TEX_UNITS => {
+                        Err(ShadingError::TexUnitOutOfRange(unit))
+                    }
+                    TevArg::TexColor | TevArg::TexColorOf(_) if alpha => {
+                        Err(ShadingError::AlphaArgTakesColor)
+                    }
+                    _ => Ok(()),
+                }
+            };
+            for arg in stage.color_arg {
+                check(arg, false)?;
+            }
+            for arg in stage.alpha_arg {
+                check(arg, true)?;
+            }
         }
-        let kc = |i: u8| usize::from(i) < MAX_KCOLORS;
         for light in &self.lights {
             for color in light.colors.iter().flatten() {
                 if !kc(*color) {
@@ -478,6 +511,8 @@ pub enum ShadingError {
     TooManyLights,
     TexUnitOutOfRange(u8),
     KColorOutOfRange(u8),
+    /// Texture color argument used in an alpha channel; alpha reads texel alpha.
+    AlphaArgTakesColor,
 }
 
 impl std::fmt::Display for ShadingError {
@@ -488,6 +523,10 @@ impl std::fmt::Display for ShadingError {
             Self::TooManyLights => write!(f, "shading model exceeds {MAX_LIGHTS} lights"),
             Self::TexUnitOutOfRange(unit) => write!(f, "texture unit {unit} out of range"),
             Self::KColorOutOfRange(index) => write!(f, "constant color {index} out of range"),
+            Self::AlphaArgTakesColor => write!(
+                f,
+                "alpha channel cannot read texture color; use TevArg::TexAlpha"
+            ),
         }
     }
 }

@@ -42,7 +42,7 @@ pub use gltf::{
 };
 pub use material::{
     DEFAULT_KCOLORS, KColors, Light, MAX_KCOLORS, MAX_LIGHTS, MAX_TEV_STAGES, MAX_TEX_UNITS,
-    MaterialFog, Rgba, ShadingError, ShadingModel, TevArg, TevMode, TevOp, TevOp2, TevOperand,
+    MaterialFog, Rgba, ShadingError, ShadingModel, TevArg, TevBias, TevDest, TevMode, TevOp,
     TevScale, TevStage,
 };
 pub use mesh::{Material, MeshGroup, Rgb, shade, shade_for_dir};
@@ -65,9 +65,7 @@ pub use skin::{
 };
 pub use stats::{FrameStats, LatestFrame, RollingAverage, StatsSink};
 pub use stream::{ChunkBuild, ChunkPriority, ChunkStreamer, StreamPlan, plan_stream};
-pub use tev::{
-    TexInput, TexUnitMissing, evaluate, evaluate_lights, evaluate_stages, fog_factor, wgsl_program,
-};
+pub use tev::{TexInput, evaluate, evaluate_lights, evaluate_stages, fog_factor, wgsl_program};
 pub use texfmt::{
     Palette, PaletteBits, TexError, TexFormat, TextureOverrides, TextureSource, decode_palette,
     decode_texels, mip_chain, palettize_rgba, resample_half, rgba_from_texel, texel_from_rgba,

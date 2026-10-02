@@ -17,10 +17,10 @@ use repame_view3d::{
     FrameStats, IndexFormat, LatestFrame, Light, MaterialFog, MeshGroup, Palette, PaletteBits,
     PassError, PassKind, RenderPass, RenderTarget, RenderTargetFormat, RollingAverage, ShadedBatch,
     ShadedGroup, ShaderCache, ShadingError, ShadingModel, StatsSink, TargetSemantics, TevArg,
-    TevMode, TevOp, TevOp2, TevOperand, TevStage, TexFormat, TexInput, TextureOverrides,
-    VertexAttribute, VertexFormat, VertexLayout, VertexSemantic, decode_palette, evaluate_lights,
-    evaluate_stages, fog_factor, mip_chain, palettize_rgba, rgba_from_texel, texel_from_rgba,
-    validate_passes, wgsl_program,
+    TevBias, TevDest, TevMode, TevOp, TevScale, TevStage, TexFormat, TexInput, TextureOverrides,
+    TextureSource, VertexAttribute, VertexFormat, VertexLayout, VertexSemantic, decode_palette,
+    decode_texels, evaluate_lights, evaluate_stages, fog_factor, mip_chain, palettize_rgba,
+    rgba_from_texel, texel_from_rgba, validate_passes, wgsl_program,
 };
 
 fn approx(left: f32, right: f32, tolerance: f32) -> bool {
@@ -59,8 +59,32 @@ fn golden_half_roll_puts_gravity_on_the_x_axis() {
     );
     let gravity = tracker.gravity();
     assert!(
-        approx(gravity.x, GRAVITY, 1e-4) && approx(gravity.y, 0.0, 1e-4),
+        approx(gravity.x, -GRAVITY, 1e-4) && approx(gravity.y, 0.0, 1e-4),
         "{gravity:?}"
+    );
+}
+
+#[test]
+fn golden_body_frame_spin_accumulates_on_the_right() {
+    let mut tracker = MotionTracker::new(SensorKind::GyroscopeAccelerometer);
+    for angular_velocity in [
+        Vec3::new(0.0, FRAC_PI_2, 0.0),
+        Vec3::new(FRAC_PI_2, 0.0, 0.0),
+    ] {
+        tracker.integrate(
+            MotionSample {
+                acceleration: Vec3::ZERO,
+                angular_velocity,
+            },
+            1.0,
+        );
+    }
+    // Device X spin leaves device X pointing where yaw put it, so forward
+    // stays down -z; a left-multiplied spin would swing it to +y.
+    let forward = tracker.orientation() * Vec3::X;
+    assert!(
+        approx(forward.z, -1.0, 1e-4) && forward.y.abs() < 1e-4,
+        "{forward:?}"
     );
 }
 
@@ -140,13 +164,7 @@ fn golden_textured_stage_multiplies_vertex_color_by_texel() {
 #[test]
 fn golden_second_stage_reads_the_first_stages_output() {
     let mut halve = TevStage::default();
-    halve.color_arg[0] = TevOperand::rgb(TevArg::Color, 4, 0);
-    halve.color_arg[1] = TevOperand::rgb(TevArg::Half, 4, 0);
-    halve.color_arg[2] = TevOperand::rgb(TevArg::One, 4, 0);
-    halve.color_arg[3] = TevOperand::rgb(TevArg::One, 4, 0);
-    halve.color_op = [TevOp::ATimesB; 4];
-    halve.color_mode = TevMode::Replace;
-    halve.alpha_mode = TevMode::Replace;
+    halve.color_arg = [TevArg::Zero, TevArg::Color, TevArg::Half, TevArg::Zero];
     let model = ShadingModel {
         stages: vec![ShadingModel::textured(0).stages[0], halve],
         ..Default::default()
@@ -221,12 +239,19 @@ fn golden_fog_reaches_full_strength_at_the_far_plane() {
 
 #[test]
 fn golden_operand_and_mode_codes_match_the_hardware_encoding() {
-    assert_eq!(TevOp::from_code(7), Some(TevOp::ATimesB));
-    assert_eq!(TevOp::from_code(11), None);
-    assert_eq!(TevOp2::from_code(4), Some(TevOp2::ATimesD));
-    assert_eq!(TevOp2::from_code(9), None);
-    assert_eq!(TevMode::from_code(3), Some(TevMode::Subtract));
-    assert_eq!(TevMode::from_code(4), None);
+    assert_eq!(TevOp::from_code(0), Some(TevOp::Add));
+    assert_eq!(TevOp::from_code(1), Some(TevOp::Sub));
+    assert_eq!(TevOp::from_code(7), None);
+    assert_eq!(TevOp::from_code(8), None);
+    assert_eq!(TevBias::from_code(1), Some(TevBias::AddHalf));
+    assert_eq!(TevBias::from_code(3), None);
+    assert_eq!(TevScale::from_code(3), Some(TevScale::Divide2));
+    assert_eq!(TevScale::from_code(4), None);
+    assert_eq!(TevDest::from_code(2), Some(TevDest::Reg1));
+    assert_eq!(TevDest::from_code(4), None);
+    assert_eq!(TevMode::from_code(3), Some(TevMode::Replace));
+    assert_eq!(TevMode::from_code(4), Some(TevMode::PassClr));
+    assert_eq!(TevMode::from_code(5), None);
 }
 
 #[test]
@@ -249,14 +274,55 @@ fn golden_shading_models_beyond_hardware_limits_are_rejected() {
         ..Default::default()
     };
     assert_eq!(bad_unit.validate(), Err(ShadingError::TexUnitOutOfRange(8)));
+    let alpha_color = ShadingModel {
+        stages: vec![TevStage {
+            alpha_arg: [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::TexColor],
+            ..TevStage::default()
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        alpha_color.validate(),
+        Err(ShadingError::AlphaArgTakesColor)
+    );
+    let bad_kcolor = ShadingModel {
+        stages: vec![TevStage {
+            color_arg: [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::KColor(9)],
+            ..TevStage::default()
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        bad_kcolor.validate(),
+        Err(ShadingError::KColorOutOfRange(9))
+    );
+    let bad_chain = ShadingModel {
+        stages: vec![TevStage {
+            color_arg: [
+                TevArg::Zero,
+                TevArg::Zero,
+                TevArg::Zero,
+                TevArg::TexColorOf(8),
+            ],
+            ..TevStage::default()
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        bad_chain.validate(),
+        Err(ShadingError::TexUnitOutOfRange(8))
+    );
 }
 
 #[test]
 fn golden_shader_lowering_names_every_sampled_unit() {
     let wgsl = wgsl_program(&ShadingModel::textured(5));
     assert!(wgsl.contains("tex5"), "{wgsl}");
-    assert!(wgsl.contains("dst[3]"), "alpha channel written: {wgsl}");
-    assert!(wgsl.contains("outColor = src"), "{}", wgsl);
+    assert!(
+        wgsl.contains("tev_regs[0].a = s0_3"),
+        "alpha channel written: {wgsl}"
+    );
+    assert!(wgsl.contains("outColor = tev_out"), "{}", wgsl);
 }
 
 #[test]
@@ -313,18 +379,83 @@ fn golden_shaded_batch_counts_draws_and_skips_empty_groups() {
 // ---------------------------------------------------------------- texture formats
 
 #[test]
-fn golden_four_bit_rows_pack_two_texels_per_byte() {
+fn golden_image_sizes_charge_whole_tiles() {
     assert_eq!(TexFormat::I4.row_bytes(4), 2);
-    assert_eq!(TexFormat::I4.image_size(4, 2), 4);
-    assert_eq!(TexFormat::Rgba8.image_size(4, 2), 32);
+    assert_eq!(TexFormat::I4.image_size(4, 2), 32);
+    assert_eq!(TexFormat::Rgba8.image_size(4, 2), 64);
     assert_eq!(TexFormat::Rgb565.bytes_per_texel(), 2);
+    assert_eq!(TexFormat::Ia8.bytes_per_texel(), 2);
+}
+
+#[test]
+fn golden_intensity_formats_decode_without_a_palette() {
+    let mut data = vec![0_u8; TexFormat::I4.image_size(4, 1)];
+    data[0] = 0xF0;
+    let out = decode_texels(&TextureSource {
+        format: TexFormat::I4,
+        width: 4,
+        height: 1,
+        data,
+        palette: None,
+    })
+    .expect("decodes");
+    assert_eq!(&out[0..4], &[255, 255, 255, 255]);
+    assert_eq!(&out[4..8], &[0, 0, 0, 0]);
+}
+
+#[test]
+fn golden_rgba8_pages_deplane_their_tile_halves() {
+    let mut data = vec![0_u8; TexFormat::Rgba8.image_size(4, 4)];
+    data[0] = 10;
+    data[1] = 20;
+    data[32] = 30;
+    data[33] = 40;
+    let out = decode_texels(&TextureSource {
+        format: TexFormat::Rgba8,
+        width: 4,
+        height: 4,
+        data,
+        palette: None,
+    })
+    .expect("decodes");
+    assert_eq!(&out[0..4], &[20, 30, 40, 10]);
+}
+
+#[test]
+fn golden_indexed_alpha_stores_alpha_with_the_index() {
+    let palette = Palette::new(vec![[10, 20, 30], [40, 50, 60]], PaletteBits::I4);
+    let nibble = decode_palette(
+        &[0x20, 0x00],
+        TexFormat::IndexedAlpha {
+            bits: PaletteBits::I4,
+        },
+        &palette,
+        2,
+        1,
+    )
+    .expect("decodes");
+    assert_eq!(&nibble[0..4], &[10, 20, 30, 36]);
+    let byte = decode_palette(
+        &[1, 128],
+        TexFormat::IndexedAlpha {
+            bits: PaletteBits::I8,
+        },
+        &palette,
+        1,
+        1,
+    )
+    .expect("decodes");
+    assert_eq!(&byte[0..4], &[40, 50, 60, 128]);
 }
 
 #[test]
 fn golden_palette_indices_decode_in_row_order() {
     let palette = Palette::new(vec![[255, 0, 0], [0, 255, 0], [0, 0, 255]], PaletteBits::I4);
+    let mut data = vec![0_u8; 32];
+    data[0] = 0x01;
+    data[1] = 0x20;
     let out = decode_palette(
-        &[0x01, 0x20],
+        &data,
         TexFormat::Indexed {
             bits: PaletteBits::I4,
         },
@@ -341,8 +472,10 @@ fn golden_palette_indices_decode_in_row_order() {
 #[test]
 fn golden_palette_short_table_is_an_error_not_a_panic() {
     let palette = Palette::new(vec![[1, 2, 3]], PaletteBits::I4);
+    let mut data = vec![0_u8; 32];
+    data[0] = 0xFF;
     let out = decode_palette(
-        &[0xFF],
+        &data,
         TexFormat::Indexed {
             bits: PaletteBits::I4,
         },
@@ -361,9 +494,15 @@ fn golden_rgb565_and_rgb5a3_expand_to_eight_bit() {
     );
     assert_eq!(rgba_from_texel(&[0xFC, 0x00], TexFormat::Rgb5A3)[3], 0xFF);
     assert_eq!(rgba_from_texel(&[0x00, 0x00], TexFormat::Rgb5A3)[3], 0x00);
+    assert_eq!(rgba_from_texel(&[0x30, 0x00], TexFormat::Rgb5A3)[3], 109);
+    assert_eq!(rgba_from_texel(&[0x70, 0x00], TexFormat::Rgb5A3)[3], 0xFF);
     assert_eq!(
         rgba_from_texel(&[0x80, 0x40], TexFormat::Ia8),
-        [128, 128, 128, 64]
+        [64, 64, 64, 128]
+    );
+    assert_eq!(
+        rgba_from_texel(&[0xAF], TexFormat::Ia4),
+        [255, 255, 255, 170]
     );
 }
 
@@ -394,6 +533,14 @@ fn golden_mip_chain_halves_down_to_one_by_one() {
             .iter()
             .all(|(_, _, data)| data.iter().all(|b| *b == 200))
     );
+
+    let odd = mip_chain(&vec![200_u8; 4 * 2 * 4], 4, 2);
+    assert_eq!(odd.len(), 3);
+    assert_eq!((odd[2].0, odd[2].1), (1, 1));
+    for (w, h, data) in &odd {
+        assert_eq!(data.len(), w * h * 4, "{w}x{h}");
+        assert!(data.iter().all(|b| *b == 200));
+    }
 }
 
 #[test]
@@ -409,9 +556,9 @@ fn golden_texture_overrides_replace_pages_after_upload() {
 // ---------------------------------------------------------------- vertex layouts
 
 #[test]
-fn golden_console_standard_layout_packs_into_twenty_bytes() {
+fn golden_console_standard_layout_packs_into_twenty_four_bytes() {
     let layout = VertexLayout::console_standard();
-    assert_eq!(layout.stride, 20);
+    assert_eq!(layout.stride, 24);
     assert_eq!(
         layout.attribute(VertexSemantic::Position).unwrap().offset,
         0
@@ -419,9 +566,10 @@ fn golden_console_standard_layout_packs_into_twenty_bytes() {
     assert_eq!(layout.attribute(VertexSemantic::Normal).unwrap().offset, 12);
     assert_eq!(
         layout.attribute(VertexSemantic::Binormal).unwrap().offset,
-        13
+        14
     );
-    assert_eq!(layout.attribute(VertexSemantic::Uv(0)).unwrap().offset, 16);
+    assert_eq!(layout.attribute(VertexSemantic::Color).unwrap().offset, 16);
+    assert_eq!(layout.attribute(VertexSemantic::Uv(0)).unwrap().offset, 20);
 }
 
 #[test]
@@ -439,6 +587,15 @@ fn golden_layout_packing_aligns_and_rejects_duplicates() {
         4
     );
     assert_eq!(packed.stride, 16);
+    let padded = VertexLayout::pack(
+        vec![
+            VertexAttribute::new(VertexSemantic::Position, VertexFormat::F32, 3),
+            VertexAttribute::new(VertexSemantic::Uv(0), VertexFormat::U16, 3),
+        ],
+        4,
+    )
+    .expect("packs");
+    assert_eq!(padded.stride, 20);
     let duplicate = VertexLayout::pack(
         vec![
             VertexAttribute::new(VertexSemantic::Position, VertexFormat::F32, 3),
@@ -477,17 +634,46 @@ fn golden_packed_components_expand_to_their_declared_ranges() {
     let packed = 1023 | (512 << 20);
     assert!(approx(expand_10_10_10_2(packed, 0, false), 1.0, 1e-6));
     assert!(approx(expand_10_10_10_2(packed, 1, false), 0.0, 1e-6));
+    assert!(approx(expand_10_10_10_2(0x1FF, 0, true), 1.0, 1e-6));
+    assert!(approx(expand_10_10_10_2(0x200, 0, true), -1.0, 1e-6));
+    assert!(approx(expand_10_10_10_2(0xC000_0000, 3, false), 1.0, 1e-6));
+    assert!(approx(expand_10_10_10_2(0xC000_0000, 3, true), 1.0, 1e-6));
+    assert!(approx(
+        expand_component(0x3F80_0000, VertexFormat::F32, 0),
+        1.0,
+        1e-6
+    ));
+    assert!(approx(
+        expand_component(0x3C00, VertexFormat::F16, 0),
+        1.0,
+        1e-6
+    ));
+    assert!(approx(
+        expand_component(0xFFFF, VertexFormat::U16, 0),
+        1.0,
+        1e-6
+    ));
+    assert!(approx(
+        expand_component(0x8000, VertexFormat::S16, 0),
+        -1.0,
+        1e-6
+    ));
+    assert!(approx(
+        expand_component(0x80, VertexFormat::S8, 0),
+        -1.0,
+        1e-6
+    ));
+    assert!(approx(
+        expand_component(0xF, VertexFormat::U8x4Pair, 0),
+        1.0,
+        1e-6
+    ));
 }
 
 // ---------------------------------------------------------------- render passes
 
 fn render_pass(name: &str) -> RenderPass {
-    RenderPass {
-        target: RenderTarget::color(name, 64, 64),
-        kind: PassKind::Render,
-        source: None,
-        groups: Vec::new(),
-    }
+    RenderPass::render(RenderTarget::color(name, 64, 64), Vec::new())
 }
 
 #[test]

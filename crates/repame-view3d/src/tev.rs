@@ -1,11 +1,12 @@
 //! Reference evaluation and WGSL lowering for [`ShadingModel`].
 //!
 //! The CPU path exists so a game can resolve a material without a GPU, and so
-//! the lowering has something to be checked against: [`wgsl_program`] emits
-//! the same arithmetic in WGSL for the GPU path.
+//! the lowering has something to be checked against: both paths read the same
+//! per-channel equation, one folding it over registers, [`wgsl_program`]
+//! emitting it in WGSL.
 
 use crate::material::{
-    KColors, Light, MaterialFog, Rgba, ShadingModel, TevArg, TevMode, TevOp, TevOp2, TevOperand,
+    KColors, Light, MaterialFog, Rgba, ShadingModel, TevArg, TevBias, TevDest, TevOp, TevScale,
     TevStage,
 };
 
@@ -27,29 +28,111 @@ impl Default for TexInput {
     }
 }
 
-/// A texel lookup failure at unit index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TexUnitMissing(pub u8);
+/// One channel of one stage: its arguments and the fold applied to them.
+///
+/// Channels 0..2 read the stage's color side, channel 3 the alpha side, so
+/// the CPU and WGSL paths cannot drift apart per channel.
+struct StageTerms {
+    args: [TevArg; 4],
+    op: TevOp,
+    bias: TevBias,
+    scale: TevScale,
+    clamp: bool,
+    dest: TevDest,
+}
 
-fn arg_value(arg: TevArg, unit: u8, channel: usize, texels: &[Option<TexInput>]) -> f32 {
+fn stage_terms(stage: &TevStage, channel: usize) -> StageTerms {
+    if channel == 3 {
+        StageTerms {
+            args: stage.alpha_arg,
+            op: stage.alpha_op,
+            bias: stage.alpha_bias,
+            scale: stage.alpha_scale,
+            clamp: stage.alpha_clamp,
+            dest: stage.alpha_dest,
+        }
+    } else {
+        StageTerms {
+            args: stage.color_arg,
+            op: stage.color_op,
+            bias: stage.color_bias,
+            scale: stage.color_scale,
+            clamp: stage.color_clamp,
+            dest: stage.color_dest,
+        }
+    }
+}
+
+/// One channel's equation: `scale * (d +/- ((1 - c) * a + c * b) + bias)`.
+///
+/// Clamped channels fold into `0..1`; unclamped ones keep the 10-bit signed
+/// intermediate range the hardware rounds from.
+fn combine_channel(terms: &StageTerms, args: [f32; 4]) -> f32 {
+    let [a, b, c, d] = args;
+    let lerp = (1.0 - c) * a + c * b;
+    let mixed = match terms.op {
+        TevOp::Add => d + lerp,
+        TevOp::Sub => d - lerp,
+    };
+    let scaled = (mixed + terms.bias.offset()) * terms.scale.multiplier();
+    if terms.clamp {
+        scaled.clamp(0.0, 1.0)
+    } else {
+        scaled.clamp(-4.0, 1023.0 / 256.0)
+    }
+}
+
+/// Reads one argument against the register file; a missing texel reads white.
+fn arg_value(
+    arg: TevArg,
+    unit: u8,
+    channel: usize,
+    texels: &[Option<TexInput>],
+    regs: &[[f32; 4]; 4],
+    kcolors: &KColors,
+) -> f32 {
+    let texel = |other: u8| {
+        texels
+            .get(usize::from(other))
+            .and_then(|slot| *slot)
+            .unwrap_or(TexInput {
+                color: [1.0; 3],
+                alpha: 1.0,
+                lod_frac: 1.0,
+            })
+    };
     match arg {
         TevArg::Zero => 0.0,
         TevArg::One => 1.0,
         TevArg::Half => 0.5,
         TevArg::Two => 2.0,
-        TevArg::Color => 0.0,
-        TevArg::Alpha => 0.0,
-        TevArg::KColor(_) => 0.0,
-        TevArg::TexColor | TevArg::TexAlpha | TevArg::LodFrac => {
-            match texels.get(usize::from(unit)).and_then(|slot| *slot) {
-                Some(texel) => match arg {
-                    TevArg::LodFrac => texel.lod_frac,
-                    TevArg::TexAlpha => texel.alpha,
-                    _ => texel.color[channel.min(3)],
-                },
-                None => 1.0,
+        TevArg::Color => regs[0][channel],
+        TevArg::Alpha => regs[0][3],
+        TevArg::Reg0 => regs[1][channel],
+        TevArg::Reg1 => regs[2][channel],
+        TevArg::Reg2 => regs[3][channel],
+        TevArg::KColor(index) => kcolors
+            .get(usize::from(index))
+            .copied()
+            .unwrap_or([0.0, 0.0, 0.0, 1.0])[channel],
+        TevArg::TexColor => {
+            let texel = texel(unit);
+            if channel == 3 {
+                texel.alpha
+            } else {
+                texel.color[channel]
             }
         }
+        TevArg::TexColorOf(other) => {
+            let texel = texel(other);
+            if channel == 3 {
+                texel.alpha
+            } else {
+                texel.color[channel]
+            }
+        }
+        TevArg::TexAlpha => texel(unit).alpha,
+        TevArg::LodFrac => texel(unit).lod_frac,
         TevArg::Stub => {
             if channel == 3 {
                 0.0
@@ -57,143 +140,43 @@ fn arg_value(arg: TevArg, unit: u8, channel: usize, texels: &[Option<TexInput>])
                 1.0
             }
         }
-        TevArg::TexColorOf(other) => match texels.get(usize::from(other)).and_then(|slot| *slot) {
-            Some(texel) => texel.color[channel.min(3)],
-            None => 1.0,
-        },
     }
-}
-
-fn scaled(
-    operand: TevOperand,
-    unit: u8,
-    channel: usize,
-    texels: &[Option<TexInput>],
-    current: Rgba,
-    kcolors: &KColors,
-) -> f32 {
-    let raw = match operand.arg {
-        TevArg::Color => current[channel.min(3)],
-        TevArg::Alpha => current[3],
-        TevArg::KColor(index) => kcolors
-            .get(usize::from(index))
-            .copied()
-            .unwrap_or([0.0, 0.0, 0.0, 1.0])[channel.min(3)],
-        other => arg_value(other, unit, channel, texels),
-    };
-    let scaled = raw * operand.scale.multiplier() + operand.scale.offset();
-    if operand.negate { -scaled } else { scaled }
-}
-
-fn fold(op: TevOp, a: f32, b: f32, c: f32) -> f32 {
-    match op {
-        TevOp::A => a,
-        TevOp::OneMinusA => 1.0 - a,
-        TevOp::C => c,
-        TevOp::OneMinusC => 1.0 - c,
-        TevOp::APlusB => a + b,
-        TevOp::AMinusB => a - b,
-        TevOp::AMinusC => a - c,
-        TevOp::ATimesB => a * b,
-        TevOp::APlusBHalf => (a + b) * 0.5,
-        TevOp::BPlusCHalf => (b + c) * 0.5,
-        TevOp::BMinusCHalf => (b - c) * 0.5,
-    }
-}
-
-fn fold2(op: TevOp2, a: f32, b: f32, d: f32) -> f32 {
-    match op {
-        TevOp2::D => d,
-        TevOp2::OneMinusD => 1.0 - d,
-        TevOp2::APlusD => a + d,
-        TevOp2::APlusOneMinusD => a + (1.0 - d),
-        TevOp2::ATimesD => a * d,
-        TevOp2::ATimesOneMinusD => a * (1.0 - d),
-        TevOp2::APlusB => a + b,
-        TevOp2::AMinusB => a - b,
-        TevOp2::ATimesA => a * a,
-    }
-}
-
-fn combine(mode: TevMode, a: f32, b: f32) -> f32 {
-    match mode {
-        TevMode::Replace => a,
-        TevMode::Modulate => a * b,
-        TevMode::Add => a + b,
-        TevMode::Subtract => a - b,
-    }
-}
-
-fn stage_channel(
-    stage: &TevStage,
-    channel: usize,
-    texels: &[Option<TexInput>],
-    current: Rgba,
-    destination: Rgba,
-    kcolors: &KColors,
-) -> f32 {
-    let operand_count = if channel == 3 { 3 } else { 4 };
-    let mut values = [0.0_f32; 4];
-    for (slot, value) in values.iter_mut().enumerate().take(operand_count) {
-        let operand = if channel == 3 {
-            stage.alpha_arg[slot]
-        } else {
-            stage.color_arg[slot]
-        };
-        *value = scaled(operand, stage.tex_unit, channel, texels, current, kcolors);
-    }
-    let op = if channel == 3 {
-        stage.alpha_op[0]
-    } else {
-        stage.color_op[channel]
-    };
-    let mut combined = fold(op, values[0], values[1], values[2]);
-    if operand_count == 4 {
-        let fold_c = if channel == 3 {
-            stage.alpha_op[1]
-        } else {
-            stage.color_op[1]
-        };
-        combined = fold(fold_c, combined, values[2], values[2]);
-    }
-    let second = fold2(
-        stage.op2[channel.min(3)],
-        combined,
-        values[1],
-        destination[channel],
-    );
-    let mode = if channel == 3 {
-        stage.alpha_mode
-    } else {
-        stage.color_mode
-    };
-    let scale = if channel == 3 {
-        stage.alpha_scale
-    } else {
-        stage.color_scale
-    };
-    combine(mode, combined, second) * scale.multiplier() + scale.offset()
 }
 
 /// Runs the stage program over an incoming color.
+///
+/// The rasterized color is register 0 at the first stage (the hardware's
+/// `prev` register), registers 0..2 start at zero, and every stage reads the
+/// register file before writing its color and alpha destinations. The result
+/// is the last stage's computed channels, wherever they landed.
 pub fn evaluate_stages(model: &ShadingModel, incoming: Rgba, texels: &[Option<TexInput>]) -> Rgba {
-    let mut current = incoming;
+    let mut regs = [[0.0_f32; 4]; 4];
+    regs[0] = incoming;
+    let mut last = incoming;
     for stage in &model.stages {
-        let mut next = [0.0_f32; 4];
-        for (channel, slot) in next.iter_mut().enumerate() {
-            *slot = stage_channel(stage, channel, texels, current, current, &model.kcolors);
+        let mut result = [0.0_f32; 4];
+        for (channel, out) in result.iter_mut().enumerate() {
+            let terms = stage_terms(stage, channel);
+            let args = terms
+                .args
+                .map(|arg| arg_value(arg, stage.tex_unit, channel, texels, &regs, &model.kcolors));
+            *out = combine_channel(&terms, args);
         }
-        current = next;
+        let color_at = stage_terms(stage, 0).dest.index();
+        let alpha_at = stage_terms(stage, 3).dest.index();
+        regs[color_at][0..3].copy_from_slice(&result[0..3]);
+        regs[alpha_at][3] = result[3];
+        last = result;
     }
     [
-        current[0].clamp(0.0, 1.0),
-        current[1].clamp(0.0, 1.0),
-        current[2].clamp(0.0, 1.0),
-        current[3].clamp(0.0, 1.0),
+        last[0].clamp(0.0, 1.0),
+        last[1].clamp(0.0, 1.0),
+        last[2].clamp(0.0, 1.0),
+        last[3].clamp(0.0, 1.0),
     ]
 }
 
-/// Diffuse and specular contribution of the model's lights.
+/// Diffuse contribution of the model's lights, plus its ambient.
 pub fn evaluate_lights(model: &ShadingModel, normal: [f32; 3], world_pos: [f32; 3]) -> [f32; 3] {
     let mut accum = [0.0_f32; 3];
     for light in &model.lights {
@@ -301,154 +284,97 @@ pub fn evaluate(
 }
 
 fn arg_wgsl(arg: TevArg, unit: usize, channel: usize) -> String {
-    let alpha_channel = channel == 3;
+    let slot = ["r", "g", "b", "a"][channel];
     match arg {
-        TevArg::Zero => "COMBINE_ZERO".to_string(),
-        TevArg::One => "COMBINE_UNIT".to_string(),
+        TevArg::Zero => "0.0".to_string(),
+        TevArg::One => "1.0".to_string(),
         TevArg::Half => "0.5".to_string(),
         TevArg::Two => "2.0".to_string(),
-        TevArg::Color => format!("src[{}]", channel.min(3)),
-        TevArg::Alpha => "src[3]".to_string(),
-        TevArg::KColor(index) => format!("kcolor[{}][{}]", index.min(3), channel.min(3)),
-        TevArg::TexColor => format!("tex{}", unit),
-        TevArg::TexAlpha => format!("tex{}.a", unit),
-        TevArg::LodFrac => format!("lod{}", unit),
-        TevArg::Stub => {
-            if alpha_channel {
-                "COMBINE_ZERO".to_string()
+        TevArg::Color => format!("tev_regs[0].{slot}"),
+        TevArg::Alpha => "tev_regs[0].a".to_string(),
+        TevArg::Reg0 => format!("tev_regs[1].{slot}"),
+        TevArg::Reg1 => format!("tev_regs[2].{slot}"),
+        TevArg::Reg2 => format!("tev_regs[3].{slot}"),
+        TevArg::KColor(index) => format!("kcolor[{}].{slot}", index.min(3)),
+        TevArg::TexColor => {
+            if channel == 3 {
+                format!("tex{unit}.a")
             } else {
-                "COMBINE_UNIT".to_string()
+                format!("tex{unit}.{slot}")
             }
         }
-        TevArg::TexColorOf(other) => format!("tex{}", usize::from(other).min(7)),
+        TevArg::TexColorOf(other) => {
+            let other = usize::from(other).min(7);
+            if channel == 3 {
+                format!("tex{other}.a")
+            } else {
+                format!("tex{other}.{slot}")
+            }
+        }
+        TevArg::TexAlpha => format!("tex{unit}.a"),
+        TevArg::LodFrac => format!("lod{unit}"),
+        TevArg::Stub => {
+            if channel == 3 {
+                "0.0".to_string()
+            } else {
+                "1.0".to_string()
+            }
+        }
     }
-}
-
-/// Renders an f32 as a WGSL float literal: `Debug` always keeps the decimal
-/// point, where `Display` would emit a bare integer and break `clamp`.
-fn wgsl_float(value: f32) -> String {
-    format!("{value:?}")
-}
-
-fn operand_wgsl(operand: TevOperand, unit: usize, channel: usize) -> String {
-    let raw = arg_wgsl(operand.arg, unit, channel);
-    let mut expr = format!(
-        "({raw} * {} + {})",
-        wgsl_float(operand.scale.multiplier()),
-        wgsl_float(operand.scale.offset())
-    );
-    if operand.negate {
-        expr = format!("(-{expr})");
-    }
-    expr
-}
-
-fn op_wgsl(op: TevOp, a: &str, b: &str, c: &str) -> String {
-    let expr = match op {
-        TevOp::A => a.to_string(),
-        TevOp::OneMinusA => format!("(COMBINE_UNIT - {a})"),
-        TevOp::C => c.to_string(),
-        TevOp::OneMinusC => format!("(COMBINE_UNIT - {c})"),
-        TevOp::APlusB => format!("({a} + {b})"),
-        TevOp::AMinusB => format!("({a} - {b})"),
-        TevOp::AMinusC => format!("({a} - {c})"),
-        TevOp::ATimesB => format!("({a} * {b})"),
-        TevOp::APlusBHalf => format!("(({a} + {b}) * 0.5)"),
-        TevOp::BPlusCHalf => format!("(({b} + {c}) * 0.5)"),
-        TevOp::BMinusCHalf => format!("(({b} - {c}) * 0.5)"),
-    };
-    format!("clamp({expr}, COMBINE_LO, COMBINE_HI)")
-}
-
-fn op2_wgsl(op: TevOp2, a: &str, d: &str) -> String {
-    let expr = match op {
-        TevOp2::D => d.to_string(),
-        TevOp2::OneMinusD => format!("(COMBINE_UNIT - {d})"),
-        TevOp2::APlusD => format!("({a} + {d})"),
-        TevOp2::APlusOneMinusD => format!("({a} + (COMBINE_UNIT - {d}))"),
-        TevOp2::ATimesD => format!("({a} * {d})"),
-        TevOp2::ATimesOneMinusD => format!("({a} * (COMBINE_UNIT - {d}))"),
-        TevOp2::APlusB => format!("({a} + {a})"),
-        TevOp2::AMinusB => format!("({a} - {a})"),
-        TevOp2::ATimesA => format!("({a} * {a})"),
-    };
-    format!("clamp({expr}, COMBINE_LO, COMBINE_HI)")
-}
-
-fn mode_wgsl(mode: TevMode, a: &str, b: &str) -> String {
-    let expr = match mode {
-        TevMode::Replace => a.to_string(),
-        TevMode::Modulate => format!("({a} * {b})"),
-        TevMode::Add => format!("({a} + {b})"),
-        TevMode::Subtract => format!("({a} - {b})"),
-    };
-    format!("clamp({expr}, COMBINE_ZERO, COMBINE_ONE)")
 }
 
 fn stage_channel_wgsl(stage: &TevStage, channel: usize) -> String {
     let unit = usize::from(stage.tex_unit).min(7);
-    let count = if channel == 3 { 3 } else { 4 };
-    let mut names: Vec<String> = Vec::with_capacity(count);
-    for slot in 0..count {
-        let operand = if channel == 3 {
-            stage.alpha_arg[slot]
-        } else {
-            stage.color_arg[slot]
-        };
-        names.push(operand_wgsl(operand, unit, channel));
+    let terms = stage_terms(stage, channel);
+    let [a, b, c, d] = terms.args.map(|arg| arg_wgsl(arg, unit, channel));
+    let lerp = format!("((1.0 - {c}) * {a} + {c} * {b})");
+    let mixed = match terms.op {
+        TevOp::Add => format!("({d} + {lerp})"),
+        TevOp::Sub => format!("({d} - {lerp})"),
+    };
+    let biased = match terms.bias {
+        TevBias::Zero => mixed,
+        TevBias::AddHalf => format!("({mixed} + 0.5)"),
+        TevBias::SubHalf => format!("({mixed} - 0.5)"),
+    };
+    let scaled = match terms.scale {
+        TevScale::X1 => biased,
+        TevScale::X2 => format!("({biased} * 2.0)"),
+        TevScale::X4 => format!("({biased} * 4.0)"),
+        TevScale::Divide2 => format!("({biased} * 0.5)"),
+    };
+    if terms.clamp {
+        format!("clamp({scaled}, 0.0, 1.0)")
+    } else {
+        format!("clamp({scaled}, -4.0, 3.99609375)")
     }
-    let op = if channel == 3 {
-        stage.alpha_op[0]
-    } else {
-        stage.color_op[channel]
-    };
-    let mut combined = op_wgsl(op, &names[0], &names[1], &names[2]);
-    if count == 4 {
-        let second_op = if channel == 3 {
-            stage.alpha_op[1]
-        } else {
-            stage.color_op[1]
-        };
-        combined = op_wgsl(second_op, &combined, &names[1], &names[2]);
-    }
-    let second = op2_wgsl(
-        stage.op2[channel.min(3)],
-        &combined,
-        &format!("dst[{}]", channel),
-    );
-    let mode = if channel == 3 {
-        stage.alpha_mode
-    } else {
-        stage.color_mode
-    };
-    let scale = if channel == 3 {
-        stage.alpha_scale
-    } else {
-        stage.color_scale
-    };
-    format!(
-        "clamp(({} * {} + {}), COMBINE_ZERO, COMBINE_ONE)",
-        mode_wgsl(mode, &combined, &second),
-        wgsl_float(scale.multiplier()),
-        wgsl_float(scale.offset())
-    )
 }
 
 /// WGSL for the stage program, as a fragment-shader function body.
 ///
-/// `texN` / `lodN` bindings are expected in scope per sampled unit, plus
-/// `kcolor` (4 RGBA constants) and the incoming `src` color. Assigns `outColor`.
+/// `texN` / `lodN` bindings are expected in scope per sampled unit (the
+/// sampled texel, alpha included), plus `kcolor` (4 RGBA constants) and the
+/// incoming `lit_in` color. Assigns `outColor`.
 pub fn wgsl_program(model: &ShadingModel) -> String {
-    let mut body = String::new();
-    body.push_str("var src: vec4<f32> = lit_in;\n");
-    for stage in &model.stages {
-        body.push_str("var dst: vec4<f32> = src;\n");
+    let mut body = String::from(
+        "var tev_regs: array<vec4<f32>, 4> = array<vec4<f32>, 4>(lit_in, vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));\n",
+    );
+    body.push_str("var tev_out: vec4<f32> = lit_in;\n");
+    for (stage_index, stage) in model.stages.iter().enumerate() {
         for channel in 0..4 {
             let expr = stage_channel_wgsl(stage, channel);
-            body.push_str(&format!("dst[{channel}] = {expr};\n"));
+            body.push_str(&format!("let s{stage_index}_{channel} = {expr};\n"));
         }
-        body.push_str("src = dst;\n");
+        let color_at = stage.color_dest.index();
+        let alpha_at = stage.alpha_dest.index();
+        body.push_str(&format!(
+            "tev_regs[{color_at}] = vec4<f32>(s{stage_index}_0, s{stage_index}_1, s{stage_index}_2, tev_regs[{color_at}].a);\n"
+        ));
+        body.push_str(&format!("tev_regs[{alpha_at}].a = s{stage_index}_3;\n"));
+        body.push_str(&format!(
+            "tev_out = vec4<f32>(s{stage_index}_0, s{stage_index}_1, s{stage_index}_2, s{stage_index}_3);\n"
+        ));
     }
-    body.push_str("outColor = src;\n");
+    body.push_str("outColor = tev_out;\n");
     body
 }

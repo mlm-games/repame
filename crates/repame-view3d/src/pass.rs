@@ -90,6 +90,11 @@ impl RenderTarget {
         }
     }
 
+    /// Target the size of the frame being rendered.
+    pub fn sized_like_frame(name: impl Into<String>, width: u32, height: u32) -> Self {
+        Self::color(name, width, height)
+    }
+
     pub fn color(name: impl Into<String>, width: u32, height: u32) -> Self {
         Self::new(
             name,
@@ -127,6 +132,17 @@ pub struct RenderPass {
     pub source: Option<String>,
     /// Groups drawn by [`PassKind::Render`]; empty for the other kinds.
     pub groups: Vec<crate::MeshGroup>,
+}
+
+impl RenderPass {
+    pub fn render(target: RenderTarget, groups: Vec<crate::MeshGroup>) -> Self {
+        Self {
+            target,
+            kind: PassKind::Render,
+            source: None,
+            groups,
+        }
+    }
 }
 
 /// Why a pass list was rejected.

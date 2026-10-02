@@ -590,6 +590,36 @@ pub struct MaterialUniform {
 const _: () = assert!(size_of::<MaterialUniform>() == 128);
 const _: () = assert!(super::material::MAX_TEX_UNITS == 8);
 
+/// A declared render target the batch owns: its texture and view, allocated
+/// on first use and reused while the declaration is unchanged.
+struct PassTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    format: super::pass::RenderTargetFormat,
+    samples: u32,
+}
+
+/// The declaration of one pass for the frame, as the batch records it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PassSpec {
+    pub target: super::pass::RenderTarget,
+    pub kind: super::pass::PassKind,
+    pub source: Option<String>,
+}
+
+/// Maps a declared target format onto the GPU format it renders as.
+fn pass_format(format: super::pass::RenderTargetFormat) -> wgpu::TextureFormat {
+    match format {
+        super::pass::RenderTargetFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+        super::pass::RenderTargetFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
+        super::pass::RenderTargetFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+        super::pass::RenderTargetFormat::R32Float => wgpu::TextureFormat::R32Float,
+        super::pass::RenderTargetFormat::Depth32Float => wgpu::TextureFormat::Depth32Float,
+    }
+}
+
 /// GPU state for one lowered material program.
 struct MaterialPipelines {
     key: u64,
@@ -736,6 +766,8 @@ struct Pending {
     /// Material program slot stamped into every vertex of the group; 0 is
     /// the legacy PBR-lite path.
     material_slot: u32,
+    /// Index into the frame's pass list; 0 = the shared scene target.
+    pass: u32,
 }
 
 /// One draw call's layer: index range + whether depth testing applies.
@@ -752,6 +784,8 @@ struct DrawRange {
     transparent: bool,
     /// Material program that drew this range; 0 = legacy path.
     material: u32,
+    /// Index into the frame's pass list; 0 = the shared scene target.
+    pass: u32,
 }
 
 /// Per-frame snapshot batch. `Send + Sync` so it can cross into the
@@ -812,6 +846,8 @@ pub struct SceneBatch {
     /// Material programs registered for this frame; index 0 is the legacy
     /// PBR-lite path, so slot `n` reads `materials[n - 1]`.
     materials: Vec<MaterialEntry>,
+    /// Passes declared for this frame, in execution order.
+    passes: Vec<PassSpec>,
 }
 
 impl SceneBatch {
@@ -870,6 +906,7 @@ impl SceneBatch {
             stats: super::stats::FrameStats::new(),
             overrides: super::texfmt::TextureOverrides::new(),
             materials: Vec::new(),
+            passes: Vec::new(),
             verts: Vec::new(),
             indices: Vec::new(),
             ranges: Vec::new(),
@@ -1236,14 +1273,14 @@ impl SceneBatch {
     /// cache so both paths agree on malformed.
     /// Appends one group drawn by the given material program (0 = legacy).
     pub fn push_group_with_material(&mut self, group: &MeshGroup, material: u32) {
-        self.push_group_inner(group, material);
+        self.push_group_inner(group, material, 0);
     }
 
     pub fn push_group(&mut self, group: &MeshGroup) {
-        self.push_group_inner(group, 0);
+        self.push_group_inner(group, 0, 0);
     }
 
-    fn push_group_inner(&mut self, group: &MeshGroup, material_slot: u32) {
+    fn push_group_inner(&mut self, group: &MeshGroup, material_slot: u32, pass: u32) {
         if !super::chunk::validate_group(group) {
             return;
         }
@@ -1286,7 +1323,15 @@ impl SceneBatch {
             alpha_cutoff: group.alpha_cutoff.clamp(0.0, 1.0),
             depth_test: group.depth_test,
             material_slot,
+            pass: 0,
         });
+    }
+
+    /// Appends one group's geometry for `pass_index`, so a declared
+    /// [`super::pass::RenderPass`] owns its draws instead of the shared
+    /// scene target.
+    pub fn push_group_for_pass(&mut self, group: &MeshGroup, pass_index: u32) {
+        self.push_group_inner(group, 0, pass_index);
     }
 
     /// Registers a material program, returning the slot later groups stamp
@@ -1447,6 +1492,79 @@ impl SceneBatch {
                 &[],
             ),
         }
+    }
+
+    /// Declares the frame's passes, replacing any previous list. Pass
+    /// geometry goes in through [`SceneBatch::push_group_for_pass`] with the
+    /// 1-based index this list uses (0 is the shared scene target).
+    pub fn set_passes(
+        &mut self,
+        passes: &[super::pass::RenderPass],
+    ) -> Result<(), super::pass::PassError> {
+        super::pass::validate_passes(passes)?;
+        self.passes = passes
+            .iter()
+            .map(|pass| PassSpec {
+                target: pass.target.clone(),
+                kind: pass.kind,
+                source: pass.source.clone(),
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// Passes declared for this frame, in execution order.
+    pub fn passes(&self) -> &[PassSpec] {
+        &self.passes
+    }
+
+    /// Ensures every declared pass has a target texture, reallocating only
+    /// when that declaration changed.
+    fn sync_pass_targets(&self, device: &wgpu::Device, res: &mut SceneEntry) {
+        for spec in &self.passes {
+            let stale = res
+                .pass_targets
+                .get(&spec.target.name)
+                .is_none_or(|target| {
+                    target.width != spec.target.width
+                        || target.height != spec.target.height
+                        || target.format != spec.target.format
+                        || target.samples != spec.target.samples
+                });
+            if !stale {
+                continue;
+            }
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("repame_view3d_pass_target"),
+                size: wgpu::Extent3d {
+                    width: spec.target.width.max(1),
+                    height: spec.target.height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: spec.target.samples.max(1),
+                dimension: wgpu::TextureDimension::D2,
+                format: pass_format(spec.target.format),
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            res.pass_targets.insert(
+                spec.target.name.clone(),
+                PassTarget {
+                    texture,
+                    view,
+                    width: spec.target.width,
+                    height: spec.target.height,
+                    format: spec.target.format,
+                    samples: spec.target.samples,
+                },
+            );
+        }
+        let live: Vec<&String> = self.passes.iter().map(|spec| &spec.target.name).collect();
+        res.pass_targets.retain(|name, _| live.contains(&name));
     }
 
     /// Material programs registered this frame, in slot order (slot 0 is the
@@ -1734,6 +1852,7 @@ impl SceneBatch {
                 depth_test: g.depth_test,
                 transparent: g.transparent,
                 material: g.material_slot,
+                pass: g.pass,
             });
         }
         self.palette.clear();
@@ -1818,6 +1937,7 @@ impl SceneBatch {
                 depth_test,
                 transparent,
                 material: 0,
+                pass: 0,
             });
         }
     }
@@ -2479,6 +2599,7 @@ fn vs_main(
             pipeline_transparent_flat: mk("repame_view3d_transparent_flat", false, true),
             shadow_depth_pipeline,
             material_pipelines: Vec::new(),
+            pass_targets: HashMap::new(),
             pipe_layout,
             shadow_cam_bind,
             shadow_camera_buf,
@@ -2570,6 +2691,7 @@ fn vs_main(
         }
         queue.write_buffer(&res.camera, 0, bytemuck::cast_slice(&[self.camera]));
         self.sync_material_pipelines(device, queue, res);
+        self.sync_pass_targets(device, res);
         let program = self.materials.first().map(|entry| entry.cache_key);
         if program.is_some() {
             queue.write_buffer(
@@ -2692,6 +2814,8 @@ struct SceneEntry {
     /// One set of pipelines, uniform and bind group per material program
     /// registered this frame, indexed by `DrawRange::material - 1`.
     material_pipelines: Vec<MaterialPipelines>,
+    /// Pass targets by declared name, allocated on first use.
+    pass_targets: HashMap<String, PassTarget>,
     pipe_layout: wgpu::PipelineLayout,
     shadow_cam_bind: wgpu::BindGroup,
     shadow_camera_buf: wgpu::Buffer,

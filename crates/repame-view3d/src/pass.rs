@@ -11,6 +11,9 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RenderTargetFormat {
     Rgba8Unorm,
+    /// Matches the compositor's scene format, so a pass target can be
+    /// sampled and drawn with the batch's own pipelines.
+    Rgba8UnormSrgb,
     Bgra8Unorm,
     Rgba16Float,
     R32Float,
@@ -21,7 +24,7 @@ impl RenderTargetFormat {
     pub const fn bytes_per_texel(self) -> u32 {
         match self {
             Self::Depth32Float | Self::R32Float => 4,
-            Self::Rgba8Unorm | Self::Bgra8Unorm => 4,
+            Self::Rgba8Unorm | Self::Rgba8UnormSrgb | Self::Bgra8Unorm => 4,
             Self::Rgba16Float => 8,
         }
     }

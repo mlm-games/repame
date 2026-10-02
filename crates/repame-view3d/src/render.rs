@@ -595,6 +595,11 @@ const _: () = assert!(super::material::MAX_TEX_UNITS == 8);
 struct PassTarget {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    /// The batch's pipelines are depth-aware, so every pass target carries a
+    /// matching depth buffer rather than a separate no-depth pipeline set.
+    /// The texture is held so its view stays valid.
+    _depth: wgpu::Texture,
+    depth_view: wgpu::TextureView,
     width: u32,
     height: u32,
     format: super::pass::RenderTargetFormat,
@@ -607,12 +612,16 @@ pub struct PassSpec {
     pub target: super::pass::RenderTarget,
     pub kind: super::pass::PassKind,
     pub source: Option<String>,
+    /// 1-based position in the declared list, matching the index a game
+    /// passes to [`SceneBatch::push_group_for_pass`].
+    pub index: u32,
 }
 
 /// Maps a declared target format onto the GPU format it renders as.
 fn pass_format(format: super::pass::RenderTargetFormat) -> wgpu::TextureFormat {
     match format {
         super::pass::RenderTargetFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+        super::pass::RenderTargetFormat::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
         super::pass::RenderTargetFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
         super::pass::RenderTargetFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
         super::pass::RenderTargetFormat::R32Float => wgpu::TextureFormat::R32Float,
@@ -1323,7 +1332,7 @@ impl SceneBatch {
             alpha_cutoff: group.alpha_cutoff.clamp(0.0, 1.0),
             depth_test: group.depth_test,
             material_slot,
-            pass: 0,
+            pass,
         });
     }
 
@@ -1494,34 +1503,24 @@ impl SceneBatch {
         }
     }
 
-    /// Declares the frame's passes, replacing any previous list. Pass
-    /// geometry goes in through [`SceneBatch::push_group_for_pass`] with the
-    /// 1-based index this list uses (0 is the shared scene target).
-    pub fn set_passes(
-        &mut self,
-        passes: &[super::pass::RenderPass],
-    ) -> Result<(), super::pass::PassError> {
-        super::pass::validate_passes(passes)?;
-        self.passes = passes
-            .iter()
-            .map(|pass| PassSpec {
-                target: pass.target.clone(),
-                kind: pass.kind,
-                source: pass.source.clone(),
-            })
-            .collect();
-        Ok(())
-    }
-
-    /// Passes declared for this frame, in execution order.
-    pub fn passes(&self) -> &[PassSpec] {
-        &self.passes
-    }
-
     /// Ensures every declared pass has a target texture, reallocating only
     /// when that declaration changed.
+    ///
+    /// A target's format must match the batch's own: the scene pipelines are
+    /// built for it once, so a differently-formatted attachment would need
+    /// its own pipeline set. A mismatched pass is reported and skipped.
     fn sync_pass_targets(&self, device: &wgpu::Device, res: &mut SceneEntry) {
         for spec in &self.passes {
+            if pass_format(spec.target.format) != res.key.0 {
+                log::warn!(
+                    "scene_batch[{}]: pass '{}' declares format {:?} but the batch renders {:?}; pass skipped",
+                    self.id,
+                    spec.target.name,
+                    spec.target.format,
+                    res.key.0
+                );
+                continue;
+            }
             let stale = res
                 .pass_targets
                 .get(&spec.target.name)
@@ -1551,11 +1550,24 @@ impl SceneBatch {
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let depth = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("repame_view3d_pass_depth"),
+                size: texture.size(),
+                mip_level_count: 1,
+                sample_count: texture.sample_count(),
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
             res.pass_targets.insert(
                 spec.target.name.clone(),
                 PassTarget {
                     texture,
                     view,
+                    _depth: depth,
+                    depth_view,
                     width: spec.target.width,
                     height: spec.target.height,
                     format: spec.target.format,
@@ -1563,8 +1575,117 @@ impl SceneBatch {
                 },
             );
         }
-        let live: Vec<&String> = self.passes.iter().map(|spec| &spec.target.name).collect();
+        let live: Vec<&String> = self
+            .passes
+            .iter()
+            .filter(|spec| pass_format(spec.target.format) == res.key.0)
+            .map(|spec| &spec.target.name)
+            .collect();
         res.pass_targets.retain(|name, _| live.contains(&name));
+    }
+
+    /// Declares the frame's passes, replacing any previous list. Pass
+    /// geometry goes in through [`SceneBatch::push_group_for_pass`] with the
+    /// 1-based index this list uses (0 is the shared scene target).
+    pub fn set_passes(
+        &mut self,
+        passes: &[super::pass::RenderPass],
+    ) -> Result<(), super::pass::PassError> {
+        super::pass::validate_passes(passes)?;
+        self.passes = passes
+            .iter()
+            .enumerate()
+            .map(|(index, pass)| PassSpec {
+                target: pass.target.clone(),
+                kind: pass.kind,
+                source: pass.source.clone(),
+                index: index as u32 + 1,
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// Passes declared for this frame, in execution order.
+    pub fn passes(&self) -> &[PassSpec] {
+        &self.passes
+    }
+
+    /// Encodes a copy of a declared pass target into `encoder`, returning
+    /// the buffer and its row layout. Games drive this inside their own
+    /// frame and map the buffer later; [`SceneBatch::read_pass_target`]
+    /// wraps the blocking path for tools and tests.
+    pub fn encode_pass_readback(
+        &self,
+        device: &wgpu::Device,
+        resources: &repose_render_wgpu::CallbackResources,
+        name: &str,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Option<(wgpu::Buffer, u32, u32)> {
+        let all = resources.get::<SceneResources>()?;
+        let entry = all.batches.get(self.id.as_str())?;
+        let target = entry.pass_targets.get(name)?;
+        if target.format.is_depth() || target.samples != 1 {
+            return None;
+        }
+        let (width, height) = (target.width.max(1), target.height.max(1));
+        let padded = width.div_ceil(256) * 256;
+        let bytes_per_row = padded as usize * 4;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("repame_view3d_pass_readback"),
+            size: (bytes_per_row * height as usize) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row as u32),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Some((buffer, width, height))
+    }
+
+    /// Maps a buffer from [`SceneBatch::encode_pass_readback`] and returns
+    /// tight RGBA8 rows. Blocks until the queue drains.
+    pub fn map_pass_readback(
+        &self,
+        device: &wgpu::Device,
+        buffer: &wgpu::Buffer,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<u8>> {
+        let bytes_per_row = width.div_ceil(256) as usize * 256 * 4;
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        rx.recv().ok()?.ok()?;
+        let mapped = buffer.slice(..).get_mapped_range().ok()?;
+        let mut out = Vec::with_capacity(width as usize * height as usize * 4);
+        for row in mapped.chunks_exact(bytes_per_row) {
+            out.extend_from_slice(&row[..width as usize * 4]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        Some(out)
     }
 
     /// Material programs registered this frame, in slot order (slot 0 is the
@@ -2600,6 +2721,7 @@ fn vs_main(
             shadow_depth_pipeline,
             material_pipelines: Vec::new(),
             pass_targets: HashMap::new(),
+            pass_specs: Vec::new(),
             pipe_layout,
             shadow_cam_bind,
             shadow_camera_buf,
@@ -2692,6 +2814,7 @@ fn vs_main(
         queue.write_buffer(&res.camera, 0, bytemuck::cast_slice(&[self.camera]));
         self.sync_material_pipelines(device, queue, res);
         self.sync_pass_targets(device, res);
+        res.pass_specs = self.passes.clone();
         let program = self.materials.first().map(|entry| entry.cache_key);
         if program.is_some() {
             queue.write_buffer(
@@ -2816,6 +2939,8 @@ struct SceneEntry {
     material_pipelines: Vec<MaterialPipelines>,
     /// Pass targets by declared name, allocated on first use.
     pass_targets: HashMap<String, PassTarget>,
+    /// Pass declarations the batch staged for this frame.
+    pass_specs: Vec<PassSpec>,
     pipe_layout: wgpu::PipelineLayout,
     shadow_cam_bind: wgpu::BindGroup,
     shadow_camera_buf: wgpu::Buffer,
@@ -2879,6 +3004,7 @@ pub fn prepare_scene_with_id(
         cam_bind: wgpu::BindGroup,
         material_bind: wgpu::BindGroup,
         material_pipelines: Vec<MaterialPipelines>,
+        passes: Vec<(PassSpec, wgpu::TextureView, wgpu::TextureView)>,
         tex_bind: wgpu::BindGroup,
         shadow_bind: wgpu::BindGroup,
         shadow_depth_pipeline: wgpu::RenderPipeline,
@@ -2929,6 +3055,15 @@ pub fn prepare_scene_with_id(
         Some(Snapshot {
             cam_bind: res.cam_bind.clone(),
             material_bind: res.material_bind.clone(),
+            passes: res
+                .pass_specs
+                .iter()
+                .filter_map(|spec| {
+                    res.pass_targets.get(&spec.target.name).map(|target| {
+                        (spec.clone(), target.view.clone(), target.depth_view.clone())
+                    })
+                })
+                .collect(),
             material_pipelines: res
                 .material_pipelines
                 .iter()
@@ -3103,51 +3238,132 @@ pub fn prepare_scene_with_id(
         }
     }
     let composite = DepthComposite::get(resources);
-    let Some(mut pass) = composite.begin_scene(id, encoder, clear) else {
-        return;
-    };
-    pass.set_bind_group(0, &snap.cam_bind, &[]);
-    pass.set_bind_group(1, &snap.tex_bind, &[]);
-    pass.set_bind_group(2, &snap.shadow_bind, &[]);
-    pass.set_bind_group(3, &snap.material_bind, &[]);
-    pass.set_vertex_buffer(0, snap.verts.slice(..));
-    pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
-    let mut bound_material: Option<u32> = None;
-    for r in &snap.ranges {
-        let program = snap
-            .material_pipelines
-            .get(r.material.saturating_sub(1) as usize)
-            .filter(|_| r.material > 0);
-        if bound_material != Some(r.material) {
-            match program {
-                Some(pipes) => {
-                    pass.set_bind_group(3, &pipes.bind, &[]);
+    {
+        let Some(mut pass) = composite.begin_scene(id, encoder, clear) else {
+            return;
+        };
+        pass.set_bind_group(0, &snap.cam_bind, &[]);
+        pass.set_bind_group(1, &snap.tex_bind, &[]);
+        pass.set_bind_group(2, &snap.shadow_bind, &[]);
+        pass.set_bind_group(3, &snap.material_bind, &[]);
+        pass.set_vertex_buffer(0, snap.verts.slice(..));
+        pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+        let mut bound_material: Option<u32> = None;
+        for r in snap.ranges.iter().filter(|r| r.pass == 0) {
+            let program = snap
+                .material_pipelines
+                .get(r.material.saturating_sub(1) as usize)
+                .filter(|_| r.material > 0);
+            if bound_material != Some(r.material) {
+                match program {
+                    Some(pipes) => {
+                        pass.set_bind_group(3, &pipes.bind, &[]);
+                    }
+                    None => {
+                        pass.set_bind_group(3, &snap.material_bind, &[]);
+                    }
                 }
-                None => {
-                    pass.set_bind_group(3, &snap.material_bind, &[]);
-                }
+                bound_material = Some(r.material);
             }
-            bound_material = Some(r.material);
+            pass.set_pipeline(match (r.transparent, r.depth_test) {
+                (true, true) => match program {
+                    Some(pipes) => &pipes.transparent,
+                    None => &snap.pipeline_transparent,
+                },
+                (true, false) => match program {
+                    Some(pipes) => &pipes.transparent_flat,
+                    None => &snap.pipeline_transparent_flat,
+                },
+                (false, true) => match program {
+                    Some(pipes) => &pipes.depth,
+                    None => &snap.pipeline_depth,
+                },
+                (false, false) => match program {
+                    Some(pipes) => &pipes.flat,
+                    None => &snap.pipeline_flat,
+                },
+            });
+            pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
         }
-        pass.set_pipeline(match (r.transparent, r.depth_test) {
-            (true, true) => match program {
-                Some(pipes) => &pipes.transparent,
-                None => &snap.pipeline_transparent,
-            },
-            (true, false) => match program {
-                Some(pipes) => &pipes.transparent_flat,
-                None => &snap.pipeline_transparent_flat,
-            },
-            (false, true) => match program {
-                Some(pipes) => &pipes.depth,
-                None => &snap.pipeline_depth,
-            },
-            (false, false) => match program {
-                Some(pipes) => &pipes.flat,
-                None => &snap.pipeline_flat,
-            },
+    }
+
+    // Declared passes each own their attachment, so they run outside the
+    // shared scene pass, in declaration order.
+    for (spec, view, depth_view) in snap.passes.iter() {
+        let pass_index = spec.index;
+        let target = spec.target.clear;
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("repame_view3d_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: target[0] as f64,
+                        g: target[1] as f64,
+                        b: target[2] as f64,
+                        a: target[3] as f64,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
-        pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
+        pass.set_bind_group(0, &snap.cam_bind, &[]);
+        pass.set_bind_group(1, &snap.tex_bind, &[]);
+        pass.set_bind_group(2, &snap.shadow_bind, &[]);
+        pass.set_bind_group(3, &snap.material_bind, &[]);
+        pass.set_vertex_buffer(0, snap.verts.slice(..));
+        pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_viewport(
+            0.0,
+            0.0,
+            spec.target.width as f32,
+            spec.target.height as f32,
+            0.0,
+            1.0,
+        );
+        for r in snap.ranges.iter().filter(|r| r.pass == pass_index) {
+            let program = snap
+                .material_pipelines
+                .get(r.material.saturating_sub(1) as usize)
+                .filter(|_| r.material > 0);
+            pass.set_pipeline(match (r.transparent, r.depth_test) {
+                (true, true) => match program {
+                    Some(pipes) => &pipes.transparent,
+                    None => &snap.pipeline_transparent,
+                },
+                (true, false) => match program {
+                    Some(pipes) => &pipes.transparent_flat,
+                    None => &snap.pipeline_transparent_flat,
+                },
+                (false, true) => match program {
+                    Some(pipes) => &pipes.depth,
+                    None => &snap.pipeline_depth,
+                },
+                (false, false) => match program {
+                    Some(pipes) => &pipes.flat,
+                    None => &snap.pipeline_flat,
+                },
+            });
+            if r.material > 0
+                && let Some(pipes) = program
+            {
+                pass.set_bind_group(3, &pipes.bind, &[]);
+            }
+            pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
+        }
     }
 }
 
@@ -3817,6 +4033,167 @@ mod tests {
         };
         // Primaries are sRGB fixed points, so asserts are exact.
         assert_eq!(at(32, 32), [0, 255, 0, 255], "near quad wins by depth");
+    }
+
+    /// End-to-end GPU proof for declared passes: a group routed to a named
+    /// pass renders into that pass's own texture rather than the shared
+    /// scene target. The read-back comes from the pass texture, so a group
+    /// that never reached its pass would leave it at the clear color.
+    #[test]
+    fn offscreen_pass_renders_into_its_own_target() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+        use super::super::pass::{RenderPass, RenderTarget, TargetSemantics};
+
+        const SIZE: u32 = 32;
+
+        #[derive(Default)]
+        struct Captured {
+            device: Option<wgpu::Device>,
+            batch: Option<SceneBatch>,
+            buffer: Option<(wgpu::Buffer, u32, u32)>,
+        }
+
+        struct Passes {
+            cam: OrbitCamera,
+            scene_group: MeshGroup,
+            pass_group: MeshGroup,
+            captured: std::sync::Arc<std::sync::Mutex<Captured>>,
+        }
+
+        impl WgpuCallback for Passes {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.passes");
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.push_group(&self.scene_group);
+                let target = RenderTarget::new(
+                    "offscreen",
+                    SIZE,
+                    SIZE,
+                    super::super::pass::RenderTargetFormat::Rgba8UnormSrgb,
+                    TargetSemantics::Auxiliary,
+                )
+                .with_clear([0.0, 0.0, 1.0, 1.0]);
+                batch
+                    .set_passes(&[RenderPass::render(target, Vec::new())])
+                    .expect("valid pass list");
+                batch.push_group_for_pass(&self.pass_group, 1);
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.passes",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    SIZE,
+                    SIZE,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                let readback = batch.encode_pass_readback(device, resources, "offscreen", encoder);
+                let mut captured = self.captured.lock().unwrap();
+                captured.device = Some(device.clone());
+                captured.batch = Some(batch);
+                captured.buffer = readback;
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut CallbackRenderPass<'_, '_>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_callback("test.passes", rpass, resources);
+            }
+        }
+
+        fn quad(color: [f32; 3]) -> MeshGroup {
+            let mut group = MeshGroup {
+                depth_test: true,
+                ..Default::default()
+            };
+            group.push_quad(
+                [-5.0, 0.0, 5.0],
+                [5.0, 0.0, 5.0],
+                [5.0, 0.0, -5.0],
+                [-5.0, 0.0, -5.0],
+                color,
+            );
+            group
+        }
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Captured::default()));
+        let mut renderer = match OffscreenRenderer::new_blocking(SIZE, SIZE, 1) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SKIP pass test (no GPU): {e}");
+                return;
+            }
+        };
+        let cam = OrbitCamera {
+            target: glam::Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.9,
+            dist: 30.0,
+            fov_y_deg: 30.0,
+        };
+        let scene = Scene {
+            clear_color: Color::from_rgba(0, 0, 0, 255),
+            nodes: vec![SceneNode::Callback {
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: SIZE as f32,
+                    h: SIZE as f32,
+                },
+                payload: Callback::new(Passes {
+                    cam,
+                    scene_group: quad([1.0, 0.0, 0.0]),
+                    pass_group: quad([0.0, 1.0, 0.0]),
+                    captured: captured.clone(),
+                }),
+            }],
+        };
+        let px = renderer
+            .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+            .expect("offscreen render");
+
+        // The shared scene target holds the red quad...
+        let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+        assert_eq!(
+            [px[i], px[i + 1], px[i + 2], px[i + 3]],
+            [255, 0, 0, 255],
+            "scene pass drew its own group"
+        );
+        // ...and the pass target holds its own green one, read back
+        // directly from that texture rather than the composited scene.
+        let mut state = captured.lock().unwrap();
+        let (device, batch, (buffer, w, h)) = (
+            state.device.take().expect("device captured"),
+            state.batch.take().expect("batch captured"),
+            state.buffer.take().expect("readback encoded"),
+        );
+        let pass_px = batch
+            .map_pass_readback(&device, &buffer, w, h)
+            .expect("mapped pass target");
+        let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+        assert_eq!(
+            &pass_px[i..i + 4],
+            &[0, 255, 0, 255],
+            "declared pass drew its own group"
+        );
     }
 
     /// End-to-end GPU proof for the material path: a group registered

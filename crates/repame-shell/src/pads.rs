@@ -8,6 +8,8 @@ pub const TRIGGER_HELD: f32 = 0.5;
 
 #[derive(Default)]
 pub struct PadBridge {
+    vendor_id: u16,
+    product_id: u16,
     lx: f32,
     ly: f32,
     rx: f32,
@@ -95,6 +97,8 @@ impl PadBridge {
 
     pub fn snapshot(&self) -> GamepadState {
         GamepadState {
+            vendor_id: self.vendor_id,
+            product_id: self.product_id,
             left_stick: Vec2::new(self.lx, self.ly),
             right_stick: Vec2::new(self.rx, self.ry),
             left_trigger_held: self.lt_held,
@@ -161,7 +165,16 @@ impl PadBank {
     pub fn feed(&mut self, events: Vec<GamepadEvent>) {
         for ev in events {
             match ev {
-                GamepadEvent::Connected { .. } => {}
+                GamepadEvent::Connected {
+                    id,
+                    vendor_id,
+                    product_id,
+                    ..
+                } => {
+                    let pad = self.pads.entry(id).or_default();
+                    pad.vendor_id = vendor_id;
+                    pad.product_id = product_id;
+                }
                 GamepadEvent::Disconnected { id } => {
                     self.pads.remove(&id);
                 }
@@ -246,6 +259,12 @@ mod tests {
         let id0 = GamepadId(3);
         let id1 = GamepadId(1);
         bank.feed(vec![
+            GamepadEvent::Connected {
+                id: id0,
+                name: "GameCube Adapter".to_string(),
+                vendor_id: 0x057e,
+                product_id: 0x0337,
+            },
             GamepadEvent::Button {
                 id: id0,
                 button: GamepadButton::South,
@@ -262,5 +281,15 @@ mod tests {
         assert_eq!(drained[0].0, id1, "id-sorted");
         assert!(drained[1].1.south_pressed);
         assert!(drained[0].1.east_pressed);
+        assert_eq!(
+            (drained[1].1.vendor_id, drained[1].1.product_id),
+            (0x057e, 0x0337),
+            "pad identity must reach the game"
+        );
+        assert_eq!(
+            (drained[0].1.vendor_id, drained[0].1.product_id),
+            (0, 0),
+            "a pad that never reported ids reads as zero"
+        );
     }
 }

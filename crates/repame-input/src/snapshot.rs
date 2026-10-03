@@ -10,6 +10,10 @@ pub struct MouseState {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GamepadState {
+    /// USB vendor and product ids of the pad, `0` where the platform reports
+    /// none. Enough to tell a model apart, e.g. a GameCube adapter.
+    pub vendor_id: u16,
+    pub product_id: u16,
     pub left_stick: Vec2,
     pub right_stick: Vec2,
     pub left_trigger_held: bool,

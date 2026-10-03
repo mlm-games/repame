@@ -425,6 +425,8 @@ fn sensor_devices_route_to_pads_by_name_and_convert_units() {
     poller.feed_gamepad(&[GamepadEvent::Connected {
         id: GamepadId(2),
         name: "Wireless Controller (Vendor: 054c)".to_string(),
+        vendor_id: 0x054c,
+        product_id: 0,
     }]);
     assert!(poller.motion_ids().is_empty(), "no motion before a sample");
 
@@ -467,6 +469,8 @@ fn unmatched_sensor_devices_never_invent_a_pad() {
     poller.feed_gamepad(&[GamepadEvent::Connected {
         id: GamepadId(0),
         name: "Pad".to_string(),
+        vendor_id: 0,
+        product_id: 0,
     }]);
     poller.feed_readings(vec![
         reading("Some Other Pad", SensorSample::gyroscope(90.0, 90.0, 90.0)),

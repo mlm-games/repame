@@ -61,7 +61,7 @@ impl MotionPoller {
     pub fn feed_gamepad(&mut self, events: &[GamepadEvent]) {
         for event in events {
             match event {
-                GamepadEvent::Connected { id, name } => {
+                GamepadEvent::Connected { id, name, .. } => {
                     self.pads.insert(id.0, name.clone());
                 }
                 GamepadEvent::Disconnected { id } => {

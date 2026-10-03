@@ -32,6 +32,8 @@ pub struct Sim {
     ///
     /// Each tick adds this to `SimTime`. Set before first `step`.
     pub step: Duration,
+    /// Sim speed multiplier. Zero or negative pauses the sim; a non-finite
+    /// value runs at normal speed.
     pub time_scale: f32,
     /// Max ticks per `step` call. Default `8`.
     ///
@@ -97,8 +99,20 @@ impl Sim {
         self.step_with(dt, |_| {})
     }
 
+    /// Whether the clock is stopped. Zero or negative pauses; a non-finite
+    /// value is a mistake, so it runs at normal speed instead of stalling.
+    fn paused(&self) -> bool {
+        self.time_scale.is_finite() && self.time_scale <= 0.0
+    }
+
     pub fn step_with(&mut self, dt: Duration, mut after_tick: impl FnMut(&mut World)) -> u32 {
         if self.step.is_zero() {
+            return 0;
+        }
+        if self.paused() {
+            // Drop the wall-clock time rather than bank it, so resuming after a
+            // long pause does not fire a burst of catch-up ticks.
+            self.accumulator = Duration::ZERO;
             return 0;
         }
         self.accumulator += dt;
@@ -146,7 +160,10 @@ impl Sim {
     }
 
     fn tick_with(&mut self, after_tick: impl FnOnce(&mut World)) {
-        let time_scale = if self.time_scale.is_finite() && self.time_scale > 0.0 {
+        if self.paused() {
+            return;
+        }
+        let time_scale = if self.time_scale.is_finite() {
             self.time_scale
         } else {
             1.0
@@ -172,6 +189,50 @@ mod tests {
         assert_eq!(ran, 3);
         let time = sim.world.resource::<SimTime>();
         assert!((time.elapsed_secs - 3.0 / 60.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_time_scale_pauses_without_banking_wall_time() {
+        let per_frame = Sim::with_default_step().step(Duration::from_millis(50));
+        assert!(per_frame > 0);
+
+        let mut sim = Sim::with_default_step();
+        sim.step(Duration::from_millis(50));
+        let before = sim.world.resource::<SimTime>().elapsed_secs;
+
+        sim.time_scale = 0.0;
+        assert_eq!(
+            sim.step(Duration::from_secs(5)),
+            0,
+            "paused sim runs no ticks"
+        );
+        sim.tick();
+        assert_eq!(
+            sim.world.resource::<SimTime>().elapsed_secs,
+            before,
+            "paused sim does not advance its clock"
+        );
+
+        sim.time_scale = 1.0;
+        assert_eq!(
+            sim.step(Duration::from_millis(50)),
+            per_frame,
+            "resuming must not fire a catch-up burst"
+        );
+    }
+
+    #[test]
+    fn non_finite_time_scale_runs_at_normal_speed() {
+        let mut sim = Sim::with_default_step();
+        sim.time_scale = f32::NAN;
+        sim.step(Duration::from_millis(51));
+        let time = sim.world.resource::<SimTime>();
+        assert!(
+            (time.delta_secs - 1.0 / 60.0).abs() < 1e-6,
+            "a non-finite scale must not stall the delta, got {}",
+            time.delta_secs
+        );
+        assert!(time.elapsed_secs > 0.0, "the clock still advances");
     }
 
     #[test]

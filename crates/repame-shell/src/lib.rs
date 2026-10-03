@@ -12,12 +12,16 @@ pub use repose_core::input::{GamepadEvent, GamepadId};
 use repose_platform::gamepad::{GamepadBackend, create_backend};
 
 mod audio;
+mod haptics;
 mod levels;
+mod motion;
 mod pads;
 mod shortcuts;
 mod staging;
 pub use audio::drain_cues;
+pub use haptics::{RUMBLE_REFRESH, RUMBLE_UPLOAD_MS, RumbleBridge};
 pub use levels::apply_scheduler_levels;
+pub use motion::{MotionPoller, PadMotion};
 pub use pads::{PadBank, PadBridge, TRIGGER_HELD};
 pub use shortcuts::{
     SharedEdges, ShortcutEdges, game_shortcut_map, install_game_shortcuts, install_handler_into,

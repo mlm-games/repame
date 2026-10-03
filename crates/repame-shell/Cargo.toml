@@ -15,7 +15,7 @@ repame-sim.workspace = true
 repame-sprite.workspace = true
 repose-core.workspace = true
 repose-ui.workspace = true
-repose-platform = { workspace = true, features = ["gamepad"] }
+repose-platform = { workspace = true, features = ["gamepad", "sensors"] }
 repose-app.workspace = true
 anyhow.workspace = true
 log.workspace = true

@@ -7,18 +7,27 @@
 //! - cancel: focus loss clears clicks, mouse edges, RMB latch, touch.
 //! - lifecycle: `consume` expires at tick end; physical capture binds
 //!   physical and drives the action; `replace_map` swaps evaluation.
+//! - motion: sensor devices route to pads by name and reach repame in
+//!   radians per second and m/s^2.
+//! - haptics: motors upload once, refresh on a clock, and stop when the bus
+//!   drops the device.
 
 use std::collections::HashSet;
 
 use glam::Vec2;
 use repame_input::{
-    ActionMap, ActionState, Binding, KeymapDevice, KeymapEntry, RemapSession, decode_keymap_entry,
+    ActionMap, ActionState, Binding, HapticBus, HapticEffect, KeymapDevice, KeymapEntry,
+    MotionSource, MotionTracker, RemapSession, SensorKind, decode_keymap_entry,
     encode_keymap_entry,
 };
-use repame_shell::Staging;
-use repose_core::input::{Key, Modifiers, PhysicalKey, PointerButton};
+use repame_shell::{MotionPoller, RUMBLE_REFRESH, RUMBLE_UPLOAD_MS, RumbleBridge, Staging};
+use repose_core::input::{
+    GamepadEvent, GamepadId, Key, Modifiers, PhysicalKey, PointerButton, SensorSample,
+};
 use repose_core::runtime::Scheduler;
 use repose_core::shortcuts::KeyChord;
+use repose_platform::sensor::SensorReading;
+use web_time::{Duration, Instant};
 
 fn chord(key: Key) -> KeymapEntry {
     KeymapEntry::Key(KeyChord::new(key, Modifiers::default()))
@@ -28,6 +37,17 @@ fn focused_scheduler() -> Scheduler {
     let mut sched = Scheduler::new();
     sched.window_focused = true;
     sched
+}
+
+fn approx(left: f32, right: f32, tolerance: f32) -> bool {
+    (left - right).abs() <= tolerance
+}
+
+fn reading(device: &str, sample: SensorSample) -> SensorReading {
+    SensorReading {
+        device: device.to_string(),
+        sample,
+    }
 }
 
 #[test]
@@ -349,4 +369,148 @@ fn reconcile_never_synthesizes_edges_for_levels_only_repair() {
     );
     assert!(!staged.contains(&1));
     assert!(staged.contains(&2));
+}
+
+// --------------------------------------------------------------------- motion
+
+#[test]
+fn sensor_devices_route_to_pads_by_name_and_convert_units() {
+    let mut poller = MotionPoller::new();
+    poller.feed_gamepad(&[GamepadEvent::Connected {
+        id: GamepadId(2),
+        name: "Wireless Controller (Vendor: 054c)".to_string(),
+    }]);
+    assert!(poller.motion_ids().is_empty(), "no motion before a sample");
+
+    poller.feed_readings(vec![
+        reading(
+            "wireless controller vendor 054c",
+            SensorSample::gyroscope(180.0, 0.0, -90.0),
+        ),
+        reading(
+            "wireless controller vendor 054c",
+            SensorSample::accelerometer(0.0, 1.0, 0.0),
+        ),
+    ]);
+
+    assert_eq!(poller.motion_ids(), vec![GamepadId(2)]);
+    let motion = poller.source(GamepadId(2));
+    assert_eq!(motion.kind(), SensorKind::GyroscopeAccelerometer);
+    let sample = motion.sample().expect("pad reported motion");
+    assert!(
+        approx(sample.angular_velocity.x, std::f32::consts::PI, 1e-5)
+            && approx(
+                sample.angular_velocity.z,
+                -std::f32::consts::FRAC_PI_2,
+                1e-5
+            )
+            && approx(sample.angular_velocity.y, 0.0, 1e-5),
+        "gyro must reach the sim in radians per second, got {:?}",
+        sample.angular_velocity
+    );
+    assert!(
+        approx(sample.acceleration.y, repame_input::GRAVITY, 1e-4),
+        "accelerometer must reach the sim in m/s^2, got {:?}",
+        sample.acceleration
+    );
+}
+
+#[test]
+fn unmatched_sensor_devices_never_invent_a_pad() {
+    let mut poller = MotionPoller::new();
+    poller.feed_gamepad(&[GamepadEvent::Connected {
+        id: GamepadId(0),
+        name: "Pad".to_string(),
+    }]);
+    poller.feed_readings(vec![
+        reading("Some Other Pad", SensorSample::gyroscope(90.0, 90.0, 90.0)),
+        reading("Pad", SensorSample::gyroscope(90.0, 0.0, 0.0)),
+    ]);
+    assert_eq!(
+        poller.motion_ids(),
+        vec![GamepadId(0)],
+        "a device with no matching pad must be dropped"
+    );
+
+    let mut tracker = MotionTracker::new(SensorKind::Gyroscope);
+    tracker.integrate(poller.source(GamepadId(0)).sample().unwrap(), 1.0);
+    assert!(
+        approx(
+            tracker.angular_velocity().x,
+            std::f32::consts::FRAC_PI_2,
+            1e-5
+        ),
+        "integration consumes radians per second, got {:?}",
+        tracker.angular_velocity()
+    );
+
+    poller.feed_gamepad(&[GamepadEvent::Disconnected { id: GamepadId(0) }]);
+    assert!(poller.motion_ids().is_empty());
+    assert_eq!(poller.source(GamepadId(0)).kind(), SensorKind::None);
+    assert!(poller.source(GamepadId(0)).sample().is_none());
+}
+
+// -------------------------------------------------------------------- haptics
+
+#[test]
+fn rumble_uploads_on_change_refreshes_on_a_clock_and_stops_when_dropped() {
+    let mut bus = HapticBus::new();
+    let mut bridge = RumbleBridge::new();
+    let t0 = Instant::now();
+
+    bus.play(2, HapticEffect::for_seconds(0.8, 0.2, 1.0));
+    bridge.sync_at(&bus, t0);
+    assert_eq!(
+        bridge.drain(),
+        vec![(GamepadId(2), 0.8, 0.2, RUMBLE_UPLOAD_MS)]
+    );
+
+    bridge.sync_at(&bus, t0 + Duration::from_millis(16));
+    assert!(
+        bridge.drain().is_empty(),
+        "steady strengths must not upload every frame"
+    );
+
+    bridge.sync_at(&bus, t0 + RUMBLE_REFRESH);
+    assert_eq!(
+        bridge.drain(),
+        vec![(GamepadId(2), 0.8, 0.2, RUMBLE_UPLOAD_MS)],
+        "a held effect must be renewed before the upload expires"
+    );
+
+    bus.play(2, HapticEffect::for_seconds(0.5, 0.5, 1.0));
+    bridge.sync_at(&bus, t0 + RUMBLE_REFRESH);
+    assert_eq!(
+        bridge.drain(),
+        vec![(GamepadId(2), 0.5, 0.5, RUMBLE_UPLOAD_MS)]
+    );
+
+    bus.advance(1.5);
+    assert!(!bus.is_playing(2));
+    bridge.sync_at(&bus, t0 + RUMBLE_REFRESH);
+    assert_eq!(
+        bridge.drain(),
+        vec![(GamepadId(2), 0.0, 0.0, 0)],
+        "an expired effect must stop the pad"
+    );
+
+    bridge.sync_at(&bus, t0 + RUMBLE_REFRESH);
+    assert!(bridge.drain().is_empty(), "a stopped pad must not repeat");
+}
+
+#[test]
+fn rumble_reaches_the_runtime_queue_the_runner_drains() {
+    let mut bus = HapticBus::new();
+    let mut bridge = RumbleBridge::new();
+    bus.play(1, HapticEffect::constant(0.25, 0.75));
+
+    let mut runtime = repose_app::ReposeRuntime::new();
+    bridge.sync(&bus);
+    bridge.forward_to(&mut runtime);
+
+    assert_eq!(
+        runtime.take_rumble_requests(),
+        vec![(1, 0.25, 0.75, RUMBLE_UPLOAD_MS)]
+    );
+    assert!(runtime.take_rumble_requests().is_empty());
 }

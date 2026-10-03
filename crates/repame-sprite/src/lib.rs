@@ -34,6 +34,9 @@ pub use fullscreen::{
     FullscreenTextureUpload,
 };
 
+pub mod light2d;
+pub use light2d::{Light2d, LightStop, Occluder2d, angular_shadow_map};
+
 pub mod post;
 
 pub mod sprite_image;
@@ -278,6 +281,19 @@ pub struct FrameInput {
     /// back with an RGB split; `0.0` draws the batch into the main pass.
     /// Canvas ignores it (vector path has no pixels to sample).
     pub chroma: f32,
+    /// GPU point lights (first four are shaded). Empty (default) =
+    /// lighting off, zero cost, the composite stays off. GPU-only: the
+    /// canvas [`Viewport2d`] path draws as if unlit (same limitation as
+    /// [`chroma`](FrameInput::chroma)).
+    pub lights: Vec<Light2d>,
+    /// World rects casting shadows from [`lights`](FrameInput::lights).
+    /// Empty (default) = no shadows, no occluder culling work.
+    pub occluders: std::sync::Arc<[Occluder2d]>,
+    /// CanvasModulate-style multiplicative ambient light floor, used
+    /// only while `lights` is non-empty: unlit areas fall to it, and
+    /// `None` (default) floors them at black. GPU-only, like
+    /// [`chroma`](FrameInput::chroma).
+    pub ambient: Option<[f32; 3]>,
 }
 
 /// UI-facing pointer events from the viewport.
@@ -356,8 +372,35 @@ fn fitted_box_scissor(
     fit: (f32, f32, f32),
     roll: f32,
 ) -> Option<(u32, u32, u32, u32)> {
-    let d = if info.pixels_per_point.is_finite() && info.pixels_per_point > 1e-6 {
-        info.pixels_per_point
+    fitted_box_scissor_in(
+        world,
+        fit,
+        roll,
+        info.pixels_per_point,
+        [info.viewport.x, info.viewport.y],
+        [
+            info.clip_rect.x,
+            info.clip_rect.y,
+            info.clip_rect.w,
+            info.clip_rect.h,
+        ],
+    )
+}
+
+/// [`fitted_box_scissor`] in explicit render-target coordinates: `origin`
+/// is the viewport origin and `clip` is `x, y, w, h`, both in the target
+/// the scissor is set on. The offscreen composite pass has no
+/// `PaintCallbackInfo`, so it passes its own texture rect here.
+fn fitted_box_scissor_in(
+    world: [f32; 2],
+    fit: (f32, f32, f32),
+    roll: f32,
+    density: f32,
+    origin: [f32; 2],
+    clip: [f32; 4],
+) -> Option<(u32, u32, u32, u32)> {
+    let d = if density.is_finite() && density > 1e-6 {
+        density
     } else {
         1.0
     };
@@ -368,20 +411,20 @@ fn fitted_box_scissor(
     // `fit`'s offsets are dp inside the callback rect, so the box in
     // physical pixels is the world extent scaled and pushed out by them.
     let (bw, bh) = (world[0] * s * d, world[1] * s * d);
-    let cx = info.viewport.x + ox * d + bw * 0.5;
-    let cy = info.viewport.y + oy * d + bh * 0.5;
+    let cx = origin[0] + ox * d + bw * 0.5;
+    let cy = origin[1] + oy * d + bh * 0.5;
     let (hw, hh) = (bw * 0.5, bh * 0.5);
     let (c, sn) = (roll.cos().abs(), roll.sin().abs());
     let (ex, ey) = (hw * c + hh * sn, hw * sn + hh * c);
-    // Intersect with the callback's own clip, then round INWARD. A clip
+    // Intersect with the target's own clip, then round INWARD. A clip
     // must not admit anything outside the box, so the minimum edge ceils
     // and the maximum floors. Rounding outward leaves a 1px sliver of
     // overhanging geometry painted along each edge of the view, which is
     // visible for art that overhangs the world box (the title logo).
-    let lx = (cx - ex).max(info.clip_rect.x);
-    let ty = (cy - ey).max(info.clip_rect.y);
-    let rx = (cx + ex).min(info.clip_rect.x + info.clip_rect.w);
-    let by = (cy + ey).min(info.clip_rect.y + info.clip_rect.h);
+    let lx = (cx - ex).max(clip[0]);
+    let ty = (cy - ey).max(clip[1]);
+    let rx = (cx + ex).min(clip[0] + clip[2]);
+    let by = (cy + ey).min(clip[1] + clip[3]);
     if !(rx > lx && by > ty) {
         return None;
     }
@@ -777,6 +820,10 @@ fn rgba8(c: [f32; 4]) -> Color {
 /// [`FrameInput`] snapshot. Fills its parent; draws `background`, then
 /// sprites, then world texts, then the fullscreen tint. Each paint
 /// publishes [`FrameGeom`] to `geom_out` for dp-space siblings.
+///
+/// Canvas path: the GPU-only snapshot fields [`FrameInput::lights`] and
+/// [`FrameInput::ambient`] are ignored here — point lighting exists on
+/// the `Viewport2dGpu*` path only.
 #[allow(non_snake_case)] // Repose view convention (cf. resims `Viewport3d`).
 pub fn Viewport2d(
     input: FrameInput,
@@ -1219,7 +1266,7 @@ impl WgpuCallback for GpuViewport {
             resources,
             self.uploads.as_ref(),
         );
-        let composite = post::use_composite(self.input.chroma);
+        let composite = post::needs_post(&self.input);
         // Background fill under the batch. Skipped when the snapshot has
         if let Some(bg) = self.input.background
             && !composite
@@ -1247,20 +1294,67 @@ impl WgpuCallback for GpuViewport {
                 &[] as &[FullscreenTexture],
             );
         }
-        if post::use_composite(self.input.chroma) {
+        if composite {
             let w = vp_phys[0].max(1.0) as u32;
             let h = vp_phys[1].max(1.0) as u32;
+            // Derived from the snapshot's own camera (never the
+            // one-frame-stale FrameGeom), so light math, sprite
+            // projection and the letterbox clip agree frame for frame.
+            let fit = effective_fit(dp, self.input.world_size, &self.input.cam);
+            let roll = self.input.cam.roll;
+            let center = self.input.cam.effective_center();
+            // Zero lights = zero lighting work; occluders are only
+            // touched by lights that actually cast shadows.
+            let mut shadow_maps: Vec<Vec<[f32; 2]>> = Vec::new();
+            let lights: &[Light2d] = if self.input.lights.is_empty() {
+                &[]
+            } else {
+                let n = self.input.lights.len().min(light2d::MAX_LIGHTS);
+                for (light, bins) in self.input.lights[..n]
+                    .iter()
+                    .zip(light2d::resolve_shadow_bins(&self.input.lights))
+                {
+                    if bins == 0 {
+                        shadow_maps.push(Vec::new());
+                        continue;
+                    }
+                    let mut resolved = *light;
+                    resolved.shadow_bins = bins;
+                    let mut map = Vec::new();
+                    light2d::angular_shadow_map(&resolved, &self.input.occluders, &mut map);
+                    shadow_maps.push(map);
+                }
+                &self.input.lights[..n]
+            };
             post::prepare_composite(
                 device,
                 queue,
                 encoder,
                 screen,
                 resources,
-                self.batch_id.as_str(),
                 w,
                 h,
-                self.input.chroma,
-                self.input.background,
+                &post::CompositeDesc {
+                    batch_id: self.batch_id.as_str(),
+                    amount: self.input.chroma,
+                    background: self.input.background,
+                    ambient: self.input.ambient.unwrap_or([0.0, 0.0, 0.0]),
+                    lights,
+                    shadow_maps: &shadow_maps,
+                    fit,
+                    roll,
+                    world: self.input.world_size,
+                    center,
+                    density,
+                    scissor: fitted_box_scissor_in(
+                        self.input.world_size,
+                        fit,
+                        roll,
+                        density,
+                        [0.0, 0.0],
+                        [0.0, 0.0, w as f32, h as f32],
+                    ),
+                },
             );
         }
         Vec::new()
@@ -1298,7 +1392,7 @@ impl WgpuCallback for GpuViewport {
                 pivot: cam,
             };
         }
-        if post::use_composite(self.input.chroma) {
+        if post::needs_post(&self.input) {
             post::paint_composite(self.batch_id.as_str(), rpass, resources);
         } else {
             if self.input.background.is_some() {
@@ -1566,6 +1660,7 @@ mod tests {
             background: Some([0.0, 0.0, 1.0, 1.0]),
             overlay_color: None,
             chroma: 0.0,
+            ..Default::default()
         };
         let geom = Arc::new(Mutex::new(FrameGeom {
             fit: (1.0, 0.0, 0.0),

@@ -24,6 +24,10 @@ pub struct PadBridge {
     north: bool,
     lb: bool,
     rb: bool,
+    start: bool,
+    select: bool,
+    l3: bool,
+    r3: bool,
     lt_edge: bool,
     rt_edge: bool,
     south_edge: bool,
@@ -36,6 +40,10 @@ pub struct PadBridge {
     north_edge: bool,
     lb_edge: bool,
     rb_edge: bool,
+    start_edge: bool,
+    select_edge: bool,
+    l3_edge: bool,
+    r3_edge: bool,
 }
 
 impl PadBridge {
@@ -51,7 +59,10 @@ impl PadBridge {
             GamepadButton::DPadDown => (&mut self.dpad_d, &mut self.dpad_d_edge),
             GamepadButton::LeftShoulder => (&mut self.lb, &mut self.lb_edge),
             GamepadButton::RightShoulder => (&mut self.rb, &mut self.rb_edge),
-            _ => return,
+            GamepadButton::Start => (&mut self.start, &mut self.start_edge),
+            GamepadButton::Select => (&mut self.select, &mut self.select_edge),
+            GamepadButton::LeftStick => (&mut self.l3, &mut self.l3_edge),
+            GamepadButton::RightStick => (&mut self.r3, &mut self.r3_edge),
         };
         if pressed && !*held {
             *edge = true;
@@ -86,22 +97,38 @@ impl PadBridge {
         GamepadState {
             left_stick: Vec2::new(self.lx, self.ly),
             right_stick: Vec2::new(self.rx, self.ry),
-            right_trigger_held: self.rt_held,
-            right_trigger_pressed: self.rt_edge,
             left_trigger_held: self.lt_held,
             left_trigger_pressed: self.lt_edge,
+            right_trigger_held: self.rt_held,
+            right_trigger_pressed: self.rt_edge,
+            south_held: self.south,
             south_pressed: self.south_edge,
+            east_held: self.east,
             east_pressed: self.east_edge,
+            west_held: self.west,
             west_pressed: self.west_edge,
-            dpad_left_pressed: self.dpad_l_edge,
-            dpad_up_pressed: self.dpad_u_edge,
-            dpad_right_pressed: self.dpad_r_edge,
-            dpad_down_pressed: self.dpad_d_edge,
+            north_held: self.north,
             north_pressed: self.north_edge,
+            dpad_left_held: self.dpad_l,
+            dpad_left_pressed: self.dpad_l_edge,
+            dpad_up_held: self.dpad_u,
+            dpad_up_pressed: self.dpad_u_edge,
+            dpad_right_held: self.dpad_r,
+            dpad_right_pressed: self.dpad_r_edge,
+            dpad_down_held: self.dpad_d,
+            dpad_down_pressed: self.dpad_d_edge,
             left_shoulder_held: self.lb,
             left_shoulder_pressed: self.lb_edge,
             right_shoulder_held: self.rb,
             right_shoulder_pressed: self.rb_edge,
+            start_held: self.start,
+            start_pressed: self.start_edge,
+            select_held: self.select,
+            select_pressed: self.select_edge,
+            left_stick_click_held: self.l3,
+            left_stick_click_pressed: self.l3_edge,
+            right_stick_click_held: self.r3,
+            right_stick_click_pressed: self.r3_edge,
         }
     }
 
@@ -118,6 +145,10 @@ impl PadBridge {
         self.north_edge = false;
         self.lb_edge = false;
         self.rb_edge = false;
+        self.start_edge = false;
+        self.select_edge = false;
+        self.l3_edge = false;
+        self.r3_edge = false;
     }
 }
 

@@ -4,25 +4,46 @@
 //! sampled the view target; in-pass callbacks cannot, so the viewport
 //! owns the intermediate.)
 //!
-//! Today the composite is chromatic aberration (`offset = amount * 0.02`
+//! The composite grades chromatic aberration (`offset = amount * 0.02`
 //! horizontal RGB split, ported from `game-utils-bevy`'s
-//! `screen_effects.wgsl`.
+//! `screen_effects.wgsl`) and the [`Light2d`](crate::Light2d) point
+//! lighting of [`FrameInput`](crate::FrameInput).
 
 use std::collections::HashMap;
 
 use repose_render_wgpu::{CallbackRenderPass, CallbackResources, ScreenDescriptor};
 
 use super::batch::draw_batch_with_id;
+use super::light2d::{MAX_LIGHTS, MAX_TOTAL_SHADOW_BINS};
+use crate::{FrameInput, Light2d};
 
-/// Fullscreen triangle + scene sampler. Uniforms: `amount` followed by
-/// three scalar pads (16 bytes total; a `vec3` pad would align the
-/// struct to 32).
-const CHROMA_WGSL: &str = r#"
+/// Fullscreen triangle + scene sampler. Uniforms: chroma head, the
+/// lighting payload, four [`Light2d`] entries and the packed angular
+/// shadow maps. Layout is locked to [`pack_composite_uniform`].
+const COMPOSITE_WGSL: &str = r#"
+// Uniform layout locked to `pack_composite_uniform` (const-asserted on
+// the Rust side): 80-byte header, 4 lights x 96 bytes, then 2048 vec4
+// bins holding two `[distance, hit]` bins each (a uniform array stride
+// must be a multiple of 16, so bins cannot be `array<vec2<f32>>`).
+struct Light {
+    pos: vec4<f32>,
+    color: vec4<f32>,
+    ctrl: vec4<f32>,
+    s0: vec4<f32>,
+    s1: vec4<f32>,
+    s2: vec4<f32>,
+};
 struct U {
     amount: f32,
     _p0: f32,
     _p1: f32,
     _p2: f32,
+    ambient: vec4<f32>,
+    fit: vec4<f32>,
+    frame: vec4<f32>,
+    view: vec4<f32>,
+    lights: array<Light, 4>,
+    bins: array<vec4<f32>, 2048>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(1) @binding(0) var scene_tex: texture_2d<f32>;
@@ -40,6 +61,68 @@ fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
     out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
     return out;
 }
+// Framebuffer pixel -> world through the same fit/roll/density the
+// batch camera was built from.
+fn pixel_to_world(p: vec2<f32>) -> vec2<f32> {
+    let dp = p / max(u.view.x, 1e-6);
+    let s = max(u.fit.x, 1e-6);
+    let base = vec2<f32>(
+        (dp.x - u.fit.y) / s + (u.frame.z - u.frame.x * 0.5),
+        (dp.y - u.fit.z) / s + (u.frame.w - u.frame.y * 0.5)
+    );
+    let roll = u.fit.w;
+    if (abs(roll) < 1e-7) {
+        return base;
+    }
+    let c = cos(roll);
+    let sn = sin(roll);
+    let v = base - u.frame.zw;
+    return u.frame.zw + vec2<f32>(c * v.x + sn * v.y, -sn * v.x + c * v.y);
+}
+// Analytic radial ramp between the three stops (rgb premultiplied by
+// the stop alpha on upload).
+fn ramp_at(l: Light, t: f32) -> vec3<f32> {
+    if (t <= l.s0.x) {
+        return l.s0.yzw;
+    }
+    if (t >= l.s2.x) {
+        return l.s2.yzw;
+    }
+    if (t <= l.s1.x) {
+        return mix(l.s0.yzw, l.s1.yzw, (t - l.s0.x) / max(l.s1.x - l.s0.x, 1e-6));
+    }
+    return mix(l.s1.yzw, l.s2.yzw, (t - l.s1.x) / max(l.s2.x - l.s1.x, 1e-6));
+}
+// The fragment tests its distance against the interpolated min-hit
+// distance of its bin: before the first occluder it stays lit, past it
+// it falls dark. Averaging that test over N taps of `ctrl.x` half-width
+// (linear interpolation across bins) is the PCF penumbra, whose
+// world-space width grows with distance from the light.
+fn shadow_at(idx: u32, d: vec2<f32>) -> f32 {
+    let l = u.lights[idx];
+    let n = u32(l.ctrl.y);
+    if (n == 0u) {
+        return 1.0;
+    }
+    let nf = f32(n);
+    let fd = length(d) / max(l.pos.z, 1e-6);
+    let x0 = atan2(d.y, d.x) * 0.159154943091 * nf - 0.5;
+    let taps = i32(floor(max(l.ctrl.x, 0.0)));
+    let base = u32(l.ctrl.z);
+    var sum = 0.0;
+    for (var k: i32 = -taps; k <= taps; k = k + 1) {
+        var x = x0 + f32(k);
+        x = x - floor(x / nf) * nf;
+        let i0 = u32(floor(x)) % n;
+        let i1 = (i0 + 1u) % n;
+        let v0 = u.bins[base + (i0 >> 1u)];
+        let v1 = u.bins[base + (i1 >> 1u)];
+        let a = select(v0.zw, v0.xy, (i0 & 1u) == 0u);
+        let b = select(v1.zw, v1.xy, (i1 & 1u) == 0u);
+        sum += select(0.0, 1.0, fd < mix(a, b, fract(x)).x);
+    }
+    return sum / f32(2 * taps + 1);
+}
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var color = textureSample(scene_tex, scene_smp, in.uv);
@@ -50,14 +133,46 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let b = textureSample(scene_tex, scene_smp, in.uv - vec2<f32>(offset, 0.0)).b;
         color = vec4<f32>(r, color.g, b, color.a);
     }
+    let count = u32(u.view.y);
+    if (count > 0u) {
+        let world = pixel_to_world(in.pos.xy);
+        var lit = u.ambient.xyz;
+        for (var i: u32 = 0u; i < count; i = i + 1u) {
+            let l = u.lights[i];
+            let d = world - l.pos.xy;
+            let t = length(d) / max(l.pos.z, 1e-6);
+            var sh = 1.0;
+            if (l.color.w > 0.5 && t < 1.0) {
+                sh = shadow_at(i, d);
+            }
+            lit += l.color.xyz * l.pos.w * ramp_at(l, t) * sh;
+        }
+        color = vec4<f32>(color.rgb * clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
+    }
     return color;
 }
 "#;
 
-/// True when the composite path is needed. `0.0` keeps the zero-cost
-/// direct path (batch straight into the main pass).
-pub(crate) fn use_composite(amount: f32) -> bool {
-    amount > 0.0
+/// Bytes before the `lights` array: chroma head + ambient + fit +
+/// frame + view, one `vec4` each after the 16-byte chroma head.
+const HEADER_BYTES: usize = 80;
+/// Per-light uniform entry (`Light` in WGSL).
+const LIGHT_BYTES: usize = 96;
+/// Bins packed per `vec4` (two `[distance, hit]` bins).
+const BINS_PER_VEC: usize = 2;
+/// Fixed uniform size of the composite, pinned to `U` in the WGSL.
+const UNIFORM_BYTES: usize =
+    HEADER_BYTES + MAX_LIGHTS * LIGHT_BYTES + (MAX_TOTAL_SHADOW_BINS / BINS_PER_VEC) * 16;
+/// WebGPU's guaranteed `maxUniformBufferBindingSize`.
+const UNIFORM_BUDGET: usize = 64 * 1024;
+const _: () = assert!(UNIFORM_BYTES <= UNIFORM_BUDGET);
+const _: () = assert!(UNIFORM_BYTES == 33232);
+
+/// True when the composite path is needed: chromatic aberration or any
+/// point light. Both off keeps the zero-cost direct path (batch
+/// straight into the main pass).
+pub(crate) fn needs_post(input: &FrameInput) -> bool {
+    input.chroma > 0.0 || !input.lights.is_empty()
 }
 
 struct PostTargets {
@@ -74,6 +189,8 @@ struct PostTargets {
     depth_view: wgpu::TextureView,
     pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
+    uniform_cap: u64,
+    uniform_layout: wgpu::BindGroupLayout,
     uniform_bind: wgpu::BindGroup,
     tex_bind: wgpu::BindGroup,
 }
@@ -170,12 +287,12 @@ fn ensure_targets(
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("post_chroma"),
-        source: wgpu::ShaderSource::Wgsl(CHROMA_WGSL.into()),
+        label: Some("post_composite"),
+        source: wgpu::ShaderSource::Wgsl(COMPOSITE_WGSL.into()),
     });
     let uniform = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("post_uniforms"),
-        size: 16,
+        size: UNIFORM_BYTES as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -260,7 +377,7 @@ fn ensure_targets(
         immediate_size: 0,
     });
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("post_chroma"),
+        label: Some("post_composite"),
         layout: Some(&pipe_layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -309,6 +426,8 @@ fn ensure_targets(
         depth_view,
         pipeline,
         uniform,
+        uniform_cap: UNIFORM_BYTES as u64,
+        uniform_layout,
         uniform_bind,
         tex_bind,
     };
@@ -326,42 +445,196 @@ fn ensure_targets(
     }
 }
 
+/// Everything the offscreen composite grades this frame. Built from the
+/// snapshot inside [`GpuViewport`](crate::GpuViewport) — never from the
+/// one-frame-stale [`FrameGeom`](crate::FrameGeom) — so light math,
+/// sprite projection and the letterbox clip all derive from the same
+/// fit/roll/density.
+pub(crate) struct CompositeDesc<'a> {
+    pub batch_id: &'a str,
+    pub amount: f32,
+    pub background: Option<[f32; 4]>,
+    /// [`FrameInput::ambient`], or a black floor when unset.
+    pub ambient: [f32; 3],
+    /// At most the first [`MAX_LIGHTS`] lights of the snapshot.
+    pub lights: &'a [Light2d],
+    /// Per-light angular maps, parallel to `lights`; empty = no map.
+    pub shadow_maps: &'a [Vec<[f32; 2]>],
+    /// `effective_fit` of the same dp canvas the batch camera used.
+    pub fit: (f32, f32, f32),
+    pub roll: f32,
+    pub world: [f32; 2],
+    pub center: [f32; 2],
+    pub density: f32,
+    /// Contain-fit world box (physical px) clipping the batch inside the
+    /// offscreen texture.
+    pub scissor: Option<(u32, u32, u32, u32)>,
+}
+
+/// Softness cap: 17 taps per light per pixel is already generous.
+const MAX_SOFTNESS: f32 = 8.0;
+
+fn put_f32(out: &mut Vec<u8>, v: f32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+/// Serialize `desc` into the `U` layout of [`COMPOSITE_WGSL`]: header,
+/// four light slots, then the bins the frame actually uses. Light `i`
+/// reads its bins from vec4 `ctrl.z` onward, two bins per vec4.
+fn pack_composite_uniform(desc: &CompositeDesc<'_>, out: &mut Vec<u8>) {
+    out.clear();
+    let n = desc.lights.len().min(MAX_LIGHTS);
+    for v in [
+        desc.amount,
+        0.0,
+        0.0,
+        0.0,
+        desc.ambient[0],
+        desc.ambient[1],
+        desc.ambient[2],
+        0.0,
+        desc.fit.0,
+        desc.fit.1,
+        desc.fit.2,
+        desc.roll,
+        desc.world[0],
+        desc.world[1],
+        desc.center[0],
+        desc.center[1],
+        desc.density,
+        n as f32,
+        0.0,
+        0.0,
+    ] {
+        put_f32(out, v);
+    }
+    let cap_vecs = MAX_TOTAL_SHADOW_BINS / BINS_PER_VEC;
+    let mut starts = Vec::with_capacity(n);
+    let mut used: Vec<&[[f32; 2]]> = Vec::with_capacity(n);
+    let mut first = 0usize;
+    for i in 0..n {
+        let map = desc
+            .shadow_maps
+            .get(i)
+            .map_or(&[] as &[[f32; 2]], |m| m.as_slice());
+        let vecs = map.len().div_ceil(BINS_PER_VEC);
+        starts.push(first);
+        if first + vecs <= cap_vecs {
+            first += vecs;
+            used.push(map);
+        } else {
+            log::warn!(
+                "post: dropping the shadow map of light {i} ({} bins overflow the {cap_vecs}-vec4 uniform)",
+                map.len()
+            );
+            used.push(&[]);
+        }
+    }
+    for i in 0..MAX_LIGHTS {
+        if i >= n {
+            out.resize(out.len() + LIGHT_BYTES, 0);
+            continue;
+        }
+        let l = &desc.lights[i];
+        let bins = used[i].len();
+        for v in [
+            l.position.x,
+            l.position.y,
+            l.radius,
+            l.energy,
+            l.color[0],
+            l.color[1],
+            l.color[2],
+            if bins > 0 { 1.0 } else { 0.0 },
+            l.shadow_softness.clamp(0.0, MAX_SOFTNESS),
+            bins as f32,
+            starts[i] as f32,
+            0.0,
+        ] {
+            put_f32(out, v);
+        }
+        for s in &l.falloff {
+            for v in [
+                s.at,
+                s.color[0] * s.color[3],
+                s.color[1] * s.color[3],
+                s.color[2] * s.color[3],
+            ] {
+                put_f32(out, v);
+            }
+        }
+    }
+    for map in &used {
+        for pair in map.chunks(BINS_PER_VEC) {
+            put_f32(out, pair[0][0]);
+            put_f32(out, pair[0][1]);
+            put_f32(out, pair.get(1).map_or(0.0, |p| p[0]));
+            put_f32(out, pair.get(1).map_or(0.0, |p| p[1]));
+        }
+    }
+}
+
 /// Render the prepared batch into the offscreen scene texture and stage
-/// the chroma uniforms. Call from `prepare` (owns the encoder); the
+/// the composite uniforms. Call from `prepare` (owns the encoder); the
 /// matching [`paint_composite`] runs in `paint`. `background` sets the
 /// offscreen clear color so the composite preserves the snapshot clear
 /// (`None` clears to transparent black, as before).
-#[allow(clippy::too_many_arguments)] // extends `WgpuCallback::prepare` by (id, w, h, amount, bg)
+///
+/// The batch is clipped to `desc.scissor` here: the fitted-box
+/// letterbox clip only exists on the direct path's `paint`, and without
+/// it sprites would bleed over the letterbox bars whenever the
+/// composite is on.
+#[allow(clippy::too_many_arguments)] // extends `WgpuCallback::prepare` by (w, h, desc)
 pub(crate) fn prepare_composite(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
     screen: &ScreenDescriptor,
     resources: &mut CallbackResources,
-    batch_id: &str,
     w: u32,
     h: u32,
-    amount: f32,
-    background: Option<[f32; 4]>,
+    desc: &CompositeDesc<'_>,
 ) {
-    ensure_targets(device, screen, resources, batch_id, w, h);
+    ensure_targets(device, screen, resources, desc.batch_id, w, h);
+    let mut bytes = Vec::new();
+    pack_composite_uniform(desc, &mut bytes);
+    if let Some(all) = resources.get_mut::<PostResources>()
+        && let Some(t) = all.targets.get_mut(desc.batch_id)
+    {
+        // Same growth safety net as `FullscreenPass::prepare_with`: the
+        // payload only outgrows the buffer if the uniform layout grew.
+        let need = (bytes.len() as u64).max(16);
+        if need > t.uniform_cap {
+            t.uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("post_uniforms"),
+                size: need,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            t.uniform_cap = need;
+            t.uniform_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("post_uniform_bg"),
+                layout: &t.uniform_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: t.uniform.as_entire_binding(),
+                }],
+            });
+        }
+        queue.write_buffer(&t.uniform, 0, &bytes);
+    }
     let Some(all) = resources.get::<PostResources>() else {
         return;
     };
-    let Some(t) = all.targets.get(batch_id) else {
+    let Some(t) = all.targets.get(desc.batch_id) else {
         return;
     };
-    queue.write_buffer(
-        &t.uniform,
-        0,
-        bytemuck::cast_slice(&[amount, 0.0, 0.0, 0.0]),
-    );
     let (color_view, resolve_target) = if screen.sample_count.max(1) > 1 {
         (&t.scene_view, Some(&t.resolve_view))
     } else {
         (&t.scene_view, None)
     };
-    let [cr, cg, cb, ca] = background.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+    let [cr, cg, cb, ca] = desc.background.unwrap_or([0.0, 0.0, 0.0, 0.0]);
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("post_scene"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -394,7 +667,13 @@ pub(crate) fn prepare_composite(
         multiview_mask: None,
     });
     pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
-    draw_batch_with_id(batch_id, &mut pass, resources);
+    if let Some(sc) = desc.scissor {
+        pass.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
+    }
+    draw_batch_with_id(desc.batch_id, &mut pass, resources);
+    if desc.scissor.is_some() {
+        pass.set_scissor_rect(0, 0, w, h);
+    }
 }
 
 /// Draw the graded fullscreen triangle into the main pass. The renderer
@@ -457,18 +736,30 @@ mod tests {
             batch.set_camera(screen_camera([64.0, 64.0]));
             batch.extend_uploads(self.uploads.clone());
             batch.prepare(device, queue, encoder, screen, resources);
-            if use_composite(self.amount) {
+            let input = self.input();
+            if needs_post(&input) {
                 prepare_composite(
                     device,
                     queue,
                     encoder,
                     screen,
                     resources,
-                    batch.id(),
                     64,
                     64,
-                    self.amount,
-                    None,
+                    &CompositeDesc {
+                        batch_id: batch.id(),
+                        amount: self.amount,
+                        background: None,
+                        ambient: [0.0; 3],
+                        lights: &[],
+                        shadow_maps: &[],
+                        fit: (1.0, 0.0, 0.0),
+                        roll: 0.0,
+                        world: [64.0, 64.0],
+                        center: [32.0, 32.0],
+                        density: 1.0,
+                        scissor: None,
+                    },
                 );
             }
             Vec::new()
@@ -480,7 +771,7 @@ mod tests {
             rpass: &mut CallbackRenderPass<'_, '_>,
             resources: &CallbackResources,
         ) {
-            if use_composite(self.amount) {
+            if needs_post(&self.input()) {
                 paint_composite("sprite_batch.default", rpass, resources);
             } else {
                 draw_batch_with_id_callback("sprite_batch.default", rpass, resources);
@@ -489,6 +780,13 @@ mod tests {
     }
 
     impl Probe {
+        fn input(&self) -> FrameInput {
+            FrameInput {
+                chroma: self.amount,
+                ..Default::default()
+            }
+        }
+
         /// Left half red, right half blue, full-bleed 64x64.
         fn debug_sprites() -> [SpriteInstance; 2] {
             let quad = |cx: f32, color: [f32; 4]| SpriteInstance {
@@ -577,5 +875,71 @@ mod tests {
         // At the boundary the red channel reaches across into blue:
         // must differ (shift = 0.7 * 0.02 * 64px ~= 0.9px).
         assert_ne!(px(&plain, 31, 32)[0], px(&chroma, 31, 32)[0]);
+    }
+
+    #[test]
+    fn composite_gate_is_chroma_or_lights() {
+        assert!(!needs_post(&FrameInput::default()));
+        // Ambient alone stays on the zero-cost direct path.
+        assert!(!needs_post(&FrameInput {
+            ambient: Some([0.2, 0.2, 0.3]),
+            ..Default::default()
+        }));
+        assert!(needs_post(&FrameInput {
+            chroma: 0.1,
+            ..Default::default()
+        }));
+        assert!(needs_post(&FrameInput {
+            lights: vec![Light2d::default()],
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn composite_uniform_fits_binding_budget() {
+        use crate::light2d::resolve_shadow_bins;
+        assert_eq!(HEADER_BYTES, 80);
+        assert_eq!(LIGHT_BYTES, 96);
+        assert_eq!(UNIFORM_BYTES, 33232);
+        const { assert!(UNIFORM_BYTES <= UNIFORM_BUDGET) };
+        assert!(COMPOSITE_WGSL.contains("array<vec4<f32>, 2048>"));
+        // Worst case: four shadowed lights, each wanting the whole budget.
+        let lights = [Light2d {
+            shadows: true,
+            ..Default::default()
+        }; MAX_LIGHTS];
+        let bins = resolve_shadow_bins(&lights);
+        assert_eq!(bins, [1024; MAX_LIGHTS]);
+        let maps: Vec<Vec<[f32; 2]>> = bins.iter().map(|b| vec![[0.5, 1.0]; *b as usize]).collect();
+        let desc = CompositeDesc {
+            batch_id: "sprite_batch.default",
+            amount: 0.0,
+            background: None,
+            ambient: [0.1, 0.1, 0.1],
+            lights: &lights,
+            shadow_maps: &maps,
+            fit: (1.0, 0.0, 0.0),
+            roll: 0.0,
+            world: [64.0, 64.0],
+            center: [32.0, 32.0],
+            density: 1.0,
+            scissor: None,
+        };
+        let mut bytes = Vec::new();
+        pack_composite_uniform(&desc, &mut bytes);
+        assert_eq!(bytes.len(), UNIFORM_BYTES, "packed worst case");
+        assert!(bytes.len() <= UNIFORM_BUDGET);
+        // Absurd requests shrink to the budget instead of overflowing it,
+        // and unshadowed lights cost no bins.
+        let hungry = [Light2d {
+            shadows: true,
+            shadow_bins: u32::MAX,
+            ..Default::default()
+        }; MAX_LIGHTS];
+        assert_eq!(resolve_shadow_bins(&hungry), [1024; MAX_LIGHTS]);
+        assert_eq!(
+            resolve_shadow_bins(&[Light2d::default(); MAX_LIGHTS]),
+            [0; MAX_LIGHTS]
+        );
     }
 }

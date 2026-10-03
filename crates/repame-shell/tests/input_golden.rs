@@ -20,9 +20,12 @@ use repame_input::{
     MotionSource, MotionTracker, RemapSession, SensorKind, decode_keymap_entry,
     encode_keymap_entry,
 };
-use repame_shell::{MotionPoller, RUMBLE_REFRESH, RUMBLE_UPLOAD_MS, RumbleBridge, Staging};
+use repame_shell::{
+    MotionPoller, PadBridge, RUMBLE_REFRESH, RUMBLE_UPLOAD_MS, RumbleBridge, Staging,
+};
 use repose_core::input::{
-    GamepadEvent, GamepadId, Key, Modifiers, PhysicalKey, PointerButton, SensorSample,
+    GamepadButton, GamepadEvent, GamepadId, Key, Modifiers, PhysicalKey, PointerButton,
+    SensorSample,
 };
 use repose_core::runtime::Scheduler;
 use repose_core::shortcuts::KeyChord;
@@ -372,6 +375,49 @@ fn reconcile_never_synthesizes_edges_for_levels_only_repair() {
 }
 
 // --------------------------------------------------------------------- motion
+
+#[test]
+fn pad_snapshot_reports_start_select_and_stick_clicks_with_held_levels() {
+    let mut bridge = PadBridge::default();
+    for button in [
+        GamepadButton::Start,
+        GamepadButton::Select,
+        GamepadButton::LeftStick,
+        GamepadButton::RightStick,
+        GamepadButton::South,
+    ] {
+        bridge.button(button, true);
+    }
+
+    let pressed = bridge.snapshot();
+    assert!(
+        pressed.start_held && pressed.start_pressed,
+        "start must reach the pad snapshot"
+    );
+    assert!(
+        pressed.select_held && pressed.select_pressed,
+        "select must reach the pad snapshot"
+    );
+    assert!(
+        pressed.left_stick_click_held && pressed.left_stick_click_pressed,
+        "left stick click must reach the pad snapshot"
+    );
+    assert!(
+        pressed.right_stick_click_held && pressed.right_stick_click_pressed,
+        "right stick click must reach the pad snapshot"
+    );
+    assert!(
+        pressed.south_held && pressed.south_pressed,
+        "a held face button reports both levels"
+    );
+
+    bridge.clear_edges();
+    let held = bridge.snapshot();
+    assert!(
+        held.start_held && !held.start_pressed && held.south_held && !held.south_pressed,
+        "clearing edges must keep the held level, got {held:?}"
+    );
+}
 
 #[test]
 fn sensor_devices_route_to_pads_by_name_and_convert_units() {

@@ -265,9 +265,9 @@ const _: () = assert!(size_of::<BatchInstance>() == 80);
 /// compositor thread via [`repose_render_wgpu::Callback`].
 ///
 /// Each batch id owns its pipelines/instances in `CallbackResources`
-/// (like `FullscreenPass`'s id map). Rebuilding on format/sample/desc
-/// change drops atlas contents (logged); the game must re-upload
-/// afterwards.
+/// (like `FullscreenPass`'s id map). Re-keying the atlas (a new
+/// [`BatchDesc`] or `uploads_gen`) drops its contents; the game re-fills
+/// it with the uploads that came with the new descriptor.
 pub struct SpriteBatch {
     id: String,
     desc: BatchDesc,
@@ -392,6 +392,11 @@ impl SpriteBatch {
     }
 
     /// Bridge a snapshot sprite into the batch.
+    ///
+    /// The atlas and the render target are both `Rgba8UnormSrgb`, so the
+    /// sampled texel and the written pixel are already in linear space and
+    /// the tint has to be linearized here; [`Self::push`] takes one
+    /// directly.
     pub fn push_sprite(&mut self, s: &SpriteInstance) {
         self.push_blended(
             [s.center.x, s.center.y],
@@ -402,7 +407,7 @@ impl SpriteBatch {
             s.flip_y,
             [s.uv_min.x, s.uv_min.y],
             [s.uv_max.x, s.uv_max.y],
-            s.color,
+            super::rgba8(s.color).to_linear(),
             s.page,
             s.z,
             s.blend,
@@ -954,6 +959,13 @@ impl SpriteBatch {
             .map(|generation| *generation != Some(self.desc.uploads_gen))
             .unwrap_or(true);
         if fresh_atlas && uploads.is_empty() {
+            // Stays fresh, so the uploads that arrive with the new
+            // descriptor still land instead of being skipped as stale.
+            log::warn!(
+                "sprite_batch[{}]: atlas generation {} is fresh but no uploads to fill it",
+                self.id,
+                self.desc.uploads_gen
+            );
             self.finish_prepare(alpha, multiply_end, total, resources);
             return Vec::new();
         }
@@ -1253,7 +1265,12 @@ mod tests {
         let inst = batch.instances[0];
         assert_eq!(inst.uv_min, [0.25, 0.5]);
         assert_eq!(inst.uv_max, [0.5, 0.75]);
-        assert_eq!(inst.tint, [1.0, 0.5, 0.25, 0.8]);
+        // The snapshot tint is display-referred; the batch linearizes it.
+        assert_eq!(
+            inst.tint,
+            crate::rgba8([1.0, 0.5, 0.25, 0.8]).to_linear(),
+            "tint reaches the batch in linear space"
+        );
         assert_eq!(inst.page, 3.0);
         // Default anchor centers: top-left at (8, 17).
         let p = apply((inst.row0, inst.row1), [-0.5, -0.5]);

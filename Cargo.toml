@@ -66,23 +66,23 @@ repame-content = { path = "crates/repame-content", version = "0.3.5" }
 
 
 [patch.crates-io]
-repose-core = { path = "../repose/crates/repose-core" }
-repose-ui = { path = "../repose/crates/repose-ui" }
-repose-canvas = { path = "../repose/crates/repose-canvas" }
-repose-render-wgpu = { path = "../repose/crates/repose-render-wgpu" }
-repose-text = { path = "../repose/crates/repose-text" }
-repose-app = { path = "../repose/crates/repose-app" }
-repose-platform = { path = "../repose/crates/repose-platform" }
-repose-tree = { path = "../repose/crates/repose-tree" }
-repose-devtools = { path = "../repose/crates/repose-devtools" }
-repose-navigation = { path = "../repose/crates/repose-navigation" }
-repose-material = { path = "../repose/crates/repose-material" }
-repose-docking = { path = "../repose/crates/repose-docking" }
+# repose-core = { path = "../repose/crates/repose-core" }
+# repose-ui = { path = "../repose/crates/repose-ui" }
+# repose-canvas = { path = "../repose/crates/repose-canvas" }
+# repose-render-wgpu = { path = "../repose/crates/repose-render-wgpu" }
+# repose-text = { path = "../repose/crates/repose-text" }
+# repose-app = { path = "../repose/crates/repose-app" }
+# repose-platform = { path = "../repose/crates/repose-platform" }
+# repose-tree = { path = "../repose/crates/repose-tree" }
+# repose-devtools = { path = "../repose/crates/repose-devtools" }
+# repose-navigation = { path = "../repose/crates/repose-navigation" }
+# repose-material = { path = "../repose/crates/repose-material" }
+# repose-docking = { path = "../repose/crates/repose-docking" }
 # Same temporary override as the repose workspace has: a dependency's own
 # [patch] is ignored, so repame must repeat it for the local rlobkit. Drop
 # both once rlobkit-app-events 0.5.11 is on crates.io.
-rlobkit-app-events = { path = "../rlobkit/rlobkit-app-events" }
-repose-macros = { path = "../repose/crates/repose-macros" }
+# rlobkit-app-events = { path = "../rlobkit/rlobkit-app-events" }
+# repose-macros = { path = "../repose/crates/repose-macros" }
 # renamite-player = { path = "../renamite/crates/renamite-player" }
 # renamite-player-ui = { path = "../renamite/crates/renamite-player-ui" }
 # renamite-render-bridge = { path = "../renamite/crates/renamite-render-bridge" }

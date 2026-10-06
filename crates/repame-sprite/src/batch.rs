@@ -437,6 +437,9 @@ struct AtlasResources {
     texture: wgpu::Texture,
     tex_bind: wgpu::BindGroup,
     applied_gen: Arc<Mutex<Option<u64>>>,
+    /// Generation already reported as unfilled, so the report lands once per
+    /// generation rather than once per frame.
+    starved_gen: Arc<Mutex<Option<u64>>>,
 }
 
 struct BatchEntry {
@@ -572,6 +575,7 @@ fn create_atlas(device: &wgpu::Device, key: AtlasKey, layout: &AtlasLayout) -> A
         texture,
         tex_bind,
         applied_gen: Arc::new(Mutex::new(None)),
+        starved_gen: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -953,25 +957,21 @@ impl SpriteBatch {
             queue.write_buffer(&res.instances, 0, bytemuck::cast_slice(&sorted));
         }
         let atlas = res.atlas.clone();
-        let fresh_atlas = atlas
+        // The atlas trails `desc.uploads_gen` until the generation's uploads
+        // have been written, and it cannot be drawn from before then.
+        let atlas_behind = atlas
             .applied_gen
             .lock()
             .map(|generation| *generation != Some(self.desc.uploads_gen))
             .unwrap_or(true);
-        if fresh_atlas && uploads.is_empty() {
-            // Stays fresh, so the uploads that arrive with the new
-            // descriptor still land instead of being skipped as stale.
-            log::warn!(
-                "sprite_batch[{}]: atlas generation {} is fresh but no uploads to fill it",
-                self.id,
-                self.desc.uploads_gen
-            );
+        if atlas_behind && uploads.is_empty() {
+            self.report_atlas_starved(&atlas);
             self.finish_prepare(alpha, multiply_end, total, resources);
             return Vec::new();
         }
         let mut wrote_any = false;
         for up in uploads {
-            if !fresh_atlas {
+            if !atlas_behind {
                 continue;
             }
             let expected = up.w as usize * up.h as usize * 4;
@@ -1016,7 +1016,7 @@ impl SpriteBatch {
             );
             wrote_any = true;
         }
-        if fresh_atlas
+        if atlas_behind
             && wrote_any
             && let Ok(mut generation) = atlas.applied_gen.lock()
         {
@@ -1024,6 +1024,26 @@ impl SpriteBatch {
         }
         self.finish_prepare(alpha, multiply_end, total, resources);
         Vec::new()
+    }
+
+    /// The atlas trails its descriptor and nothing is queued to fill it, so the
+    /// batch draws nothing at all.
+    fn report_atlas_starved(&self, atlas: &AtlasResources) {
+        let Ok(mut reported) = atlas.starved_gen.lock() else {
+            return;
+        };
+        if *reported == Some(self.desc.uploads_gen) {
+            return;
+        }
+        *reported = Some(self.desc.uploads_gen);
+        log::error!(
+            "sprite_batch[{}]: atlas generation {} is unfilled and no uploads arrived, \
+             drawing nothing; pass that generation's uploads on every frame until \
+             the batch applies them, because the first frame carrying them may be \
+             built before the view is prepared and then discarded",
+            self.id,
+            self.desc.uploads_gen
+        );
     }
 }
 
@@ -1076,14 +1096,18 @@ fn draw_batch_with_pass<P: BatchRenderPass>(
     resources: &CallbackResources,
 ) {
     let Some(all) = resources.get::<BatchResources>() else {
+        log::warn!("DIAG draw: no BatchResources id={id}");
         return;
     };
     let Some(res) = all.batches.get(id) else {
+        log::warn!("DIAG draw: no batch id={id} have={:?}", all.batches.keys().collect::<Vec<_>>());
         return;
     };
     if res.last_total == 0 {
+        log::warn!("DIAG draw: zero instances id={id}");
         return;
     }
+    log::warn!("DIAG draw: id={id} total={} alpha={} mul_end={} applied_gen={:?}", res.last_total, res.last_alpha, res.last_multiply_end, res.atlas.applied_gen.lock().map(|g| *g).ok());
     rpass.set_bind_group(0, &res.cam_bind, &[]);
     rpass.set_bind_group(1, &res.atlas.tex_bind, &[]);
     rpass.set_vertex_buffer(0, res.corners.slice(..));

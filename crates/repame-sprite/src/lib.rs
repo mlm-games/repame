@@ -1255,6 +1255,7 @@ impl WgpuCallback for GpuViewport {
         };
         let mut batch = SpriteBatch::with_id(self.batch_id.clone(), self.desc);
         batch.set_camera(self.input.cam.fit_matrix(dp, self.input.world_size));
+        log::warn!("DIAG prep: sprites={} uploads={} world={:?} dp={:?} desc={:?}", self.input.sprites.len(), self.uploads.len(), self.input.world_size, dp, self.desc);
         for s in &self.input.sprites {
             batch.push_sprite(s);
         }
@@ -1433,6 +1434,14 @@ impl WgpuCallback for GpuViewport {
 /// Stack GPU sprites under canvas texts/tint from one [`FrameInput`].
 /// Mounts `Viewport2dGpu` plus a transparent canvas pass for `texts` /
 /// `overlay_color`, so GPU games keep damage numbers and tints.
+///
+/// `uploads` must stay reachable on every frame, not just the one that first
+/// carries `desc.uploads_gen`. The atlas is only written while this view is
+/// prepared, and the frame that introduces a generation can be built before
+/// the view reaches the renderer and then dropped, which would leave the
+/// generation unfilled and every sprite in the batch undrawn. Handing over the
+/// same [`Arc`] until the batch takes it costs nothing; a batch reports an
+/// unfilled generation once and draws nothing until the uploads arrive.
 #[allow(non_snake_case)]
 pub fn Viewport2dGpuWithHud(
     input: FrameInput,

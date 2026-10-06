@@ -4,22 +4,33 @@
 //! load time) and [`resample_linear`] (legacy realtime matcher).
 
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Result, anyhow};
 use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::default::get_codecs;
+use symphonia::default::register_enabled_codecs;
 
 use crate::command::SharedFrames;
 use crate::state::AudioState;
 
 /// Decoded-output cap in frames. Music tracks pass; accidents do not.
 const MAX_FRAMES: usize = 32_000_000;
+
+fn codecs() -> &'static CodecRegistry {
+    static REGISTRY: OnceLock<CodecRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut registry = CodecRegistry::new();
+        register_enabled_codecs(&mut registry);
+        registry.register_audio_decoder::<symphonia_adapter_oporus::OpusDecoder>();
+        registry
+    })
+}
 
 /// Decode a whole sound file into interleaved f32 frames.
 /// Stereo stays stereo; mono stays mono; 3+ channels keep L/R.
@@ -51,7 +62,7 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<SharedFrames> {
     let src_channels = params.channels.clone().map(|c| c.count()).unwrap_or(1);
     let channels = src_channels.min(2) as u8;
 
-    let mut decoder = get_codecs().make_audio_decoder(params, &AudioDecoderOptions::default())?;
+    let mut decoder = codecs().make_audio_decoder(params, &AudioDecoderOptions::default())?;
     let mut interleaved: Vec<f32> = Vec::new();
     loop {
         match format.next_packet() {

@@ -32,6 +32,7 @@ glam = "0.33"
 bytemuck = { version = "1", features = ["derive"] }
 cpal = "0.18"
 symphonia = { version = "0.6", features = ["all"] }
+symphonia-adapter-oporus = "0.1"
 web-workers = "0.3"
 anyhow = "1"
 log = "0.4"

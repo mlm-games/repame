@@ -7,13 +7,31 @@ repository.workspace = true
 rust-version.workspace = true
 description = "game-idiomatic sound (banks, music, rig events) via cpal+symphonia"
 
+[features]
+default = [
+  "symphonia-wav",
+  "symphonia-flac",
+  "symphonia-mp3",
+  "symphonia-ogg-vorbis",
+]
+symphonia-wav = ["symphonia/wav", "symphonia/pcm"]
+symphonia-flac = ["symphonia/flac"]
+symphonia-mp3 = ["symphonia/mp3"]
+symphonia-ogg-vorbis = ["symphonia/ogg", "symphonia/vorbis"]
+symphonia-ogg-opus = ["symphonia/ogg", "dep:symphonia-adapter-oporus"]
+symphonia-m4a = ["symphonia/isomp4", "symphonia/aac"]
+symphonia-alac = ["symphonia/isomp4", "symphonia/alac"]
+symphonia-adpcm = ["symphonia/adpcm", "symphonia/pcm"]
+symphonia-mkv = ["symphonia/mkv"]
+symphonia-caf = ["symphonia/caf"]
+
 [dependencies]
 anyhow.workspace = true
 log.workspace = true
 web-time.workspace = true
 cpal.workspace = true
 symphonia.workspace = true
-symphonia-adapter-oporus.workspace = true
+symphonia-adapter-oporus = { workspace = true, optional = true }
 web-workers.workspace = true
 
 [dev-dependencies]

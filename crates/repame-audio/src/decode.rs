@@ -27,6 +27,7 @@ fn codecs() -> &'static CodecRegistry {
     REGISTRY.get_or_init(|| {
         let mut registry = CodecRegistry::new();
         register_enabled_codecs(&mut registry);
+        #[cfg(feature = "symphonia-ogg-opus")]
         registry.register_audio_decoder::<symphonia_adapter_oporus::OpusDecoder>();
         registry
     })

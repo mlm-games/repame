@@ -7,6 +7,24 @@ repository.workspace = true
 rust-version.workspace = true
 description = "headless RON project, scene, resource, asset import, and ECS content foundation"
 
+[features]
+default = [
+  "symphonia-wav",
+  "symphonia-flac",
+  "symphonia-mp3",
+  "symphonia-ogg",
+  "symphonia-isomp4",
+  "symphonia-mkv",
+  "symphonia-caf",
+]
+symphonia-wav = ["symphonia/wav"]
+symphonia-flac = ["symphonia/flac"]
+symphonia-mp3 = ["symphonia/mp3"]
+symphonia-ogg = ["symphonia/ogg"]
+symphonia-isomp4 = ["symphonia/isomp4"]
+symphonia-mkv = ["symphonia/mkv"]
+symphonia-caf = ["symphonia/caf"]
+
 [dependencies]
 bevy_ecs.workspace = true
 game-utils.workspace = true

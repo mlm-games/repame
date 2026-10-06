@@ -1420,7 +1420,7 @@ impl WgpuCallback for GpuViewport {
             );
             match fitted_box_scissor(&info, self.input.world_size, fit, roll) {
                 Some(sc) => {
-                        rpass.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
+                    rpass.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
                     batch::draw_batch_with_id_callback(self.batch_id.as_str(), rpass, resources);
                     rpass.set_scissor_rect(restore.0, restore.1, restore.2, restore.3);
                 }

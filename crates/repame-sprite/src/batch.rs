@@ -917,7 +917,9 @@ impl SpriteBatch {
         (v, alpha, multiply_end)
     }
 
-    pub(crate) fn prepare_with_uploads(
+    /// Game-owned passes can drive this batch into their OWN
+    /// render target instead.
+    pub fn prepare_with_uploads(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,

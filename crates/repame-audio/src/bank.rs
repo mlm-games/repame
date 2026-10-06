@@ -98,6 +98,20 @@ impl Cue {
     }
 }
 
+/// Outcome of [`SoundBank::request`].
+///
+/// Play it now, wait for a later frame, or stop asking - the three cases
+/// a game would otherwise infer from its own shadow bookkeeping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CueRequest {
+    /// Decoded and playable.
+    Ready,
+    /// Queued on the worker; audible once a later `update` lands it.
+    Queued,
+    /// Will never decode; the string is the reason.
+    Failed(String),
+}
+
 /// 2D spatial shaping: distance falloff plus x-dominant pan.
 /// Returns `(gain_scale, pan)`; dead center is `(1.0, 0.0)`.
 pub fn spatial_2d(dx: f32, dy: f32, scale: f32) -> (f32, f32) {
@@ -122,7 +136,10 @@ pub struct SoundBank {
     loader: Option<Loader>,
     /// Cue names queued on the loader but not decoded yet.
     pending: HashSet<String>,
-    /// Cues whose async decode failed, drained by the game.
+    /// Cues the worker could not decode, with the reason. Permanent, so
+    /// `request` stops re-queueing them.
+    undecodable: HashMap<String, String>,
+    /// Recent failures, drained for logging by the game.
     failed: Vec<(String, String)>,
 }
 
@@ -138,6 +155,7 @@ impl SoundBank {
             spatial_scale: 1.0,
             loader: None,
             pending: HashSet::new(),
+            undecodable: HashMap::new(),
             failed: Vec::new(),
         }
     }
@@ -189,39 +207,58 @@ impl SoundBank {
         Ok(())
     }
 
-    /// Register a cue by decoding on the loader worker.
+
+    /// Ask for a cue, decoding on the loader worker when one is running.
     ///
-    /// Returns as soon as the job is queued; the cue becomes playable
-    /// once [`SoundBank::update`] drains its [`DecodeDone`]. Falls back
-    /// to the inline [`SoundBank::load`] where threads are unavailable
-    /// (noop engines, thread-less wasm), so callers never need to know
-    /// which path ran.
-    pub fn load_async(&mut self, name: &str, def: CueDef, files: &[&[u8]]) -> Result<()> {
+    /// The caller has one job: call this, then act on the outcome. The
+    /// bank tracks queued names and promotes finished decodes itself, so
+    /// no game-side set or drain loop is needed.
+    pub fn request(&mut self, name: &str, def: CueDef, files: &[&[u8]]) -> CueRequest {
         if files.is_empty() {
-            anyhow::bail!("cue `{name}` needs at least one file");
+            return CueRequest::Failed(format!("cue `{name}` needs at least one file"));
         }
-        if self.cues.contains_key(name) || self.pending.contains(name) {
-            return Ok(());
+        if self.cues.contains_key(name) {
+            return CueRequest::Ready;
+        }
+        if let Some(error) = self.undecodable.get(name) {
+            return CueRequest::Failed(error.clone());
+        }
+        if self.pending.contains(name) {
+            return CueRequest::Queued;
         }
         let Some(loader) = &self.loader else {
-            return self.load(name, def, files);
+            return match self.load(name, def, files) {
+                Ok(()) => CueRequest::Ready,
+                Err(e) => {
+                    let error = e.to_string();
+                    self.undecodable.insert(name.to_owned(), error.clone());
+                    CueRequest::Failed(error)
+                }
+            };
         };
         let owned: Vec<Vec<u8>> = files.iter().map(|f| f.to_vec()).collect();
-        loader
-            .jobs
-            .send_block(DecodeJob::Cue {
-                name: name.to_owned(),
-                def,
-                files: owned,
-            })
-            .map_err(|_| anyhow::anyhow!("audio loader stopped"))?;
+        if let Err(e) = loader.jobs.send_block(DecodeJob::Cue {
+            name: name.to_owned(),
+            def,
+            files: owned,
+        }) {
+            log::warn!("cue `{name}` not queued: {e}");
+            return CueRequest::Failed("audio loader stopped".to_owned());
+        }
         self.pending.insert(name.to_owned());
-        Ok(())
+        CueRequest::Queued
     }
 
-    /// Pull finished cue decodes off the loader worker. Pair with
-    /// [`SoundBank::take_failed`] to learn about undecodable cues.
-    pub fn drain_loader(&mut self) {
+    /// Cues that failed to decode since the last call, as
+    /// `(name, reason)`. Diagnostics only - [`SoundBank::request`] already
+    /// reports `Failed` for the same cue.
+    pub fn take_failed(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.failed)
+    }
+
+    /// Pull finished cue decodes off the loader worker. Called by
+    /// [`Audio::update`](crate::Audio::update).
+    pub(crate) fn drain_loader(&mut self) {
         let Some(loader) = &self.loader else {
             return;
         };
@@ -249,27 +286,13 @@ impl SoundBank {
                 }
                 DecodeDone::CueFailed { name, error } => {
                     self.pending.remove(&name);
+                    self.undecodable.insert(name.clone(), error.clone());
                     self.failed.push((name, error));
                 }
                 // Track/stem outcomes belong to `Music`'s loader.
                 _ => {}
             }
         }
-    }
-
-    /// Cues that failed to decode since the last call.
-    pub fn take_failed(&mut self) -> Vec<(String, String)> {
-        std::mem::take(&mut self.failed)
-    }
-
-    /// True while a cue is queued or decoded and playable.
-    pub fn is_ready(&self, name: &str) -> bool {
-        self.cues.contains_key(name)
-    }
-
-    /// True while a cue decode is still in flight.
-    pub fn is_pending(&self, name: &str) -> bool {
-        self.pending.contains(name)
     }
 
     /// Drop finished ids from live-voice accounting.

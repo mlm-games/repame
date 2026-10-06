@@ -5,8 +5,8 @@
 use anyhow::Result;
 
 use crate::{
-    AudioChannel, AudioChannels, AudioSource, CueDef, Engine, GameAudioLink, Music, RigAudio,
-    SoundBank, StemDef, audio_link,
+    AudioChannel, AudioChannels, AudioSource, CueDef, CueRequest, Engine, GameAudioLink, Music,
+    RigAudio, SoundBank, StemDef, audio_link,
 };
 
 /// Game-thread sound service (single owner; share with `&mut` or a cell).
@@ -103,13 +103,15 @@ impl Audio {
         self.bank.load(name, def, files)
     }
 
-    /// Register a cue, decoding on the loader worker instead of the game
-    /// thread (see [`SoundBank::load_async`]).
-    pub fn load_cue_async(&mut self, name: &str, def: CueDef, files: &[&[u8]]) -> Result<()> {
-        self.bank.load_async(name, def, files)
+    /// Ask for a cue, decoding on the loader worker instead of the game
+    /// thread (see [`SoundBank::request`]). `Ready` means play it now,
+    /// `Queued` means audible on a later frame, `Failed` means stop asking.
+    pub fn request_cue(&mut self, name: &str, def: CueDef, files: &[&[u8]]) -> CueRequest {
+        self.bank.request(name, def, files)
     }
 
-    /// Cues that failed to decode since the last call.
+    /// Cues that failed to decode since the last call, for logging.
+    /// [`Audio::request_cue`] already reports the same failure.
     pub fn take_cue_failures(&mut self) -> Vec<(String, String)> {
         self.bank.take_failed()
     }

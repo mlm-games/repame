@@ -1255,7 +1255,6 @@ impl WgpuCallback for GpuViewport {
         };
         let mut batch = SpriteBatch::with_id(self.batch_id.clone(), self.desc);
         batch.set_camera(self.input.cam.fit_matrix(dp, self.input.world_size));
-        log::warn!("DIAG prep: sprites={} uploads={} world={:?} dp={:?} desc={:?}", self.input.sprites.len(), self.uploads.len(), self.input.world_size, dp, self.desc);
         for s in &self.input.sprites {
             batch.push_sprite(s);
         }
@@ -1416,7 +1415,7 @@ impl WgpuCallback for GpuViewport {
             );
             match fitted_box_scissor(&info, self.input.world_size, fit, roll) {
                 Some(sc) => {
-                    rpass.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
+                        rpass.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
                     batch::draw_batch_with_id_callback(self.batch_id.as_str(), rpass, resources);
                     rpass.set_scissor_rect(restore.0, restore.1, restore.2, restore.3);
                 }

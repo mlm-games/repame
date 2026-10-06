@@ -1096,18 +1096,14 @@ fn draw_batch_with_pass<P: BatchRenderPass>(
     resources: &CallbackResources,
 ) {
     let Some(all) = resources.get::<BatchResources>() else {
-        log::warn!("DIAG draw: no BatchResources id={id}");
         return;
     };
     let Some(res) = all.batches.get(id) else {
-        log::warn!("DIAG draw: no batch id={id} have={:?}", all.batches.keys().collect::<Vec<_>>());
         return;
     };
     if res.last_total == 0 {
-        log::warn!("DIAG draw: zero instances id={id}");
         return;
     }
-    log::warn!("DIAG draw: id={id} total={} alpha={} mul_end={} applied_gen={:?}", res.last_total, res.last_alpha, res.last_multiply_end, res.atlas.applied_gen.lock().map(|g| *g).ok());
     rpass.set_bind_group(0, &res.cam_bind, &[]);
     rpass.set_bind_group(1, &res.atlas.tex_bind, &[]);
     rpass.set_vertex_buffer(0, res.corners.slice(..));

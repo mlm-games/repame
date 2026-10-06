@@ -9,7 +9,6 @@ description = "Repose platform runner wrappers, sim stepping, viewport mount, an
 
 [dependencies]
 glam.workspace = true
-repame-audio.workspace = true
 repame-input.workspace = true
 repame-sim.workspace = true
 repame-sprite.workspace = true

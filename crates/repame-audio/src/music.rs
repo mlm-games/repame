@@ -11,7 +11,7 @@ use web_workers::sync::mpsc::Sender;
 
 use crate::command::{PlayCmd, RealtimeCommand, SharedFrames};
 use crate::loader::{DecodeDone, DecodeJob, Loader, spawn as spawn_loader};
-use crate::{AudioChannel, AudioState, decode_bytes, retarget_to, to_device_rate};
+use crate::{AudioChannel, AudioState, decode_to_device, retarget_to};
 
 /// One intensity stem: audible across `[lo, hi]` with a linear ramp.
 #[derive(Debug, Clone)]
@@ -52,6 +52,16 @@ enum DuckEnv {
         left_secs: f32,
         total_secs: f32,
     },
+}
+
+/// Intensity weight of a stem's `(lo, hi)` window: a full window ramps in
+/// between the bounds, and an empty one (`hi <= lo`) is a plain on/off switch.
+fn stem_window(lo: f32, hi: f32, intensity: f32) -> f32 {
+    if hi <= lo {
+        if intensity >= lo { 1.0 } else { 0.0 }
+    } else {
+        ((intensity - lo) / (hi - lo)).clamp(0.0, 1.0)
+    }
 }
 
 /// Looping-track director on the game thread.
@@ -127,7 +137,7 @@ impl Music {
             self.pending.insert(name.to_owned());
             return Ok(());
         }
-        let main = Arc::new(to_device_rate(decode_bytes(main)?, self.state.as_deref())?);
+        let main = decode_to_device(main, self.state.as_deref())?;
         self.tracks.insert(
             name.to_string(),
             Track {
@@ -157,7 +167,7 @@ impl Music {
                 .map_err(|_| anyhow::anyhow!("audio loader stopped"))?;
             return Ok(());
         }
-        let sound = Arc::new(to_device_rate(decode_bytes(bytes)?, self.state.as_deref())?);
+        let sound = decode_to_device(bytes, self.state.as_deref())?;
         let track = self
             .tracks
             .get_mut(name)
@@ -389,11 +399,7 @@ impl Music {
             None => 1.0,
             Some(i) => {
                 let s = &track.stems[i];
-                if s.hi <= s.lo {
-                    if self.intensity >= s.lo { 1.0 } else { 0.0 }
-                } else {
-                    ((self.intensity - s.lo) / (s.hi - s.lo)).clamp(0.0, 1.0)
-                }
+                stem_window(s.lo, s.hi, self.intensity)
             }
         };
         let stem_gain = match stem {
@@ -423,11 +429,7 @@ impl Music {
                 None => 1.0,
                 Some(i) => {
                     let (lo, hi, _) = stems[*i];
-                    if hi <= lo {
-                        if self.intensity >= lo { 1.0 } else { 0.0 }
-                    } else {
-                        ((self.intensity - lo) / (hi - lo)).clamp(0.0, 1.0)
-                    }
+                    stem_window(lo, hi, self.intensity)
                 }
             };
             let stem_gain = match stem {

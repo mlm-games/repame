@@ -24,7 +24,7 @@ pub use command::{
 };
 pub use cue::Cue;
 pub use decode::{decode_bytes, resample_linear};
-pub(crate) use decode::{retarget_to, to_device_rate};
+pub(crate) use decode::{decode_to_device, retarget_to};
 pub use engine::Engine;
 pub use music::{Music, StemDef};
 pub use rig::RigAudio;

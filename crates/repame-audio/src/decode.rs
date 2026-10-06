@@ -229,13 +229,21 @@ fn resample(sound: &SharedFrames, target_hz: u32) -> Result<SharedFrames> {
 }
 
 /// Convert `sound` to the device rate in `state` when one is known.
-pub fn to_device_rate(sound: SharedFrames, state: Option<&AudioState>) -> Result<SharedFrames> {
+fn to_device_rate(sound: SharedFrames, state: Option<&AudioState>) -> Result<SharedFrames> {
     let Some(state) = state else { return Ok(sound) };
     let target = state.sample_rate();
     if target == 0 || target == sound.sample_rate {
         return Ok(sound);
     }
     resample(&sound, target)
+}
+
+/// Decode encoded bytes straight to the device rate, ready to hand to a voice.
+pub(crate) fn decode_to_device(
+    bytes: &[u8],
+    state: Option<&AudioState>,
+) -> Result<Arc<SharedFrames>> {
+    Ok(Arc::new(to_device_rate(decode_bytes(bytes)?, state)?))
 }
 
 /// Swap `sound` to `target` in place; failures keep the original.

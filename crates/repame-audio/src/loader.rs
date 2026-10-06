@@ -9,7 +9,7 @@ use web_workers::sync::mpsc::{Receiver, Sender, channel};
 
 use crate::command::SharedFrames;
 use crate::music::StemDef;
-use crate::{AudioState, decode_bytes, to_device_rate};
+use crate::{AudioState, decode_to_device};
 
 /// One queued decode job.
 pub(crate) enum DecodeJob {
@@ -55,32 +55,28 @@ pub(crate) struct Loader {
 
 fn decode_job(job: DecodeJob, state: &AudioState) -> DecodeDone {
     match job {
-        DecodeJob::Track { name, gain, bytes } => {
-            match decode_bytes(&bytes).and_then(|frames| to_device_rate(frames, Some(state))) {
-                Ok(frames) => DecodeDone::Track {
-                    name,
-                    gain,
-                    main: Arc::new(frames),
-                },
-                Err(e) => DecodeDone::TrackFailed {
-                    name,
-                    error: e.to_string(),
-                },
-            }
-        }
-        DecodeJob::Stem { track, bytes, def } => {
-            match decode_bytes(&bytes).and_then(|frames| to_device_rate(frames, Some(state))) {
-                Ok(frames) => DecodeDone::Stem {
-                    track,
-                    sound: Arc::new(frames),
-                    def,
-                },
-                Err(e) => DecodeDone::StemFailed {
-                    track,
-                    error: e.to_string(),
-                },
-            }
-        }
+        DecodeJob::Track { name, gain, bytes } => match decode_to_device(&bytes, Some(state)) {
+            Ok(frames) => DecodeDone::Track {
+                name,
+                gain,
+                main: frames,
+            },
+            Err(e) => DecodeDone::TrackFailed {
+                name,
+                error: e.to_string(),
+            },
+        },
+        DecodeJob::Stem { track, bytes, def } => match decode_to_device(&bytes, Some(state)) {
+            Ok(frames) => DecodeDone::Stem {
+                track,
+                sound: frames,
+                def,
+            },
+            Err(e) => DecodeDone::StemFailed {
+                track,
+                error: e.to_string(),
+            },
+        },
     }
 }
 

@@ -11,7 +11,7 @@ use anyhow::Result;
 use web_workers::sync::mpsc::Sender;
 
 use crate::command::{PlayCmd, RealtimeCommand, SharedFrames};
-use crate::{AudioChannel, AudioState, decode_bytes, retarget_to, to_device_rate};
+use crate::{AudioChannel, AudioState, decode_to_device, retarget_to};
 
 /// How a cue picks among its variations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -160,10 +160,7 @@ impl SoundBank {
         }
         let mut sounds = Vec::with_capacity(files.len());
         for bytes in files {
-            sounds.push(Arc::new(to_device_rate(
-                decode_bytes(bytes)?,
-                self.state.as_deref(),
-            )?));
+            sounds.push(decode_to_device(bytes, self.state.as_deref())?);
         }
         self.cues.insert(
             name.to_string(),

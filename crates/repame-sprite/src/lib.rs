@@ -253,6 +253,10 @@ pub struct WorldText {
     pub color: [f32; 4],
     /// Font size in world units.
     pub size: f32,
+    /// Font family name to resolve, or `None` (default) for the stack the
+    /// text engine picks itself. The name must already be known to the
+    /// engine; an unresolved name falls back to the default stack.
+    pub font_family: Option<&'static str>,
 }
 
 /// Everything the viewport draws this frame. Plain snapshot data.
@@ -995,11 +999,12 @@ pub fn Viewport2dShared(
         }
         for t in draw_input.texts.iter() {
             let [tx, ty] = project(t.pos.x, t.pos.y);
-            scope.draw_text(
+            scope.draw_text_with_family(
                 t.text.clone(),
                 repose_core::Vec2 { x: tx, y: ty },
                 rgba8(t.color),
                 Px(t.size * fit.0 * d),
+                t.font_family,
             );
         }
         if let Some(tint) = draw_input.overlay_color {
@@ -1499,11 +1504,12 @@ pub fn Viewport2dGpuWithHudShared(
             };
             for t in input.texts.iter() {
                 let [tx, ty] = project(t.pos.x, t.pos.y);
-                scope.draw_text(
+                scope.draw_text_with_family(
                     t.text.clone(),
                     repose_core::Vec2 { x: tx, y: ty },
                     rgba8(t.color),
                     Px(t.size * fit.0 * d),
+                    t.font_family,
                 );
             }
             if let Some(tint) = input.overlay_color {

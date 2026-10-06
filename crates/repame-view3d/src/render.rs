@@ -167,7 +167,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var base = in.color;
     var alpha = in.alpha;
     if (in.tex_mix > 0.5) {
-        let tex = textureSample(scene_tex, scene_smp, in.uv, i32(in.page + 0.5));
+        let tex = textureSampleLevel(scene_tex, scene_smp, in.uv, i32(in.page + 0.5), 0.0);
         if (tex.a < 0.001 && in.cutoff < 0.001) {
             discard;
         }
@@ -197,7 +197,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let texel = camera.shadow_texel.xy;
             for (var oy: i32 = -1; oy <= 1; oy = oy + 1) {
                 for (var ox: i32 = -1; ox <= 1; ox = ox + 1) {
-                    lit_count = lit_count + textureSampleCompare(
+                    lit_count = lit_count + textureSampleCompareLevel(
                         shadow_tex, shadow_smp, suv + vec2<f32>(f32(ox), f32(oy)) * texel, ref_depth);
                 }
             }
@@ -227,7 +227,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 let texel = camera.shadow_texel.xy;
                 for (var oy: i32 = -1; oy <= 1; oy = oy + 1) {
                     for (var ox: i32 = -1; ox <= 1; ox = ox + 1) {
-                        lit_count = lit_count + textureSampleCompare(
+                        lit_count = lit_count + textureSampleCompareLevel(
                             cascade_tex, cascade_smp, suv + vec2<f32>(f32(ox), f32(oy)) * texel, slice, ref_depth);
                     }
                 }
@@ -270,7 +270,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             if (camera.point_params.y > 0.5 && in.lit_flag > 0.5) {
                 let cube_uv = normalize(-to_light);
                 let ref_depth = dist / max(lrange, 1e-6) - camera.point_params.z;
-                let lit_s = textureSampleCompare(
+                let lit_s = textureSampleCompareLevel(
                     point_tex, point_smp, cube_uv, ref_depth);
                 pshadow = mix(1.0, lit_s, camera.point_params.w);
             }

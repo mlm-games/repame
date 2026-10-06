@@ -342,6 +342,8 @@ impl Music {
                 DecodeDone::StemFailed { track, error } => {
                     log::warn!("music stem `{track}` failed to load: {error}");
                 }
+                // Each service owns its worker, so these cannot arrive here.
+                DecodeDone::Cue { .. } | DecodeDone::CueFailed { .. } => {}
             }
         }
         if self

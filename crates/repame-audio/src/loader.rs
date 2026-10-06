@@ -1,13 +1,14 @@
 //! Background decode worker: symphonia decode + device-rate resample run
-//! off the game thread (repadio pattern), `Music` drains [`DecodeDone`] in
-//! `update`. One worker per engine, FIFO, so a track always lands before
-//! its stems.
+//! off the game thread (repadio pattern), `Music` and `SoundBank` drain
+//! [`DecodeDone`] in `update`. One worker per service (`Music`,
+//! `SoundBank`), FIFO, so a track always lands before its stems.
 
 use std::sync::Arc;
 
 use web_workers::sync::mpsc::{Receiver, Sender, channel};
 
 use crate::command::SharedFrames;
+use crate::bank::CueDef;
 use crate::music::StemDef;
 use crate::{AudioState, decode_to_device};
 
@@ -23,6 +24,11 @@ pub(crate) enum DecodeJob {
         bytes: Vec<u8>,
         def: StemDef,
     },
+    Cue {
+        name: String,
+        def: CueDef,
+        files: Vec<Vec<u8>>,
+    },
 }
 
 /// A finished (or failed) decode coming back from the worker.
@@ -37,12 +43,21 @@ pub(crate) enum DecodeDone {
         sound: Arc<SharedFrames>,
         def: StemDef,
     },
+    Cue {
+        name: String,
+        def: CueDef,
+        sounds: Vec<Arc<SharedFrames>>,
+    },
     TrackFailed {
         name: String,
         error: String,
     },
     StemFailed {
         track: String,
+        error: String,
+    },
+    CueFailed {
+        name: String,
         error: String,
     },
 }
@@ -77,6 +92,23 @@ fn decode_job(job: DecodeJob, state: &AudioState) -> DecodeDone {
                 error: e.to_string(),
             },
         },
+        DecodeJob::Cue { name, def, files } => {
+            let mut sounds = Vec::with_capacity(files.len());
+            let mut failure = None;
+            for bytes in &files {
+                match decode_to_device(bytes, Some(state)) {
+                    Ok(sound) => sounds.push(sound),
+                    Err(e) => {
+                        failure = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
+            match failure {
+                None => DecodeDone::Cue { name, def, sounds },
+                Some(error) => DecodeDone::CueFailed { name, error },
+            }
+        }
     }
 }
 

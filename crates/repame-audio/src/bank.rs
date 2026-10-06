@@ -3,7 +3,7 @@
 //! and sends a play command. Time is an explicit `now_ms` parameter on
 //! [`SoundBank::play_at_ms`] so tests run on a fake clock.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use web_time::Instant;
 
@@ -11,6 +11,7 @@ use anyhow::Result;
 use web_workers::sync::mpsc::Sender;
 
 use crate::command::{PlayCmd, RealtimeCommand, SharedFrames};
+use crate::loader::{DecodeDone, DecodeJob, Loader, spawn as spawn_loader};
 use crate::{AudioChannel, AudioState, decode_to_device, retarget_to};
 
 /// How a cue picks among its variations.
@@ -118,6 +119,11 @@ pub struct SoundBank {
     boot: Instant,
     listener: [f32; 2],
     spatial_scale: f32,
+    loader: Option<Loader>,
+    /// Cue names queued on the loader but not decoded yet.
+    pending: HashSet<String>,
+    /// Cues whose async decode failed, drained by the game.
+    failed: Vec<(String, String)>,
 }
 
 impl SoundBank {
@@ -130,6 +136,9 @@ impl SoundBank {
             boot: Instant::now(),
             listener: [0.0, 0.0],
             spatial_scale: 1.0,
+            loader: None,
+            pending: HashSet::new(),
+            failed: Vec::new(),
         }
     }
 
@@ -149,6 +158,7 @@ impl SoundBank {
                 retarget_to(sound, target);
             }
         }
+        self.loader = spawn_loader(state.clone());
         self.tx = Some(tx);
         self.state = Some(state);
     }
@@ -177,6 +187,89 @@ impl SoundBank {
             },
         );
         Ok(())
+    }
+
+    /// Register a cue by decoding on the loader worker.
+    ///
+    /// Returns as soon as the job is queued; the cue becomes playable
+    /// once [`SoundBank::update`] drains its [`DecodeDone`]. Falls back
+    /// to the inline [`SoundBank::load`] where threads are unavailable
+    /// (noop engines, thread-less wasm), so callers never need to know
+    /// which path ran.
+    pub fn load_async(&mut self, name: &str, def: CueDef, files: &[&[u8]]) -> Result<()> {
+        if files.is_empty() {
+            anyhow::bail!("cue `{name}` needs at least one file");
+        }
+        if self.cues.contains_key(name) || self.pending.contains(name) {
+            return Ok(());
+        }
+        let Some(loader) = &self.loader else {
+            return self.load(name, def, files);
+        };
+        let owned: Vec<Vec<u8>> = files.iter().map(|f| f.to_vec()).collect();
+        loader
+            .jobs
+            .send_block(DecodeJob::Cue {
+                name: name.to_owned(),
+                def,
+                files: owned,
+            })
+            .map_err(|_| anyhow::anyhow!("audio loader stopped"))?;
+        self.pending.insert(name.to_owned());
+        Ok(())
+    }
+
+    /// Pull finished cue decodes off the loader worker. Pair with
+    /// [`SoundBank::take_failed`] to learn about undecodable cues.
+    pub fn drain_loader(&mut self) {
+        let Some(loader) = &self.loader else {
+            return;
+        };
+        while let Ok(outcome) = loader.done.try_recv() {
+            match outcome {
+                DecodeDone::Cue { name, def, sounds } => {
+                    self.pending.remove(&name);
+                    if sounds.is_empty() {
+                        continue;
+                    }
+                    self.cues.insert(
+                        name.clone(),
+                        Cue {
+                            def,
+                            sounds,
+                            rr_index: 0,
+                            rng: {
+                                let r = self.seed ^ name.len() as u64;
+                                if r == 0 { 0x9E3779B97F4A7C15 } else { r }
+                            },
+                            last_play_ms: None,
+                            live: Vec::new(),
+                        },
+                    );
+                }
+                DecodeDone::CueFailed { name, error } => {
+                    self.pending.remove(&name);
+                    self.failed.push((name, error));
+                }
+                // Track/stem outcomes belong to `Music`'s loader.
+                _ => {}
+            }
+        }
+    }
+
+    /// Cues that failed to decode since the last call.
+    pub fn take_failed(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.failed)
+    }
+
+    /// True while a cue is queued or decoded and playable.
+    pub fn is_ready(&self, name: &str) -> bool {
+        self.cues.contains_key(name)
+    }
+
+    /// True while a cue decode is still in flight.
+    pub fn is_pending(&self, name: &str) -> bool {
+        self.pending.contains(name)
     }
 
     /// Drop finished ids from live-voice accounting.

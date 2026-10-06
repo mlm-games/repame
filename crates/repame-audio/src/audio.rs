@@ -76,6 +76,7 @@ impl Audio {
     /// accounting, advance the music duck envelope. Each id is
     /// reported once; pair with [`take_finished`](Self::take_finished).
     pub fn update(&mut self, dt_secs: f32) {
+        self.bank.drain_loader();
         let mut fresh = Vec::new();
         if let Some(link) = &self.link {
             while let Ok(ev) = link.events.try_recv() {
@@ -100,6 +101,17 @@ impl Audio {
     /// Register a cue from encoded files (see [`SoundBank::load`]).
     pub fn load_cue(&mut self, name: &str, def: CueDef, files: &[&[u8]]) -> Result<()> {
         self.bank.load(name, def, files)
+    }
+
+    /// Register a cue, decoding on the loader worker instead of the game
+    /// thread (see [`SoundBank::load_async`]).
+    pub fn load_cue_async(&mut self, name: &str, def: CueDef, files: &[&[u8]]) -> Result<()> {
+        self.bank.load_async(name, def, files)
+    }
+
+    /// Cues that failed to decode since the last call.
+    pub fn take_cue_failures(&mut self) -> Vec<(String, String)> {
+        self.bank.take_failed()
     }
 
     /// Fire-and-forget cue play. Returns the voice id, or `None` when

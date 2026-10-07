@@ -5,11 +5,13 @@
 //! panics with "RefCell already borrowed". A browser has no window to close
 //! and no exit to call, so a quit there latches instead: the shell keeps
 //! servicing frames while the app stops stepping and paints [`Quit::parked`],
-//! leaving the tab to be closed.
+//! leaving the tab to be closed. A parked root still says so on screen, and
+//! the game should cut its audio (`repame_audio::Audio::silence`) so a
+//! looping track does not play on over that message.
 
 use repose_core::View;
 use repose_core::prelude::Modifier;
-use repose_ui::ZStack;
+use repose_ui::{Center, Text, ViewExt};
 
 /// A quit request, latched so a browser shell can park instead of exiting.
 #[derive(Default)]
@@ -31,8 +33,9 @@ impl Quit {
         self.latched
     }
 
-    /// The root a parked shell paints: empty, so nothing is drawn.
+    /// The root a parked shell paints: one centered line saying the game
+    /// closed, so a blank tab is not mistaken for a hung frame.
     pub fn parked() -> View {
-        ZStack(Modifier::new().fill_max_size())
+        Center(Modifier::new().fill_max_size()).child(Text("The game has been closed."))
     }
 }

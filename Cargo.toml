@@ -6,7 +6,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.3.10"
+version = "0.3.11"
 edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/mlm-games/repame"
@@ -51,20 +51,20 @@ renamite-player = { version = "0.3" }
 renamite-player-ui = { version = "0.3" }
 renamite-render-bridge = { version = "0.3" }
 
-repame-sim = { path = "crates/repame-sim", version = "0.3.10" }
-repame-view3d = { path = "crates/repame-view3d", version = "0.3.10" }
-repame-atlas = { path = "crates/repame-atlas", version = "0.3.10" }
-repame-anim = { path = "crates/repame-anim", version = "0.3.10" }
-repame-audio = { path = "crates/repame-audio", version = "0.3.10" }
-repame-sprite = { path = "crates/repame-sprite", version = "0.3.10" }
-repame-shell = { path = "crates/repame-shell", version = "0.3.10" }
-repame-actors = { path = "crates/repame-actors", version = "0.3.10" }
-repame-fx = { path = "crates/repame-fx", version = "0.3.10" }
-repame-input = { path = "crates/repame-input", version = "0.3.10" }
-repame-physics = { path = "crates/repame-physics", version = "0.3.10" }
-repame-rapier2d = { path = "crates/repame-rapier2d", version = "0.3.10" }
-repame-rapier3d = { path = "crates/repame-rapier3d", version = "0.3.10" }
-repame-content = { path = "crates/repame-content", version = "0.3.10" }
+repame-sim = { path = "crates/repame-sim", version = "0.3.11" }
+repame-view3d = { path = "crates/repame-view3d", version = "0.3.11" }
+repame-atlas = { path = "crates/repame-atlas", version = "0.3.11" }
+repame-anim = { path = "crates/repame-anim", version = "0.3.11" }
+repame-audio = { path = "crates/repame-audio", version = "0.3.11" }
+repame-sprite = { path = "crates/repame-sprite", version = "0.3.11" }
+repame-shell = { path = "crates/repame-shell", version = "0.3.11" }
+repame-actors = { path = "crates/repame-actors", version = "0.3.11" }
+repame-fx = { path = "crates/repame-fx", version = "0.3.11" }
+repame-input = { path = "crates/repame-input", version = "0.3.11" }
+repame-physics = { path = "crates/repame-physics", version = "0.3.11" }
+repame-rapier2d = { path = "crates/repame-rapier2d", version = "0.3.11" }
+repame-rapier3d = { path = "crates/repame-rapier3d", version = "0.3.11" }
+repame-content = { path = "crates/repame-content", version = "0.3.11" }
 
 
 [patch.crates-io]

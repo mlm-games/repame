@@ -46,11 +46,11 @@ struct Camera {
 };
 
 struct SkinPalette {
-    joints: array<mat4x4<f32>, 128>,
+    joints: array<mat4x4<f32>>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
-@group(0) @binding(1) var<uniform> skin_palette: SkinPalette;
+@group(0) @binding(1) var<storage, read> skin_palette: SkinPalette;
 struct Material {
     kcolors: array<vec4<f32>, 4>,
     fog: vec4<f32>,
@@ -2054,30 +2054,6 @@ impl SceneBatch {
             );
             return;
         }
-        let center: Option<[f32; 3]> = {
-            let mut it = mesh.positions.iter();
-            match it.next() {
-                None => None,
-                Some(first) => {
-                    let mut min = glam::Vec3::from(*first);
-                    let mut max = min;
-                    for p in it {
-                        let v = glam::Vec3::from(*p);
-                        min = min.min(v);
-                        max = max.max(v);
-                    }
-                    if min.is_finite() && max.is_finite() {
-                        Some([
-                            (min.x + max.x) * 0.5,
-                            (min.y + max.y) * 0.5,
-                            (min.z + max.z) * 0.5,
-                        ])
-                    } else {
-                        None
-                    }
-                }
-            }
-        };
         let mut clamped_joints = mesh.joints.clone();
         let cap = draw.joint_count.saturating_sub(1);
         let mut clamped = false;
@@ -2107,12 +2083,20 @@ impl SceneBatch {
             palette: draw.palette.iter().map(|m| m.to_cols_array_2d()).collect(),
             texture_page: mesh.texture_page,
             material: mesh.material,
-            center,
+            center: None,
             indices: cull_degenerate(&mesh.positions, &mesh.indices),
             transparent: mesh.transparent,
             alpha: mesh.alpha.clamp(0.0, 1.0),
             alpha_cutoff: mesh.alpha_cutoff.clamp(0.0, 1.0),
             depth_test: mesh.depth_test,
+        });
+        let pending = self.skinned.last_mut().expect("just pushed");
+        pending.center = Self::skinned_bounds(pending).map(|(min, max)| {
+            [
+                (min[0] + max[0]) * 0.5,
+                (min[1] + max[1]) * 0.5,
+                (min[2] + max[2]) * 0.5,
+            ]
         });
     }
 
@@ -2272,7 +2256,7 @@ impl SceneBatch {
             if s.indices.len() < 3 {
                 continue;
             }
-            if culling && s.depth_test && Self::group_outside(&planes, &s.positions) {
+            if culling && s.depth_test && Self::skinned_outside(&planes, &s) {
                 self.culled += 1;
                 continue;
             }
@@ -2293,7 +2277,7 @@ impl SceneBatch {
             if s.indices.len() < 3 {
                 continue;
             }
-            if culling && s.depth_test && Self::group_outside(&planes, &s.positions) {
+            if culling && s.depth_test && Self::skinned_outside(&planes, &s) {
                 self.culled += 1;
                 continue;
             }
@@ -2376,6 +2360,59 @@ impl SceneBatch {
         false
     }
 
+    /// World-space AABB of a skinned draw. Bind positions are model-local;
+    /// the world transform lives only in the palette, so each vertex is
+    /// placed by the palette matrices of the joints that actually weight it.
+    fn skinned_bounds(s: &SkinnedPending) -> Option<([f32; 3], [f32; 3])> {
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        let mut any = false;
+        for (i, p) in s.positions.iter().enumerate() {
+            for slot in 0..4 {
+                if s.weights.get(i).map_or(true, |w| w[slot] <= 0.0) {
+                    continue;
+                }
+                let Some(matrix) = s
+                    .joints
+                    .get(i)
+                    .and_then(|j| s.palette.get(usize::from(j[slot])))
+                else {
+                    continue;
+                };
+                let v = Mat4::from_cols_array_2d(matrix) * glam::Vec4::new(p[0], p[1], p[2], 1.0);
+                if !v.is_finite() {
+                    continue;
+                }
+                let v = v.truncate();
+                min = [min[0].min(v.x), min[1].min(v.y), min[2].min(v.z)];
+                max = [max[0].max(v.x), max[1].max(v.y), max[2].max(v.z)];
+                any = true;
+            }
+        }
+        any.then_some((min, max))
+    }
+
+    /// Frustum reject for a skinned draw. Consumes the bounds already
+    /// computed for transparent sorting rather than re-deriving them.
+    fn skinned_outside(planes: &[[f32; 4]; 6], s: &SkinnedPending) -> bool {
+        let Some((min, max)) = Self::skinned_bounds(s) else {
+            return false;
+        };
+        Self::aabb_outside(planes, min, max)
+    }
+
+    /// Positive-vertex AABB reject: a box lies fully outside one plane only
+    /// when its corner most in that plane's direction is still behind it.
+    fn aabb_outside(planes: &[[f32; 4]; 6], min: [f32; 3], max: [f32; 3]) -> bool {
+        planes.iter().any(|p| {
+            let pick = |n: f32, lo: f32, hi: f32| if n >= 0.0 { hi } else { lo };
+            let x = pick(p[0], min[0], max[0]);
+            let y = pick(p[1], min[1], max[1]);
+            let z = pick(p[2], min[2], max[2]);
+            p[0] * x + p[1] * y + p[2] * z + p[3] < 0.0
+        })
+    }
+
     /// Shadow-map edge armed for the next `prepare` (0 = disabled).
     /// Tracks the last [`SceneBatch::set_shadow`] `Some` desc; `None`
     /// clears it back to 0.
@@ -2411,6 +2448,11 @@ impl SceneBatch {
                 .unwrap_or(0),
             None => 0,
         };
+        let skin_slots = self
+            .palette
+            .len()
+            .next_power_of_two()
+            .max(crate::MAX_SKIN_JOINTS);
         let key = (
             screen.target_format,
             screen.sample_count,
@@ -2421,6 +2463,7 @@ impl SceneBatch {
             cascade_size,
             cascade_count,
             cube_size,
+            skin_slots,
         );
         let fresh = resources
             .get::<SceneResources>()
@@ -2509,7 +2552,9 @@ impl SceneBatch {
                     binding: 1,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage {
+                            read_only: true,
+                        },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -2519,8 +2564,8 @@ impl SceneBatch {
         });
         let skin_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("repame_view3d_skin"),
-            size: (crate::MAX_SKIN_JOINTS * 64) as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            size: (skin_slots * 64) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let cam_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2869,11 +2914,11 @@ struct Camera {
 };
 
 struct SkinPalette {
-    joints: array<mat4x4<f32>, 128>,
+    joints: array<mat4x4<f32>>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
-@group(0) @binding(1) var<uniform> skin_palette: SkinPalette;
+@group(0) @binding(1) var<storage, read> skin_palette: SkinPalette;
 
 @vertex
 fn vs_main(
@@ -3024,7 +3069,7 @@ fn vs_main(
             point_edge: cube_edge,
             point_faces: None,
             skin_buffer,
-            skin_cap: 0,
+            skin_cap: skin_slots,
             verts: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("repame_view3d_verts"),
                 size: 64,
@@ -3122,7 +3167,6 @@ fn vs_main(
             .and_then(|p| p.cube_faces());
         if !self.palette.is_empty() {
             queue.write_buffer(&res.skin_buffer, 0, bytemuck::cast_slice(&self.palette));
-            res.skin_cap = self.palette.len();
         }
         if !self.verts.is_empty() {
             queue.write_buffer(&res.verts, 0, bytemuck::cast_slice(&self.verts));
@@ -3220,7 +3264,7 @@ fn vs_main(
 }
 
 struct SceneEntry {
-    key: (wgpu::TextureFormat, u32, u32, u32, u32, u32, u32, u32, u32),
+    key: (wgpu::TextureFormat, u32, u32, u32, u32, u32, u32, u32, u32, usize),
     pipeline_depth: wgpu::RenderPipeline,
     pipeline_flat: wgpu::RenderPipeline,
     pipeline_transparent: wgpu::RenderPipeline,
@@ -3252,8 +3296,8 @@ struct SceneEntry {
     /// `upload_all` from the staged points. `None` = cube pass off.
     point_faces: Option<[[[f32; 4]; 4]; 6]>,
     skin_buffer: wgpu::Buffer,
-    /// Joint count currently uploaded (matrices). Grows like the vert
-    /// buffers; shrinks never (uniform upload is a prefix write).
+    /// Allocated joint-matrix capacity. Part of the scene key, so a frame
+    /// needing more slots rebuilds the pipelines that bind this buffer.
     skin_cap: usize,
     verts: wgpu::Buffer,
     vert_cap: usize,

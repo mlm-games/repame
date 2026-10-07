@@ -71,6 +71,27 @@ impl Audio {
         }
     }
 
+    /// Hard cut: silence every voice and suspend the output device.
+    ///
+    /// A browser shell that quits cannot exit the process, so it parks and
+    /// leaves the tab open; without this the mixer keeps rendering and
+    /// looping music plays on forever over the parked frame. Off the web a
+    /// quit ends the process, which the OS silences by itself.
+    ///
+    /// The transport gate lands within one audio block and pops nothing,
+    /// which is why this cuts instead of fading: the frame pump a fade would
+    /// need is the thing that just stopped. Terminal — there is no un-silence,
+    /// and [`Audio::unlock`] will not lift the gate, so a game that wants
+    /// sound later must not have silenced.
+    pub fn silence(&self) {
+        if let Some(link) = &self.link {
+            let _ = link.tx.send_spin(crate::RealtimeCommand::Pause(true));
+        }
+        if let Some(engine) = &self.engine {
+            engine.pause();
+        }
+    }
+
     /// Device rate in Hz, or `0` with no stream.
     pub fn sample_rate(&self) -> u32 {
         self.engine.as_ref().map(|e| e.rate()).unwrap_or(0)

@@ -353,6 +353,18 @@ impl Engine {
         let _ = &self.stream;
     }
 
+    /// Suspend the output device, releasing the audio hardware.
+    ///
+    /// On the web this is `AudioContext.suspend()`: a live context keeps the
+    /// device awake and keeps the tab flagged as playing audio, so a shell
+    /// that parks instead of exiting has to suspend it. Off wasm it is
+    /// best-effort — cpal pauses at the hardware level where the backend
+    /// supports it and stops only the callback where it does not, so errors
+    /// are ignored and [`crate::Audio::silence`] carries the guarantee.
+    pub fn pause(&self) {
+        let _ = self.stream.pause();
+    }
+
     pub fn rate(&self) -> u32 {
         self.rate
     }

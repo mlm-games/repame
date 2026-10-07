@@ -59,6 +59,18 @@ impl Audio {
         self.engine.is_some()
     }
 
+    /// Retry a start the host blocked, after a user gesture.
+    ///
+    /// On the web the browser refuses to start an `AudioContext` that was
+    /// created without one, so [`Audio::try_init`] succeeds and then runs
+    /// silent forever. Hand this to a first-gesture hook and call it there;
+    /// off wasm it does nothing.
+    pub fn unlock(&self) {
+        if let Some(engine) = &self.engine {
+            engine.unlock();
+        }
+    }
+
     /// Device rate in Hz, or `0` with no stream.
     pub fn sample_rate(&self) -> u32 {
         self.engine.as_ref().map(|e| e.rate()).unwrap_or(0)

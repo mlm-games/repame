@@ -220,7 +220,7 @@ pub(crate) fn render_block(core: &mut EngineCore, out: &mut [f32], out_channels:
 
 /// cpal stream owner. Dropping stops the callback.
 pub struct Engine {
-    _stream: cpal::Stream,
+    stream: cpal::Stream,
     rate: u32,
     channels: u16,
 }
@@ -330,10 +330,27 @@ impl Engine {
         };
         stream.play()?;
         Ok(Self {
-            _stream: stream,
+            stream,
             rate,
             channels,
         })
+    }
+
+    /// Re-arm a device a host policy blocked at open.
+    ///
+    /// The only real case is the browser autoplay gate: cpal opens the
+    /// `AudioContext` and calls `resume()` from `play()`, which the browser
+    /// refuses outside a user gesture, so the context comes up suspended and
+    /// stays silent for the session. Calling `play()` again once a gesture has
+    /// happened resumes it. cpal guards its one-shot setup with a
+    /// `compare_exchange`, so a repeat `play()` only re-resumes.
+    ///
+    /// No-op off wasm, where [`Engine::open`] already started the device.
+    pub fn unlock(&self) {
+        #[cfg(target_arch = "wasm32")]
+        let _ = self.stream.play();
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = &self.stream;
     }
 
     pub fn rate(&self) -> u32 {

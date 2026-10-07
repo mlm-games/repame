@@ -4279,6 +4279,7 @@ version = "0.3.9"
 dependencies = [
  "anyhow",
  "glam 0.33.12",
+ "js-sys",
  "log",
  "repame-input",
  "repame-sim",

@@ -207,7 +207,6 @@ impl SoundBank {
         Ok(())
     }
 
-
     /// Ask for a cue, decoding on the loader worker when one is running.
     ///
     /// The caller has one job: call this, then act on the outcome. The

@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use web_workers::sync::mpsc::{Receiver, Sender, channel};
 
-use crate::command::SharedFrames;
 use crate::bank::CueDef;
+use crate::command::SharedFrames;
 use crate::music::StemDef;
 use crate::{AudioState, decode_to_device};
 

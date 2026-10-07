@@ -57,8 +57,8 @@ pub fn user_gesture_seen() -> bool {
 fn install() {
     use std::sync::atomic::Ordering;
 
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
 
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return;

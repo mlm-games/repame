@@ -374,6 +374,7 @@ pub fn Viewport3d(
     let on_event = Rc::new(on_event);
     let on_move = on_event.clone();
     let on_up_click = on_event.clone();
+    let on_gesture = on_event.clone();
     let on_zoom = on_event;
 
     let drag: Rc<std::cell::Cell<Option<DragState>>> = Rc::new(std::cell::Cell::new(None));
@@ -448,6 +449,19 @@ pub fn Viewport3d(
                 repose_core::Vec2::ZERO
             } else {
                 d
+            }
+        })
+        .focusable(true)
+        .on_action(move |action: repose_core::shortcuts::Action| {
+            use repose_core::shortcuts::{Action, Gesture};
+            match &action {
+                Action::Gesture(Gesture::PinchWithCenter { delta_scale, .. }) => {
+                    on_gesture(View3dEvent::Zoom {
+                        factor: *delta_scale,
+                    });
+                    true
+                }
+                _ => false,
             }
         });
     let payload = GpuViewport3d {

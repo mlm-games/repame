@@ -1846,10 +1846,17 @@ mod tests {
         // as black, which silently erases every sprite with no validation
         // error. Guards the shape choice for the layout, the view and the
         // shader together, since they only agree as a set.
-        assert_eq!(crate::batch::atlas_shape(1), (wgpu::TextureViewDimension::D2, false));
-        assert_eq!(crate::batch::atlas_shape(4), (wgpu::TextureViewDimension::D2Array, true));
+        assert_eq!(
+            crate::batch::atlas_shape(1),
+            (wgpu::TextureViewDimension::D2, false)
+        );
+        assert_eq!(
+            crate::batch::atlas_shape(4),
+            (wgpu::TextureViewDimension::D2Array, true)
+        );
         assert!(
-            crate::batch::sprite_shader(1).contains("texture_2d<") && !crate::batch::sprite_shader(1).contains("texture_2d_array"),
+            crate::batch::sprite_shader(1).contains("texture_2d<")
+                && !crate::batch::sprite_shader(1).contains("texture_2d_array"),
             "single-layer shader samples a 2d atlas"
         );
         assert!(
@@ -1920,18 +1927,29 @@ mod tests {
             bg: FullscreenPass::new(
                 "test.viewport2d.single_layer.background",
                 fullscreen::SOLID_WGSL,
-                FullscreenDesc { texture_slots: 0, filter: TextureFilter::Nearest },
+                FullscreenDesc {
+                    texture_slots: 0,
+                    filter: TextureFilter::Nearest,
+                },
             ),
             overlay: FullscreenPass::new(
                 "test.viewport2d.single_layer.overlay",
                 fullscreen::SOLID_WGSL,
-                FullscreenDesc { texture_slots: 0, filter: TextureFilter::Nearest },
+                FullscreenDesc {
+                    texture_slots: 0,
+                    filter: TextureFilter::Nearest,
+                },
             ),
         };
         let scene = Scene {
             clear_color: Color::from_rgba(0, 0, 0, 255),
             nodes: vec![SceneNode::Callback {
-                rect: Rect { x: 0.0, y: 0.0, w: 64.0, h: 64.0 },
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 64.0,
+                    h: 64.0,
+                },
                 payload: Callback::new(payload),
             }],
         };

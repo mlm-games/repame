@@ -460,9 +460,7 @@ impl ShadingModel {
         }
         let check = |arg: TevArg, alpha: bool| -> Result<(), ShadingError> {
             match arg {
-                TevArg::KColor(index) if !kc(index) => {
-                    Err(ShadingError::KColorOutOfRange(index))
-                }
+                TevArg::KColor(index) if !kc(index) => Err(ShadingError::KColorOutOfRange(index)),
                 TevArg::TexColorOf(unit) if usize::from(unit) >= MAX_TEX_UNITS => {
                     Err(ShadingError::TexUnitOutOfRange(unit))
                 }

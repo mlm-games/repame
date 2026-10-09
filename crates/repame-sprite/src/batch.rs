@@ -531,11 +531,7 @@ pub(crate) fn sprite_shader(layers: u32) -> &'static str {
     }
 }
 
-fn create_atlas_layout(
-    device: &wgpu::Device,
-    filter: TextureFilter,
-    layers: u32,
-) -> AtlasLayout {
+fn create_atlas_layout(device: &wgpu::Device, filter: TextureFilter, layers: u32) -> AtlasLayout {
     let (dimension, _) = atlas_shape(layers);
     let sampler = device.create_sampler(&sampler_desc(filter));
     let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -643,7 +639,13 @@ impl SpriteBatch {
             .expect("batch resources initialized")
             .layouts
             .entry(descriptor)
-            .or_insert_with(|| Arc::new(create_atlas_layout(device, descriptor.filter, descriptor.layers)))
+            .or_insert_with(|| {
+                Arc::new(create_atlas_layout(
+                    device,
+                    descriptor.filter,
+                    descriptor.layers,
+                ))
+            })
             .clone();
         let atlas = resources
             .get_mut::<BatchResources>()

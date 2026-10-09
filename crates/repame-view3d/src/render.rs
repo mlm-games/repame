@@ -2586,9 +2586,7 @@ impl SceneBatch {
                     binding: 1,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage {
-                            read_only: true,
-                        },
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -3297,7 +3295,18 @@ fn vs_main(
 }
 
 struct SceneEntry {
-    key: (wgpu::TextureFormat, u32, u32, u32, u32, u32, u32, u32, u32, usize),
+    key: (
+        wgpu::TextureFormat,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        usize,
+    ),
     pipeline_depth: wgpu::RenderPipeline,
     pipeline_flat: wgpu::RenderPipeline,
     pipeline_transparent: wgpu::RenderPipeline,

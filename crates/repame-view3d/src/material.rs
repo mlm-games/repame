@@ -235,6 +235,11 @@ pub enum TevArg {
     Rasa,
     /// Constant color register.
     KColor(u8),
+    /// A hardware constant-color *selector*: one of the eight fixed grays
+    /// (`sel`/8) or a per-component read of a K-color register. `KColor`
+    /// above covers the plain whole-register case; this covers the rest of
+    /// `GX_TEV_KCSEL_*`, which retail materials use freely.
+    Konst(u8),
     /// Sampled texture color of the stage's unit.
     TexColor,
     /// Sampled texture alpha of the stage's unit.
@@ -269,6 +274,12 @@ pub struct TevStage {
     pub alpha_clamp: bool,
     pub color_dest: TevDest,
     pub alpha_dest: TevDest,
+    /// Channel the rasterized operand reads its alpha from, and the channel
+    /// the texture operand read its alpha from. `0..3` is R,G,B,A. Zero (the
+    /// default) is the hardware's identity: `APREV` takes `Prev.a` and
+    /// `TEXA` takes `texel.a`.
+    pub ras_sel: u8,
+    pub tex_sel: u8,
 }
 
 impl Default for TevStage {
@@ -288,6 +299,8 @@ impl Default for TevStage {
             alpha_clamp: true,
             color_dest: TevDest::Prev,
             alpha_dest: TevDest::Prev,
+            ras_sel: 0,
+            tex_sel: 0,
         }
     }
 }

@@ -82,6 +82,36 @@ fn combine_channel(terms: &StageTerms, args: [f32; 4]) -> f32 {
     }
 }
 
+/// Clamp a channel select into `0..3`: the hardware field is two bits, but a
+/// stage assembled by hand may carry anything.
+fn chan(sel: u8) -> usize {
+    usize::from(sel & 0x03)
+}
+
+/// Resolve a hardware constant-color selector.
+///
+/// `0x00..=0x07` are the fixed grays the hardware names, `sel`/8; `0x0C..=0x0F`
+/// read a whole K-color register; `0x10..=0x1F` read one component of one.
+/// Anything else has no hardware meaning, so it reads zero rather than
+/// inventing a color.
+fn konst_value(sel: u8, channel: usize, kcolors: &KColors) -> f32 {
+    let reg = |index: u8| -> [f32; 4] {
+        kcolors
+            .get(usize::from(index & 0x03))
+            .copied()
+            .unwrap_or([0.0, 0.0, 0.0, 1.0])
+    };
+    match sel {
+        0x00..=0x07 => f32::from(sel) / 8.0,
+        0x0C..=0x0F => reg(sel - 0x0C)[channel.min(3)],
+        0x10..=0x13 => reg(sel - 0x10)[0],
+        0x14..=0x17 => reg(sel - 0x14)[1],
+        0x18..=0x1B => reg(sel - 0x18)[3],
+        0x1C..=0x1F => reg(sel - 0x1C)[2],
+        _ => 0.0,
+    }
+}
+
 /// Reads one argument against the register file; a missing texel reads white.
 fn arg_value(
     arg: TevArg,
@@ -91,6 +121,8 @@ fn arg_value(
     regs: &[[f32; 4]; 4],
     kcolors: &KColors,
     raster: &[f32; 4],
+    ras_sel: u8,
+    tex_sel: u8,
 ) -> f32 {
     let texel = |other: u8| {
         texels
@@ -108,7 +140,7 @@ fn arg_value(
         TevArg::Half => 0.5,
         TevArg::Two => 2.0,
         TevArg::Color => regs[0][channel],
-        TevArg::Alpha => regs[0][3],
+        TevArg::Alpha => regs[0][chan(ras_sel)],
         TevArg::Reg0 => regs[1][channel],
         TevArg::Reg1 => regs[2][channel],
         TevArg::Reg2 => regs[3][channel],
@@ -140,7 +172,8 @@ fn arg_value(
                 texel.color[channel]
             }
         }
-        TevArg::TexAlpha => texel(unit).alpha,
+        TevArg::Konst(sel) => konst_value(sel, channel, kcolors),
+        TevArg::TexAlpha => texel(unit).color[chan(tex_sel)],
         TevArg::LodFrac => texel(unit).lod_frac,
         TevArg::Stub => {
             if channel == 3 {
@@ -175,6 +208,8 @@ pub fn evaluate_stages(model: &ShadingModel, incoming: Rgba, texels: &[Option<Te
                     &regs,
                     &model.kcolors,
                     &incoming,
+                    stage.ras_sel,
+                    stage.tex_sel,
                 )
             });
             *out = combine_channel(&terms, args);
@@ -300,15 +335,17 @@ pub fn evaluate(
     out
 }
 
-fn arg_wgsl(arg: TevArg, unit: usize, channel: usize) -> String {
+fn arg_wgsl(arg: TevArg, unit: usize, channel: usize, ras_sel: u8, tex_sel: u8) -> String {
     let slot = ["r", "g", "b", "a"][channel];
+    let ras = ["r", "g", "b", "a"][chan(ras_sel)];
+    let tex = ["r", "g", "b", "a"][chan(tex_sel)];
     match arg {
         TevArg::Zero => "0.0".to_string(),
         TevArg::One => "1.0".to_string(),
         TevArg::Half => "0.5".to_string(),
         TevArg::Two => "2.0".to_string(),
         TevArg::Color => format!("tev_regs[0].{slot}"),
-        TevArg::Alpha => "tev_regs[0].a".to_string(),
+        TevArg::Alpha => format!("tev_regs[0].{ras}"),
         TevArg::Reg0 => format!("tev_regs[1].{slot}"),
         TevArg::Reg1 => format!("tev_regs[2].{slot}"),
         TevArg::Reg2 => format!("tev_regs[3].{slot}"),
@@ -336,7 +373,16 @@ fn arg_wgsl(arg: TevArg, unit: usize, channel: usize) -> String {
                 format!("tex{other}.{slot}")
             }
         }
-        TevArg::TexAlpha => format!("tex{unit}.a"),
+        TevArg::Konst(sel) => match sel {
+            0x00..=0x07 => format!("{:.6}", f32::from(sel) / 8.0),
+            0x0C..=0x0F => format!("kcolor[{}].{slot}", usize::from(sel - 0x0C)),
+            0x10..=0x13 => format!("kcolor[{}].r", usize::from(sel - 0x10)),
+            0x14..=0x17 => format!("kcolor[{}].g", usize::from(sel - 0x14)),
+            0x18..=0x1B => format!("kcolor[{}].a", usize::from(sel - 0x18)),
+            0x1C..=0x1F => format!("kcolor[{}].b", usize::from(sel - 0x1C)),
+            _ => "0.0".to_string(),
+        },
+        TevArg::TexAlpha => format!("tex{unit}.{tex}"),
         TevArg::LodFrac => format!("lod{unit}"),
         TevArg::Stub => {
             if channel == 3 {
@@ -351,7 +397,9 @@ fn arg_wgsl(arg: TevArg, unit: usize, channel: usize) -> String {
 fn stage_channel_wgsl(stage: &TevStage, channel: usize) -> String {
     let unit = usize::from(stage.tex_unit).min(7);
     let terms = stage_terms(stage, channel);
-    let [a, b, c, d] = terms.args.map(|arg| arg_wgsl(arg, unit, channel));
+    let [a, b, c, d] = terms
+        .args
+        .map(|arg| arg_wgsl(arg, unit, channel, stage.ras_sel, stage.tex_sel));
     let lerp = format!("((1.0 - {c}) * {a} + {c} * {b})");
     let mixed = match terms.op {
         TevOp::Add => format!("({d} + {lerp})"),
@@ -430,5 +478,33 @@ mod tests {
         let wgsl = wgsl_program(&model);
         assert!(wgsl.contains("lit_in.g"), "color must read the tint: {wgsl}");
         assert!(wgsl.contains("lit_in.a"), "alpha must read its alpha: {wgsl}");
+    }
+
+    /// `Konst` covers the rest of the hardware's constant-color selectors, and
+    /// the channel swap decides which component `APREV`/`TEXA` read. Both
+    /// paths must agree: a drift moves every constant-tinted surface.
+    #[test]
+    fn konst_and_channel_swap_match_on_both_paths() {
+        let mut model = ShadingModel::default();
+        model.kcolors[0] = [0.1, 0.2, 0.3, 0.4];
+        let mut stage = TevStage::with_mode(0, TevMode::Modulate);
+        // `APREV` reads the rasterized green, and the color `d` is the fixed
+        // gray `1/8`; `TEXA` reads the texel's red instead of its alpha.
+        stage.ras_sel = 1;
+        stage.tex_sel = 0;
+        stage.color_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::Konst(1)];
+        stage.alpha_arg = [TevArg::Zero, TevArg::Alpha, TevArg::TexAlpha, TevArg::Zero];
+        model.stages = vec![stage];
+
+        let raster = [0.9, 0.25, 0.0, 1.0];
+        let out = evaluate_stages(&model, raster, &[]);
+        // alpha = d + (1 - TEXA) * a + TEXA * b, with no texel (white) so the
+        // lerp collapses to `b` = the swapped raster alpha.
+        assert_eq!(out[0], 0.125, "fixed gray 1/8 must reach the color channel");
+        assert_eq!(out[3], 0.25, "ras_sel must pick the raster green as alpha");
+
+        let wgsl = wgsl_program(&model);
+        assert!(wgsl.contains("tev_regs[0].g"), "swap must re-point APREV: {wgsl}");
+        assert!(wgsl.contains("0.125000"), "fixed gray must lower to a literal: {wgsl}");
     }
 }

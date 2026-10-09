@@ -17,6 +17,8 @@ struct Camera {
     fog_range: vec4<f32>,
     cam_pos: vec3<f32>,
     _pad2: f32,
+    cam_forward: vec3<f32>,
+    _pad3: f32,
     shadow_vp: mat4x4<f32>,
     shadow_params: vec4<f32>,
     shadow_texel: vec4<f32>,
@@ -93,6 +95,7 @@ struct VsOut {
     @location(9) metallic: f32,
     @location(10) roughness: f32,
     @location(11) emissive: vec3<f32>,
+    @location(12) view_depth: f32,
 };
 
 @vertex
@@ -138,7 +141,16 @@ fn vs_main(
                 }
             }
             skinned_pos = acc_pos;
-            skinned_nrm = acc_nrm;
+            // Renormalise here, not per fragment: the reference normalises the
+            // blended normal in the vertex stage, and so does the CPU path
+            // (`SkinnedMesh::blend_vertex`). Interpolating unnormalised normals
+            // and normalising afterwards gives a different direction, and a
+            // singular blend can yield zero, which `normalize` does not define.
+            skinned_nrm = select(
+                acc_nrm,
+                normalize(acc_nrm),
+                dot(acc_nrm, acc_nrm) > 1e-10,
+            );
         }
     }
     out.pos = camera.view_proj * vec4<f32>(skinned_pos, 1.0);
@@ -154,6 +166,10 @@ fn vs_main(
     out.metallic = metallic;
     out.roughness = roughness;
     out.emissive = emissive;
+    // Depth along the view axis. The euclidean distance from the eye grows
+    // as `1/cos` off-axis, so fog and cascade slices read from it would
+    // saturate towards the screen edges.
+    out.view_depth = dot(skinned_pos - camera.cam_pos, camera.cam_forward);
     return out;
 }
 
@@ -206,7 +222,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
     if (in.lit_flag > 0.5 && camera.cascade_params.y > 0.5) {
-        let view_depth = length(camera.cam_pos - in.world_pos);
+        let view_depth = in.view_depth;
         var slice: i32 = 0;
         if (view_depth > camera.cascade_splits.x) { slice = 1; }
         if (view_depth > camera.cascade_splits.y) { slice = 2; }
@@ -285,7 +301,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let lit = base * camera.ambient + (camera.light_color * diffuse + spec) * shadow + point_accum + in.emissive;
     var rgb = mix(base, lit, in.lit_flag);
-    let dist = length(camera.cam_pos - in.world_pos);
+    let dist = in.view_depth;
     let fog_t = clamp((dist - camera.fog_range.x) / max(camera.fog_range.y - camera.fog_range.x, 1e-6), 0.0, 1.0) * clamp(camera.fog.x, 0.0, 1.0);
     rgb = mix(rgb, camera.fog.yzw, fog_t * in.lit_flag);
     let e = camera.fog_range.z;
@@ -313,7 +329,7 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
     let x = f32((index << 1u) & 2u) * 2.0 - 1.0;
     let y = f32(index & 2u) * 2.0 - 1.0;
     out.pos = vec4<f32>(x, -y, 0.0, 1.0);
-    out.uv = vec2<f32>(f32((index << 1u) & 2u), 1.0 - f32(index & 2u));
+    out.uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
     return out;
 }
 
@@ -356,6 +372,11 @@ struct CameraUniform {
     fog_range: [f32; 4],
     cam_pos: [f32; 3],
     _pad2: f32,
+    /// Unit vector the camera looks along. Fog and cascade slices are
+    /// measured as depth along it, so it must come from the same snapshot
+    /// as [`SceneBatch::set_camera_pos`].
+    cam_forward: [f32; 3],
+    _pad3: f32,
     shadow_vp: [[f32; 4]; 4],
     /// (strength, enabled flag, bias, unused).
     shadow_params: [f32; 4],
@@ -474,7 +495,7 @@ const VERTEX_ATTRIBUTES: &[wgpu::VertexAttribute] = &[
     },
 ];
 
-const _: () = assert!(size_of::<CameraUniform>() == 816);
+const _: () = assert!(size_of::<CameraUniform>() == 832);
 
 /// Lowers a material's shading uniform into the GPU block, resolving the
 /// texture page each unit samples.
@@ -939,6 +960,8 @@ impl SceneBatch {
                 fog_range: [100.0, 600.0, 1.0, 0.0],
                 cam_pos: [0.0, 0.0, 0.0],
                 _pad2: 0.0,
+                cam_forward: [0.0, 0.0, -1.0],
+                _pad3: 0.0,
                 shadow_vp: Mat4::IDENTITY.to_cols_array_2d(),
                 shadow_params: [1.0, 0.0, 0.001, 0.0],
                 shadow_texel: [1.0 / 1024.0, 1.0 / 1024.0, 0.0, 0.0],
@@ -1003,6 +1026,13 @@ impl SceneBatch {
     pub fn set_camera_pos(&mut self, pos: [f32; 3]) {
         self.camera_pos = pos;
         self.camera.cam_pos = pos;
+    }
+
+    /// Unit vector the camera looks along, from the same snapshot as
+    /// [`SceneBatch::set_camera_pos`]. Fog and cascade splits are depth
+    /// along this axis, not range from the eye.
+    pub fn set_camera_forward(&mut self, forward: [f32; 3]) {
+        self.camera.cam_forward = forward;
     }
 
     /// Groups culled by the last [`SceneBatch::finish`].
@@ -1468,7 +1498,7 @@ impl SceneBatch {
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             });
             let buffers = [Some(self.vertex_buffer_layout())];
-            let pipeline = |_depth_test: bool, transparent: bool| {
+            let pipeline = |depth_test: bool, transparent: bool| {
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("repame_view3d_material_pipeline"),
                     layout: Some(&layout),
@@ -1501,7 +1531,11 @@ impl SceneBatch {
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: wgpu::TextureFormat::Depth24PlusStencil8,
                         depth_write_enabled: Some(!transparent),
-                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        depth_compare: Some(if depth_test {
+                            wgpu::CompareFunction::LessEqual
+                        } else {
+                            wgpu::CompareFunction::Always
+                        }),
                         stencil: wgpu::StencilState::default(),
                         bias: wgpu::DepthBiasState::default(),
                     }),
@@ -2164,7 +2198,7 @@ impl SceneBatch {
         self.culled = 0;
         self.stats = super::stats::FrameStats::new();
         self.stats.culled_groups = self.culled as u32;
-        self.stats.passes = 1;
+        self.stats.passes = 1 + self.passes.len() as u32;
         let planes = Self::frustum_planes(&self.view_proj);
         let culling = self.view_proj != Mat4::IDENTITY;
         let eye = glam::Vec3::from(self.camera_pos);
@@ -2868,7 +2902,7 @@ impl SceneBatch {
                     format: wgpu::TextureFormat::Depth24PlusStencil8,
                     depth_write_enabled: Some(!transparent),
                     depth_compare: Some(if depth_test {
-                        wgpu::CompareFunction::Less
+                        wgpu::CompareFunction::LessEqual
                     } else {
                         wgpu::CompareFunction::Always
                     }),
@@ -3069,7 +3103,6 @@ fn vs_main(
             point_edge: cube_edge,
             point_faces: None,
             skin_buffer,
-            skin_cap: skin_slots,
             verts: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("repame_view3d_verts"),
                 size: 64,
@@ -3296,9 +3329,6 @@ struct SceneEntry {
     /// `upload_all` from the staged points. `None` = cube pass off.
     point_faces: Option<[[[f32; 4]; 4]; 6]>,
     skin_buffer: wgpu::Buffer,
-    /// Allocated joint-matrix capacity. Part of the scene key, so a frame
-    /// needing more slots rebuilds the pipelines that bind this buffer.
-    skin_cap: usize,
     verts: wgpu::Buffer,
     vert_cap: usize,
     indices: wgpu::Buffer,
@@ -3337,7 +3367,12 @@ pub fn prepare_scene_with_id(
     h: u32,
     clear: [f32; 4],
 ) {
-    DepthComposite::get(resources).ensure(device, screen, id, w, h);
+    if let Err(err) = DepthComposite::get(resources).ensure(device, screen, id, w, h) {
+        // Without a target the scene would draw into the previous frame's
+        // pixels, which reads as a frozen viewport rather than a failure.
+        log::error!("scene_batch[{id}]: offscreen target unavailable: {err:#}");
+        return;
+    }
     // Snapshot the draw state into owned bind groups: pipelines and buffers
     // shared resources: clone the handles, then end the borrow
     // before beginning the mutable scene pass.
@@ -3373,6 +3408,18 @@ pub fn prepare_scene_with_id(
         pipeline_transparent_flat: wgpu::RenderPipeline,
         ranges: Vec<DrawRange>,
     }
+    // A frame whose groups all flattened away still has to clear the scene
+    // target: `ensure` leaves a matching target untouched, and `paint` blits
+    // whatever is in it, so skipping the clear re-presents the last frame.
+    let flat = resources
+        .get_mut::<SceneResources>()
+        .and_then(|all| all.batches.get_mut(id))
+        .is_some_and(|res| res.last_ranges.is_empty());
+    if flat {
+        drop(DepthComposite::get(resources).begin_scene(id, encoder, clear));
+        return;
+    }
+
     let snapshot: Option<Snapshot> = {
         let Some(all) = resources.get_mut::<SceneResources>() else {
             return;
@@ -3497,7 +3544,7 @@ pub fn prepare_scene_with_id(
         spass.set_vertex_buffer(0, snap.verts.slice(..));
         spass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
         for r in &snap.ranges {
-            if !r.transparent && r.depth_test {
+            if r.pass == 0 && !r.transparent && r.depth_test {
                 spass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
             }
         }
@@ -3545,7 +3592,7 @@ pub fn prepare_scene_with_id(
             cpass.set_vertex_buffer(0, snap.verts.slice(..));
             cpass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
             for r in &snap.ranges {
-                if !r.transparent && r.depth_test {
+                if r.pass == 0 && !r.transparent && r.depth_test {
                     cpass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
                 }
             }
@@ -3590,7 +3637,7 @@ pub fn prepare_scene_with_id(
                 ppass.set_vertex_buffer(0, snap.verts.slice(..));
                 ppass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for r in &snap.ranges {
-                    if !r.transparent && r.depth_test {
+                    if r.pass == 0 && !r.transparent && r.depth_test {
                         ppass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
                     }
                 }
@@ -3933,6 +3980,7 @@ mod tests {
         let mut batch = SceneBatch::with_id("test.cull");
         batch.set_camera(cam.view_proj(aspect));
         batch.set_camera_pos(cam.eye().into());
+        batch.set_camera_forward(cam.forward().into());
         let near_tris = near.tri_count();
         batch.push_group(&near);
         batch.push_group(&far);
@@ -5452,6 +5500,7 @@ mod tests {
                 let mut batch = SceneBatch::with_id("test.blend");
                 batch.set_camera(self.cam.view_proj(1.0));
                 batch.set_camera_pos(self.cam.eye().into());
+                batch.set_camera_forward(self.cam.forward().into());
                 for g in &self.groups {
                     batch.push_group(g);
                 }
@@ -5594,6 +5643,7 @@ mod tests {
                 let mut batch = SceneBatch::with_id("test.fog");
                 batch.set_camera(self.cam.view_proj(1.0));
                 batch.set_camera_pos(self.cam.eye().into());
+                batch.set_camera_forward(self.cam.forward().into());
                 batch.set_light(self.light);
                 batch.push_group(&self.group);
                 batch.finish();
@@ -5745,6 +5795,7 @@ mod tests {
                 let mut batch = SceneBatch::with_id("test.shadow");
                 batch.set_camera(self.cam.view_proj(1.0));
                 batch.set_camera_pos(self.cam.eye().into());
+                batch.set_camera_forward(self.cam.forward().into());
                 batch.set_light(self.light);
                 batch.set_shadow(self.shadow, self.cam.target.into(), self.cam.dist);
                 for g in &self.groups {
@@ -5886,6 +5937,7 @@ mod tests {
                 let mut batch = SceneBatch::with_id("test.shadow.ground");
                 batch.set_camera(self.cam.view_proj(1.0));
                 batch.set_camera_pos(self.cam.eye().into());
+                batch.set_camera_forward(self.cam.forward().into());
                 batch.set_light(self.light);
                 batch.set_shadow(self.shadow, self.cam.target.into(), self.cam.dist);
                 for g in scene_groups().iter().take(1) {
@@ -6100,6 +6152,7 @@ mod tests {
                 let mut batch = SceneBatch::with_id(id);
                 batch.set_camera(self.cam.view_proj(1.0));
                 batch.set_camera_pos(self.cam.eye().into());
+                batch.set_camera_forward(self.cam.forward().into());
                 batch.set_light(super::SceneLight {
                     direction: [0.0, 1.0, 0.0],
                     color: [1.0, 1.0, 1.0],
@@ -6239,6 +6292,7 @@ mod tests {
                 let mut batch = SceneBatch::with_id("test.cascade");
                 batch.set_camera(self.cam.view_proj(1.0));
                 batch.set_camera_pos(self.cam.eye().into());
+                batch.set_camera_forward(self.cam.forward().into());
                 batch.set_rig(
                     &self.rig,
                     self.cam.eye().into(),
@@ -6415,6 +6469,7 @@ mod tests {
                 let mut batch = SceneBatch::with_id("test.point");
                 batch.set_camera(self.cam.view_proj(1.0));
                 batch.set_camera_pos(self.cam.eye().into());
+                batch.set_camera_forward(self.cam.forward().into());
                 batch.set_rig(
                     &self.rig,
                     self.cam.eye().into(),

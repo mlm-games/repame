@@ -555,6 +555,7 @@ impl WgpuCallback for GpuViewport3d {
         let mut batch = SceneBatch::with_desc(self.batch_id.clone(), desc);
         batch.set_camera(self.input.cam.view_proj(aspect));
         batch.set_camera_pos(self.input.cam.eye().into());
+        batch.set_camera_forward(self.input.cam.forward().into());
         match &self.input.rig {
             Some(rig) => {
                 let vp = self.input.cam.view_proj(aspect);

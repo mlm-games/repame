@@ -1613,9 +1613,9 @@ impl SkinnedDraw {
         })
     }
 
-    /// CPU reference: blend one bind vertex by the palette (mirrors the
-    /// WGSL `skin_vertex` exactly, pinned by tests). Returns
-    /// (position, normal).
+    /// CPU reference: blend one bind vertex by the palette. Returns
+    /// (position, normal). Matches the vertex stage in `render.rs`: same
+    /// per-vertex renormalisation, same zero-length fallback.
     pub fn blend_vertex(&self, index: usize) -> Option<([f32; 3], [f32; 3])> {
         let pos = Vec3::from(*self.mesh.positions.get(index)?);
         let nrm = Vec3::from(*self.mesh.normals.get(index).unwrap_or(&[0.0, 1.0, 0.0]));

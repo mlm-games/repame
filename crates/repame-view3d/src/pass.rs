@@ -184,6 +184,9 @@ pub enum PassError {
     DuplicateTarget,
     TooManyTargets,
     SizeMismatch,
+    /// More than one pass claims the screen. Only the first is composited,
+    /// so the rest render every frame and are never seen.
+    MultiplePresenting,
 }
 
 /// Hardware ceiling on simultaneously bound targets in one pass list.
@@ -195,7 +198,14 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
         return Err(PassError::TooManyTargets);
     }
     let mut names: Vec<(&str, &RenderTarget)> = Vec::with_capacity(passes.len());
+    let mut presenting = 0usize;
     for pass in passes {
+        if pass.presents {
+            presenting += 1;
+            if presenting > 1 {
+                return Err(PassError::MultiplePresenting);
+            }
+        }
         if pass.target.width == 0 || pass.target.height == 0 {
             return Err(PassError::ZeroSized);
         }

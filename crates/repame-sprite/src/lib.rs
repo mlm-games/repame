@@ -315,6 +315,16 @@ pub enum PickEvent {
         screen: [f32; 2],
         button: repose_core::input::PointerButton,
     },
+    /// Pointer released, always. [`PickEvent::Click`] is gated behind
+    /// [`click_within_slop_dp`], so a drag that ends far from where it started
+    /// emits no click at all; a game that drags something has no other way to
+    /// learn that the drag ended. Emitted before [`PickEvent::Click`], and
+    /// whether or not a click follows.
+    Release {
+        world: Vec2,
+        screen: [f32; 2],
+        button: repose_core::input::PointerButton,
+    },
     Hover {
         world: Vec2,
         /// Window-physical px (y-down), same space as `Press.screen`.
@@ -902,6 +912,16 @@ pub fn Viewport2dShared(
         .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
             let start = press_up.borrow_mut().remove(&ev.id.0);
+            {
+                let g = release_geom.get();
+                let world = pick_world([p.x, p.y], g, world_size);
+                let w = ev.position_in_window();
+                on_up_click(PickEvent::Release {
+                    world: Vec2::new(world[0], world[1]),
+                    screen: [w.x, w.y],
+                    button: button_of(&ev),
+                });
+            }
             if let Some(start) = start
                 && click_within_slop_dp(start, [p.x, p.y], release_geom.get().density)
             {
@@ -1189,6 +1209,16 @@ fn viewport2d_gpu_with_id_shared(
         .on_pointer_up(move |ev: repose_core::input::PointerEvent| {
             let p = ev.position;
             let start = press_up.lock().ok().and_then(|mut s| s.remove(&ev.id.0));
+            {
+                let g = release_geom.get();
+                let world = pick_world([p.x, p.y], g, world_size);
+                let w = ev.position_in_window();
+                on_up_click(PickEvent::Release {
+                    world: Vec2::new(world[0], world[1]),
+                    screen: [w.x, w.y],
+                    button: button_of(&ev),
+                });
+            }
             if let Some(start) = start
                 && click_within_slop_dp(start, [p.x, p.y], release_geom.get().density)
             {
@@ -1276,7 +1306,10 @@ impl WgpuCallback for GpuViewport {
         if let Some(bg) = self.input.background
             && !composite
         {
-            let words = [bg[0], bg[1], bg[2], bg[3]];
+            // `background` is display-referred, same as a sprite tint, and the
+            // target is `Rgba8UnormSrgb`, so it has to be linearized here or the
+            // hardware re-encodes it and dark colours wash out.
+            let words = rgba8(bg).to_linear();
             self.bg.prepare_with(
                 device,
                 queue,
@@ -1289,7 +1322,7 @@ impl WgpuCallback for GpuViewport {
         if !self.overlay_separate
             && let Some(ov) = self.input.overlay_color
         {
-            let words = [ov[0], ov[1], ov[2], ov[3]];
+            let words = rgba8(ov).to_linear();
             self.overlay.prepare_with(
                 device,
                 queue,
@@ -1804,6 +1837,113 @@ mod tests {
         };
         assert_eq!(at(8, 8), [255, 0, 0, 255], "overlay covers background");
         assert_eq!(at(128, 128), [255, 0, 0, 255], "overlay covers sprite");
+    }
+
+    #[test]
+    fn single_layer_atlas_draws_tinted_sprites() {
+        // A one-layer atlas must be a plain D2 texture, not a one-element
+        // D2Array: GL/ANGLE assumes D2 for it and then samples the array view
+        // as black, which silently erases every sprite with no validation
+        // error. Guards the shape choice for the layout, the view and the
+        // shader together, since they only agree as a set.
+        assert_eq!(crate::batch::atlas_shape(1), (wgpu::TextureViewDimension::D2, false));
+        assert_eq!(crate::batch::atlas_shape(4), (wgpu::TextureViewDimension::D2Array, true));
+        assert!(
+            crate::batch::sprite_shader(1).contains("texture_2d<") && !crate::batch::sprite_shader(1).contains("texture_2d_array"),
+            "single-layer shader samples a 2d atlas"
+        );
+        assert!(
+            crate::batch::sprite_shader(4).contains("texture_2d_array"),
+            "multi-layer shader samples an array atlas"
+        );
+
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, offscreen::OffscreenRenderer};
+        let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SKIP single-layer atlas test (no GPU): {e}");
+                return;
+            }
+        };
+        // A 1x1 white cell at the origin, tinted: the exact shape that came
+        // back black.
+        let input = FrameInput {
+            cam: Camera2d {
+                center: Vec2::new(32.0, 32.0),
+                offset: Vec2::ZERO,
+                units_per_pixel: 1.0,
+                zoom: 1.0,
+                roll: 0.0,
+                fit: FitMode::Keep,
+            },
+            world_size: [64.0, 64.0],
+            viewport_dp: [64.0, 64.0],
+            sprites: vec![SpriteInstance {
+                center: Vec2::new(32.0, 32.0),
+                size: Vec2::new(32.0, 32.0),
+                uv_min: Vec2::new(0.5 / 64.0, 0.5 / 64.0),
+                uv_max: Vec2::new(0.5 / 64.0, 0.5 / 64.0),
+                color: [1.0, 0.0, 0.0, 1.0],
+                ..Default::default()
+            }],
+            background: Some([0.0, 0.0, 1.0, 1.0]),
+            ..Default::default()
+        };
+        let geom = Arc::new(Mutex::new(FrameGeom {
+            fit: (1.0, 0.0, 0.0),
+            look: [0.0, 0.0],
+            density: 1.0,
+            viewport_px: [64.0, 64.0],
+            roll: 0.0,
+            pivot: [32.0, 32.0],
+        }));
+        let payload = GpuViewport {
+            input: Arc::new(input),
+            geom,
+            batch_id: "test.viewport2d.single_layer".to_string(),
+            uploads: Arc::from(vec![AtlasUpload {
+                page: 0,
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+                rgba: vec![255, 255, 255, 255],
+            }]),
+            desc: BatchDesc {
+                layer_size: 64,
+                layers: 1,
+                filter: TextureFilter::Linear,
+                ..Default::default()
+            },
+            overlay_separate: false,
+            bg: FullscreenPass::new(
+                "test.viewport2d.single_layer.background",
+                fullscreen::SOLID_WGSL,
+                FullscreenDesc { texture_slots: 0, filter: TextureFilter::Nearest },
+            ),
+            overlay: FullscreenPass::new(
+                "test.viewport2d.single_layer.overlay",
+                fullscreen::SOLID_WGSL,
+                FullscreenDesc { texture_slots: 0, filter: TextureFilter::Nearest },
+            ),
+        };
+        let scene = Scene {
+            clear_color: Color::from_rgba(0, 0, 0, 255),
+            nodes: vec![SceneNode::Callback {
+                rect: Rect { x: 0.0, y: 0.0, w: 64.0, h: 64.0 },
+                payload: Callback::new(payload),
+            }],
+        };
+        let px = renderer
+            .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+            .expect("offscreen render");
+        let i = ((32 * 64 + 32) * 4) as usize;
+        assert_eq!(
+            [px[i], px[i + 1], px[i + 2], px[i + 3]],
+            [255, 0, 0, 255],
+            "single-layer atlas sprite must draw its tint"
+        );
     }
 
     #[test]

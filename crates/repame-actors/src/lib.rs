@@ -34,6 +34,12 @@ pub fn host_from_str(source: &str) -> Result<PlayerHostRef, PlayerError> {
     Ok(Rc::new(RefCell::new(PlayerHost::from_ren_str(source)?)))
 }
 
+/// Host a packed `.renb` rig. Same rig, a fraction of the bytes: use this for
+/// shipped art and keep the `.ren` as the source of truth.
+pub fn host_from_bytes(bytes: &[u8]) -> Result<PlayerHostRef, PlayerError> {
+    Ok(Rc::new(RefCell::new(PlayerHost::from_ren_bytes(bytes)?)))
+}
+
 /// How the artboard maps onto the surface.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ActorFit {

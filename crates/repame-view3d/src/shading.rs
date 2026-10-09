@@ -192,7 +192,7 @@ pub fn material_fragment(model: &ShadingModel) -> Result<String, ShadingError> {
             body.push_str(&format!("    {line}\n"));
         }
     }
-    body.push_str("    let view = length(camera.cam_pos - in.world_pos);\n");
+    body.push_str("    let view = in.view_depth;\n");
     body.push_str("    let fog_t = clamp((view - material.fog_range.x) / max(material.fog_range.y - material.fog_range.x, 1e-6), 0.0, 1.0) * material.fog.a;\n");
     body.push_str(
         "    outColor = mix(outColor, vec4<f32>(material.fog.rgb, outColor.a), fog_t);\n",

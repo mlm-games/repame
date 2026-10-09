@@ -451,24 +451,36 @@ impl ShadingModel {
             return Err(ShadingError::TooManyLights);
         }
         let kc = |i: u8| usize::from(i) < MAX_KCOLORS;
+        let mut sampled = [false; MAX_TEX_UNITS];
         for stage in &self.stages {
             if usize::from(stage.tex_unit) >= MAX_TEX_UNITS {
                 return Err(ShadingError::TexUnitOutOfRange(stage.tex_unit));
             }
-            let check = |arg: TevArg, alpha: bool| -> Result<(), ShadingError> {
-                match arg {
-                    TevArg::KColor(index) if !kc(index) => {
-                        Err(ShadingError::KColorOutOfRange(index))
-                    }
-                    TevArg::TexColorOf(unit) if usize::from(unit) >= MAX_TEX_UNITS => {
-                        Err(ShadingError::TexUnitOutOfRange(unit))
-                    }
-                    TevArg::TexColor | TevArg::TexColorOf(_) if alpha => {
-                        Err(ShadingError::AlphaArgTakesColor)
-                    }
-                    _ => Ok(()),
+            sampled[usize::from(stage.tex_unit)] = true;
+        }
+        let check = |arg: TevArg, alpha: bool| -> Result<(), ShadingError> {
+            match arg {
+                TevArg::KColor(index) if !kc(index) => {
+                    Err(ShadingError::KColorOutOfRange(index))
                 }
-            };
+                TevArg::TexColorOf(unit) if usize::from(unit) >= MAX_TEX_UNITS => {
+                    Err(ShadingError::TexUnitOutOfRange(unit))
+                }
+                // The GPU binds one page per unit from the stages that sample
+                // it, and the lowering only declares `texN` for those units.
+                // An unsampled unit would emit a read of a binding that does
+                // not exist, so the shader fails to compile at pipeline
+                // creation rather than rendering something plausible.
+                TevArg::TexColorOf(unit) if !sampled[usize::from(unit)] => {
+                    Err(ShadingError::TexUnitNotSampled(unit))
+                }
+                TevArg::TexColor | TevArg::TexColorOf(_) if alpha => {
+                    Err(ShadingError::AlphaArgTakesColor)
+                }
+                _ => Ok(()),
+            }
+        };
+        for stage in &self.stages {
             for arg in stage.color_arg {
                 check(arg, false)?;
             }
@@ -489,12 +501,25 @@ impl ShadingModel {
         Ok(())
     }
 
-    /// Stable identity of the generated shader, for pipeline caching.
+    /// Stable identity of a registered material.
+    ///
+    /// A slot owns both the lowered shader *and* the constant uniform written
+    /// for it, so every field that reaches either must be in here. Hashing
+    /// only `lights.len()` and the fog window made two materials that differ
+    /// in colour collapse onto one slot, and the second one then rendered
+    /// with the first one's `kcolors` and `ao`.
     pub fn cache_key(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         self.stages.hash(&mut hasher);
-        self.lights.len().hash(&mut hasher);
+        for light in &self.lights {
+            light.colors.hash(&mut hasher);
+            light.direction.map(f32::to_bits).hash(&mut hasher);
+            light.position.map(f32::to_bits).hash(&mut hasher);
+            light.angles.map(f32::to_bits).hash(&mut hasher);
+            light.distance.map(f32::to_bits).hash(&mut hasher);
+        }
         self.ambient.hash(&mut hasher);
+        self.ao.to_bits().hash(&mut hasher);
         self.material_fog.enabled.hash(&mut hasher);
         self.material_fog.near.to_bits().hash(&mut hasher);
         self.material_fog.far.to_bits().hash(&mut hasher);
@@ -510,6 +535,8 @@ pub enum ShadingError {
     TooManyStages,
     TooManyLights,
     TexUnitOutOfRange(u8),
+    /// An argument reads a unit no stage samples, so no page is bound for it.
+    TexUnitNotSampled(u8),
     KColorOutOfRange(u8),
     /// Texture color argument used in an alpha channel; alpha reads texel alpha.
     AlphaArgTakesColor,
@@ -522,6 +549,10 @@ impl std::fmt::Display for ShadingError {
             Self::TooManyStages => write!(f, "shading model exceeds {MAX_TEV_STAGES} stages"),
             Self::TooManyLights => write!(f, "shading model exceeds {MAX_LIGHTS} lights"),
             Self::TexUnitOutOfRange(unit) => write!(f, "texture unit {unit} out of range"),
+            Self::TexUnitNotSampled(unit) => write!(
+                f,
+                "texture unit {unit} is read by an argument but sampled by no stage"
+            ),
             Self::KColorOutOfRange(index) => write!(f, "constant color {index} out of range"),
             Self::AlphaArgTakesColor => write!(
                 f,

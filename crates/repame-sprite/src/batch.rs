@@ -508,7 +508,35 @@ fn sampler_desc(filter: TextureFilter) -> wgpu::SamplerDescriptor<'static> {
     }
 }
 
-fn create_atlas_layout(device: &wgpu::Device, filter: TextureFilter) -> AtlasLayout {
+/// The atlas view dimension and the shader that matches it.
+///
+/// A single-layer atlas is a plain `D2` texture. GL/ANGLE (which is what a
+/// browser actually hands wgpu) assumes `D2` for a one-layer texture and
+/// misreports a `D2Array` view of it, after which sampling returns black and
+/// every sprite disappears with no validation error anywhere. So a one-layer
+/// atlas is never made an array in the first place.
+pub(crate) fn atlas_shape(layers: u32) -> (wgpu::TextureViewDimension, bool) {
+    if layers <= 1 {
+        (wgpu::TextureViewDimension::D2, false)
+    } else {
+        (wgpu::TextureViewDimension::D2Array, true)
+    }
+}
+
+pub(crate) fn sprite_shader(layers: u32) -> &'static str {
+    if atlas_shape(layers).1 {
+        include_str!("../shaders/sprite.wgsl")
+    } else {
+        include_str!("../shaders/sprite_single.wgsl")
+    }
+}
+
+fn create_atlas_layout(
+    device: &wgpu::Device,
+    filter: TextureFilter,
+    layers: u32,
+) -> AtlasLayout {
+    let (dimension, _) = atlas_shape(layers);
     let sampler = device.create_sampler(&sampler_desc(filter));
     let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("sprite_batch_tex_bgl"),
@@ -518,7 +546,7 @@ fn create_atlas_layout(device: &wgpu::Device, filter: TextureFilter) -> AtlasLay
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    view_dimension: dimension,
                     multisampled: false,
                 },
                 count: None,
@@ -553,8 +581,9 @@ fn create_atlas(device: &wgpu::Device, key: AtlasKey, layout: &AtlasLayout) -> A
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    let (dimension, _) = atlas_shape(descriptor.layers);
     let view = texture.create_view(&wgpu::TextureViewDescriptor {
-        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        dimension: Some(dimension),
         ..Default::default()
     });
     let tex_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -614,7 +643,7 @@ impl SpriteBatch {
             .expect("batch resources initialized")
             .layouts
             .entry(descriptor)
-            .or_insert_with(|| Arc::new(create_atlas_layout(device, descriptor.filter)))
+            .or_insert_with(|| Arc::new(create_atlas_layout(device, descriptor.filter, descriptor.layers)))
             .clone();
         let atlas = resources
             .get_mut::<BatchResources>()
@@ -650,7 +679,7 @@ impl SpriteBatch {
         }
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sprite_batch"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sprite.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(sprite_shader(self.desc.layers).into()),
         });
         let corners = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("sprite_batch_corners"),

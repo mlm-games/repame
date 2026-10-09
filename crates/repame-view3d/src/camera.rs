@@ -49,6 +49,15 @@ impl OrbitCamera {
         self.target + Vec3::new(cp * cy, sp, cp * sy) * self.dist
     }
 
+    /// Unit vector the camera looks along, `target - eye` normalized.
+    ///
+    /// View depth is measured along this, not as the distance from the eye:
+    /// fog and cascade splits are both depths, so an off-axis fragment at the
+    /// same depth must read the same value as one under the eye.
+    pub fn forward(&self) -> Vec3 {
+        (self.target - self.eye()).normalize_or(-Vec3::Z)
+    }
+
     pub fn view_matrix(&self) -> Mat4 {
         look_at_mat4(self.eye(), self.target, Vec3::Y)
     }

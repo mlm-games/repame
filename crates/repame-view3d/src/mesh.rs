@@ -62,6 +62,10 @@ pub struct MeshGroup {
     pub alpha_cutoff: f32,
     /// Surface material (lit groups only; flat groups ignore it).
     pub material: Material,
+    /// Index into the frame's material list, selecting one
+    /// [`crate::ShadingModel`]. `usize::MAX` (the default) keeps the legacy
+    /// path, which lights and textures without a declared program.
+    pub material_index: usize,
     /// Indices into positions/colors/normals/uvs.
     pub indices: Vec<u32>,
     /// Opaque geometry occludes when true. False draws on top.
@@ -82,6 +86,9 @@ impl Default for MeshGroup {
             alpha: 1.0,
             alpha_cutoff: 0.0,
             material: Material::default(),
+            // Index into the frame's material list. `usize::MAX` keeps the
+            // legacy path; anything else selects that program.
+            material_index: usize::MAX,
             indices: Vec::new(),
             depth_test: false,
         }

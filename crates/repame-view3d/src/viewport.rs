@@ -42,6 +42,12 @@ pub struct Frame3d {
     /// World-space mesh groups. Depth-tested groups occlude; groups with
     /// `depth_test = false` always draw (ground decals, editor gizmos).
     pub groups: Vec<MeshGroup>,
+    /// Declared material programs for this frame, one per distinct
+    /// [`crate::ShadingModel`]. A group selects one by index through
+    /// [`MeshGroup::material_index`]; the viewport registers each entry and
+    /// stamps the resulting slot. Empty leaves every group on the legacy
+    /// path.
+    pub materials: Vec<crate::ShadingModel>,
     /// Per-frame texture uploads into the batch array. Applied exactly
     /// once (sprite-batch `AtlasUpload` contract).
     pub uploads: Vec<SceneUpload>,
@@ -87,6 +93,7 @@ impl Default for Frame3d {
         Self {
             cam: OrbitCamera::default(),
             groups: Vec::new(),
+            materials: Vec::new(),
             uploads: Vec::new(),
             desc: BatchDesc::default(),
             light: SceneLight::default(),
@@ -589,8 +596,23 @@ impl WgpuCallback for GpuViewport3d {
                 );
             }
         }
+        let slots: Vec<u32> = self
+            .input
+            .materials
+            .iter()
+            .map(|model| match model.validate() {
+                Ok(()) => batch.register_material(model),
+                Err(_) => {
+                    log::warn!("viewport: dropping invalid shading model");
+                    0
+                }
+            })
+            .collect();
         for g in &self.input.groups {
-            batch.push_group(g);
+            match g.material_index {
+                index if index < slots.len() => batch.push_group_with_material(g, slots[index]),
+                _ => batch.push_group(g),
+            }
         }
         for s in &self.input.skinned {
             batch.push_skinned(s);

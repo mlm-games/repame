@@ -227,6 +227,12 @@ pub enum TevArg {
     Reg1,
     /// Output register 2, in the channel being computed.
     Reg2,
+    /// Rasterized color: the incoming vertex tint, as the console's `RASC`
+    /// reads it. The seed every stage accumulates onto, so stage 0 is usually
+    /// `d + RASC`.
+    Rasc,
+    /// Rasterized alpha: the alpha of that same incoming tint.
+    Rasa,
     /// Constant color register.
     KColor(u8),
     /// Sampled texture color of the stage's unit.

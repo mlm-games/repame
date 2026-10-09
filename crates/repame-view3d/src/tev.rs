@@ -90,6 +90,7 @@ fn arg_value(
     texels: &[Option<TexInput>],
     regs: &[[f32; 4]; 4],
     kcolors: &KColors,
+    raster: &[f32; 4],
 ) -> f32 {
     let texel = |other: u8| {
         texels
@@ -111,6 +112,14 @@ fn arg_value(
         TevArg::Reg0 => regs[1][channel],
         TevArg::Reg1 => regs[2][channel],
         TevArg::Reg2 => regs[3][channel],
+        TevArg::Rasc => {
+            if channel == 3 {
+                raster[3]
+            } else {
+                raster[channel]
+            }
+        }
+        TevArg::Rasa => raster[3],
         TevArg::KColor(index) => kcolors
             .get(usize::from(index))
             .copied()
@@ -157,9 +166,17 @@ pub fn evaluate_stages(model: &ShadingModel, incoming: Rgba, texels: &[Option<Te
         let mut result = [0.0_f32; 4];
         for (channel, out) in result.iter_mut().enumerate() {
             let terms = stage_terms(stage, channel);
-            let args = terms
-                .args
-                .map(|arg| arg_value(arg, stage.tex_unit, channel, texels, &regs, &model.kcolors));
+            let args = terms.args.map(|arg| {
+                arg_value(
+                    arg,
+                    stage.tex_unit,
+                    channel,
+                    texels,
+                    &regs,
+                    &model.kcolors,
+                    &incoming,
+                )
+            });
             *out = combine_channel(&terms, args);
         }
         let color_at = stage_terms(stage, 0).dest.index();
@@ -295,6 +312,14 @@ fn arg_wgsl(arg: TevArg, unit: usize, channel: usize) -> String {
         TevArg::Reg0 => format!("tev_regs[1].{slot}"),
         TevArg::Reg1 => format!("tev_regs[2].{slot}"),
         TevArg::Reg2 => format!("tev_regs[3].{slot}"),
+        TevArg::Rasc => {
+            if channel == 3 {
+                "lit_in.a".to_string()
+            } else {
+                format!("lit_in.{slot}")
+            }
+        }
+        TevArg::Rasa => "lit_in.a".to_string(),
         TevArg::KColor(index) => format!("kcolor[{}].{slot}", index.min(3)),
         TevArg::TexColor => {
             if channel == 3 {
@@ -377,4 +402,33 @@ pub fn wgsl_program(model: &ShadingModel) -> String {
     }
     body.push_str("outColor = tev_out;\n");
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::material::{ShadingModel, TevArg, TevMode};
+
+    /// `Rasc`/`Rasa` read the incoming tint, which the hardware's stage 0
+    /// seeds before any texture enters. The GPU names it `lit_in`; if the two
+    /// paths ever disagree on where it comes from, every untextured but
+    /// tinted surface shifts silently, so both are pinned here.
+    #[test]
+    fn raster_args_read_the_incoming_tint() {
+        let mut model = ShadingModel::default();
+        let mut stage = TevStage::with_mode(0, TevMode::Modulate);
+        // `d + RASC`: the console's stage-0 accumulator for rasterized color.
+        stage.color_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::Rasc];
+        stage.alpha_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::Rasa];
+        model.stages = vec![stage];
+
+        let incoming = [0.25, 0.5, 0.75, 0.5];
+        let out = evaluate_stages(&model, incoming, &[]);
+        assert_eq!(out, incoming, "raster args must pass the tint through");
+        assert!(model.validate().is_ok(), "raster args are valid in both channels");
+
+        let wgsl = wgsl_program(&model);
+        assert!(wgsl.contains("lit_in.g"), "color must read the tint: {wgsl}");
+        assert!(wgsl.contains("lit_in.a"), "alpha must read its alpha: {wgsl}");
+    }
 }

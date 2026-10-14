@@ -163,8 +163,9 @@ impl ShadedBatch {
 ///
 /// The stage samples the texels the program reads, lights the vertex color
 /// with the frame's sun (same inputs the legacy path uses, no shadow term),
-/// then runs the combinator chain over that result and applies material fog
-/// and the renderer's exposure curve - the order [`tev::evaluate`] uses.
+/// then runs the combinator chain over that result and applies material fog,
+/// matching [`tev::evaluate`]. The exposure curve below is frame state, not
+/// model state, so it has no place in that reference.
 pub fn material_fragment(model: &ShadingModel) -> Result<String, ShadingError> {
     model.validate()?;
     let mut units: Vec<u8> = Vec::new();
@@ -197,8 +198,10 @@ pub fn material_fragment(model: &ShadingModel) -> Result<String, ShadingError> {
     body.push_str(
         "    outColor = mix(outColor, vec4<f32>(material.fog.rgb, outColor.a), fog_t);\n",
     );
-    body.push_str("    let e = camera.fog_range.z;\n");
-    body.push_str("    outColor = vec4<f32>((outColor.rgb * e) / (outColor.rgb * (e - 1.0) + vec3<f32>(1.0)), outColor.a);\n");
+    body.push_str(
+        "    let rgb = repame_tonemap(outColor.rgb, camera.fog_range.z, camera.fog_range.w);\n",
+    );
+    body.push_str("    outColor = vec4<f32>(rgb, outColor.a);\n");
     Ok(format!(
         "@fragment\nfn fs_main(in: VsOut) -> @location(0) vec4<f32> {{\n{body}    return outColor;\n}}\n"
     ))

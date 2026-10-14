@@ -4370,6 +4370,7 @@ dependencies = [
  "gltf",
  "image",
  "log",
+ "naga",
  "repame-input",
  "repose-core",
  "repose-render-wgpu",

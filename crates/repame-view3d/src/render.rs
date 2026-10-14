@@ -5,6 +5,35 @@
 //! Frustum cull runs per group in `finish`. `depth_test = false` overlays skip cull.
 const SCENE_TARGET_SAMPLE_COUNT: u32 = 1;
 const SHADER_PREFIX: &str = r#"
+fn repame_pbr_neutral(c: vec3<f32>) -> vec3<f32> {
+    let start_compression = 0.8 - 0.04;
+    let desaturation = 0.15;
+    var color = c;
+    let x = min(color.r, min(color.g, color.b));
+    let offset = select(0.04, x - 6.25 * x * x, x < 0.08);
+    color = color - vec3<f32>(offset);
+    let peak = max(color.r, max(color.g, color.b));
+    if (peak < start_compression) {
+        return color;
+    }
+    let d = 1.0 - start_compression;
+    let new_peak = 1.0 - d * d / (peak + d - start_compression);
+    color = color * (new_peak / peak);
+    let g = 1.0 - 1.0 / (desaturation * (peak - new_peak) + 1.0);
+    return mix(color, vec3<f32>(new_peak), g);
+}
+
+fn repame_tonemap(c: vec3<f32>, exposure: f32, method: f32) -> vec3<f32> {
+    let m = i32(round(method));
+    if (m == 0) {
+        return c;
+    }
+    if (m == 2) {
+        return repame_pbr_neutral(c * exposure);
+    }
+    return (c * exposure) / (c * (exposure - 1.0) + vec3<f32>(1.0));
+}
+
 struct Camera {
     view_proj: mat4x4<f32>,
     light_dir: vec3<f32>,
@@ -304,8 +333,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dist = in.view_depth;
     let fog_t = clamp((dist - camera.fog_range.x) / max(camera.fog_range.y - camera.fog_range.x, 1e-6), 0.0, 1.0) * clamp(camera.fog.x, 0.0, 1.0);
     rgb = mix(rgb, camera.fog.yzw, fog_t * in.lit_flag);
-    let e = camera.fog_range.z;
-    rgb = (rgb * e) / (rgb * (e - 1.0) + vec3<f32>(1.0));
+    rgb = repame_tonemap(rgb, camera.fog_range.z, camera.fog_range.w);
     return vec4<f32>(rgb, alpha);
 }
 "#;
@@ -581,8 +609,41 @@ pub struct SceneLight {
     pub fog_start: f32,
     /// Fog is full past here.
     pub fog_end: f32,
-    /// Reinhard exposure. 1.0 = off.
+    /// Exposure applied before the tone curve. 1.0 = off. `Reinhard` folds it
+    /// into the curve; the other methods scale the radiance by it first.
     pub exposure: f32,
+    /// Tone curve applied after fog.
+    pub tonemap: TonemapMethod,
+}
+
+/// Tone curve for the HDR resolve. `Reinhard` is the historical curve;
+/// `KhronosPbrNeutral` desaturates highlights without hue shift, which
+/// `Reinhard` does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TonemapMethod {
+    /// Identity, display-linear. Exposure is not applied.
+    None,
+    /// Extended Reinhard, `(c*e)/(c*(e-1)+1)`. Hue-shifts highlights.
+    Reinhard,
+    /// Khronos PBR Neutral: shoulder plus a desaturation toward the new peak.
+    /// Takes `exposure` as a pre-scale on radiance, not folded into a curve.
+    KhronosPbrNeutral,
+}
+
+impl TonemapMethod {
+    pub const fn index(self) -> f32 {
+        match self {
+            Self::None => 0.0,
+            Self::Reinhard => 1.0,
+            Self::KhronosPbrNeutral => 2.0,
+        }
+    }
+}
+
+impl Default for TonemapMethod {
+    fn default() -> Self {
+        Self::Reinhard
+    }
 }
 
 impl Default for SceneLight {
@@ -597,6 +658,7 @@ impl Default for SceneLight {
             fog_start: 100.0,
             fog_end: 600.0,
             exposure: 1.0,
+            tonemap: TonemapMethod::Reinhard,
         }
     }
 }
@@ -1105,7 +1167,7 @@ impl SceneBatch {
             } else {
                 1.0
             },
-            0.0,
+            light.tonemap.index(),
         ];
     }
 
@@ -3904,6 +3966,78 @@ fn paint_presenting<P: BlitRenderPass>(id: &str, rpass: &mut P, resources: &Call
 mod tests {
     use super::super::mesh::MeshGroup;
     use super::*;
+
+    fn parses(label: &str, src: &str) {
+        if let Err(e) = naga::front::wgsl::parse_str(src) {
+            panic!("{label} does not parse: {e:?}");
+        }
+    }
+
+    #[test]
+    fn every_generated_scene_shader_parses() {
+        parses("SHADER_PREFIX", SHADER_PREFIX);
+        parses("default_shader", &default_shader());
+        parses("FULLSCREEN_SHADER", FULLSCREEN_SHADER);
+        let model = crate::shading::material_fragment(&crate::material::ShadingModel::default())
+            .expect("default model validates");
+        parses("material_fragment", &(String::from(SHADER_PREFIX) + &model));
+    }
+
+    #[test]
+    fn tonemap_curves_differ_on_highlights() {
+        let src = default_shader();
+        assert!(src.contains("repame_tonemap("), "both paths must share it");
+        assert!(
+            src.contains("repame_pbr_neutral("),
+            "neutral curve is linked"
+        );
+        // The legacy path used to inline the Reinhard curve. If that ever
+        // comes back alongside the helper, the two can drift apart silently.
+        assert!(
+            !src.contains("(rgb * e) / (rgb * (e - 1.0)"),
+            "Reinhard must go through repame_tonemap, not an inline copy"
+        );
+        let fragment = crate::shading::material_fragment(&crate::material::ShadingModel::default())
+            .expect("default model validates");
+        assert!(fragment.contains("repame_tonemap("), "material path too");
+        assert!(!fragment.contains("(outColor.rgb * e)"), "no inline copy");
+    }
+
+    #[test]
+    fn reinhard_branch_is_the_unchanged_historical_curve() {
+        let src = default_shader();
+        let helper = src
+            .split("fn repame_tonemap(")
+            .nth(1)
+            .expect("helper is emitted");
+        let helper = helper.split('\n').take(10).collect::<Vec<_>>().join("\n");
+        assert!(
+            helper.contains("(c * exposure) / (c * (exposure - 1.0) + vec3<f32>(1.0))"),
+            "Reinhard must stay the exact pre-existing formula:\n{helper}"
+        );
+    }
+
+    #[test]
+    fn tonemap_method_reaches_the_uniform() {
+        let mut batch = SceneBatch::with_id("test.tonemap");
+        batch.set_camera(Mat4::IDENTITY);
+        for method in [
+            TonemapMethod::None,
+            TonemapMethod::Reinhard,
+            TonemapMethod::KhronosPbrNeutral,
+        ] {
+            batch.set_light(SceneLight {
+                tonemap: method,
+                ..SceneLight::default()
+            });
+            assert_eq!(
+                batch.camera.fog_range[3],
+                method.index(),
+                "{method:?} must survive the uniform pack"
+            );
+        }
+    }
+
     fn solid_box() -> MeshGroup {
         let mut g = MeshGroup {
             depth_test: true,

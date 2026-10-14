@@ -23,6 +23,13 @@ fn repame_pbr_neutral(c: vec3<f32>) -> vec3<f32> {
     return mix(color, vec3<f32>(new_peak), g);
 }
 
+// No dither here on purpose. These stages write linear radiance into an
+// `Rgba8UnormSrgb` target, so the encode is hardware-side at write time, and
+// sampling that target back decodes to linear again. A +/-0.5/255 perturbation
+// in linear space would be amplified by the sRGB transfer's 12.92 slope near
+// black, turning dither into visible speckle. Dither belongs after the
+// display encode, which means a framework-owned resolve into a non-sRGB
+// target, not a few lines in this shader.
 fn repame_tonemap(c: vec3<f32>, exposure: f32, method: f32) -> vec3<f32> {
     let m = i32(round(method));
     if (m == 0) {

@@ -320,6 +320,29 @@ fn encode_key(key: &Key) -> String {
         Key::Space => "Space".to_string(),
         Key::ShiftLeft => "ShiftLeft".to_string(),
         Key::ShiftRight => "ShiftRight".to_string(),
+        Key::ControlLeft => "ControlLeft".to_string(),
+        Key::ControlRight => "ControlRight".to_string(),
+        Key::AltLeft => "AltLeft".to_string(),
+        Key::AltRight => "AltRight".to_string(),
+        Key::MetaLeft => "MetaLeft".to_string(),
+        Key::MetaRight => "MetaRight".to_string(),
+        Key::CapsLock => "CapsLock".to_string(),
+        Key::NumLock => "NumLock".to_string(),
+        Key::ScrollLock => "ScrollLock".to_string(),
+        Key::Pause => "Pause".to_string(),
+        Key::PrintScreen => "PrintScreen".to_string(),
+        Key::ContextMenu => "ContextMenu".to_string(),
+        Key::NumpadEnter => "NumpadEnter".to_string(),
+        Key::MediaPlay => "MediaPlay".to_string(),
+        Key::MediaPause => "MediaPause".to_string(),
+        Key::MediaPlayPause => "MediaPlayPause".to_string(),
+        Key::MediaStop => "MediaStop".to_string(),
+        Key::MediaNext => "MediaNext".to_string(),
+        Key::MediaPrevious => "MediaPrevious".to_string(),
+        Key::VolumeUp => "VolumeUp".to_string(),
+        Key::VolumeDown => "VolumeDown".to_string(),
+        Key::VolumeMute => "VolumeMute".to_string(),
+        Key::Numpad(c) => format!("Numpad{}", *c as u32),
         Key::F(n) => format!("F{n}"),
         Key::Unknown => String::new(),
     }
@@ -367,7 +390,36 @@ fn decode_key(text: &str) -> Option<Key> {
         "Space" => Some(Key::Space),
         "ShiftLeft" => Some(Key::ShiftLeft),
         "ShiftRight" => Some(Key::ShiftRight),
+        "ControlLeft" => Some(Key::ControlLeft),
+        "ControlRight" => Some(Key::ControlRight),
+        "AltLeft" => Some(Key::AltLeft),
+        "AltRight" => Some(Key::AltRight),
+        "MetaLeft" => Some(Key::MetaLeft),
+        "MetaRight" => Some(Key::MetaRight),
+        "CapsLock" => Some(Key::CapsLock),
+        "NumLock" => Some(Key::NumLock),
+        "ScrollLock" => Some(Key::ScrollLock),
+        "Pause" => Some(Key::Pause),
+        "PrintScreen" => Some(Key::PrintScreen),
+        "ContextMenu" => Some(Key::ContextMenu),
+        "NumpadEnter" => Some(Key::NumpadEnter),
+        "MediaPlay" => Some(Key::MediaPlay),
+        "MediaPause" => Some(Key::MediaPause),
+        "MediaPlayPause" => Some(Key::MediaPlayPause),
+        "MediaStop" => Some(Key::MediaStop),
+        "MediaNext" => Some(Key::MediaNext),
+        "MediaPrevious" => Some(Key::MediaPrevious),
+        "VolumeUp" => Some(Key::VolumeUp),
+        "VolumeDown" => Some(Key::VolumeDown),
+        "VolumeMute" => Some(Key::VolumeMute),
         _ => {
+            if let Some(digit) = text
+                .strip_prefix("Numpad")
+                .and_then(|d| d.parse::<u32>().ok())
+                && let Some(c) = char::from_u32(digit)
+            {
+                return Some(Key::Numpad(c));
+            }
             if let Some(n) = text.strip_prefix('F').and_then(|n| n.parse::<u8>().ok())
                 && (1..=12).contains(&n)
             {
@@ -536,6 +588,41 @@ mod tests {
             assert_eq!(decode_keymap_entry(&text), entry, "round trip {text:?}");
         }
         assert_eq!(decode_keymap_entry("bogus"), KeymapEntry::None);
+    }
+
+    #[test]
+    fn every_key_variant_round_trips() {
+        let keys = [
+            Key::ControlLeft,
+            Key::ControlRight,
+            Key::AltLeft,
+            Key::AltRight,
+            Key::MetaLeft,
+            Key::MetaRight,
+            Key::CapsLock,
+            Key::NumLock,
+            Key::ScrollLock,
+            Key::Pause,
+            Key::PrintScreen,
+            Key::ContextMenu,
+            Key::NumpadEnter,
+            Key::Numpad('5'),
+            Key::Numpad('.'),
+            Key::MediaPlay,
+            Key::MediaPause,
+            Key::MediaPlayPause,
+            Key::MediaStop,
+            Key::MediaNext,
+            Key::MediaPrevious,
+            Key::VolumeUp,
+            Key::VolumeDown,
+            Key::VolumeMute,
+        ];
+        for key in keys {
+            let entry = KeymapEntry::Key(KeyChord::new(key.clone(), Modifiers::default()));
+            let text = encode_keymap_entry(&entry);
+            assert_eq!(decode_keymap_entry(&text), entry, "round trip {text:?}");
+        }
     }
 
     #[test]

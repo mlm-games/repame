@@ -173,7 +173,14 @@ fn arg_value(
             }
         }
         TevArg::Konst(sel) => konst_value(sel, channel, kcolors),
-        TevArg::TexAlpha => texel(unit).color[chan(tex_sel)],
+        TevArg::TexAlpha => {
+            let texel = texel(unit);
+            if chan(tex_sel) == 3 {
+                texel.alpha
+            } else {
+                texel.color[chan(tex_sel)]
+            }
+        }
         TevArg::LodFrac => texel(unit).lod_frac,
         TevArg::Stub => {
             if channel == 3 {
@@ -473,11 +480,20 @@ mod tests {
         let incoming = [0.25, 0.5, 0.75, 0.5];
         let out = evaluate_stages(&model, incoming, &[]);
         assert_eq!(out, incoming, "raster args must pass the tint through");
-        assert!(model.validate().is_ok(), "raster args are valid in both channels");
+        assert!(
+            model.validate().is_ok(),
+            "raster args are valid in both channels"
+        );
 
         let wgsl = wgsl_program(&model);
-        assert!(wgsl.contains("lit_in.g"), "color must read the tint: {wgsl}");
-        assert!(wgsl.contains("lit_in.a"), "alpha must read its alpha: {wgsl}");
+        assert!(
+            wgsl.contains("lit_in.g"),
+            "color must read the tint: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("lit_in.a"),
+            "alpha must read its alpha: {wgsl}"
+        );
     }
 
     /// `Konst` covers the rest of the hardware's constant-color selectors, and
@@ -504,7 +520,13 @@ mod tests {
         assert_eq!(out[3], 0.25, "ras_sel must pick the raster green as alpha");
 
         let wgsl = wgsl_program(&model);
-        assert!(wgsl.contains("tev_regs[0].g"), "swap must re-point APREV: {wgsl}");
-        assert!(wgsl.contains("0.125000"), "fixed gray must lower to a literal: {wgsl}");
+        assert!(
+            wgsl.contains("tev_regs[0].g"),
+            "swap must re-point APREV: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("0.125000"),
+            "fixed gray must lower to a literal: {wgsl}"
+        );
     }
 }

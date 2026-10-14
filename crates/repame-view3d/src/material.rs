@@ -275,8 +275,8 @@ pub struct TevStage {
     pub color_dest: TevDest,
     pub alpha_dest: TevDest,
     /// Channel the rasterized operand reads its alpha from, and the channel
-    /// the texture operand read its alpha from. `0..3` is R,G,B,A. Zero (the
-    /// default) is the hardware's identity: `APREV` takes `Prev.a` and
+    /// the texture operand reads its alpha from. `0..3` is R,G,B,A. Three is
+    /// the hardware's identity, and the default: `APREV` takes `Prev.a` and
     /// `TEXA` takes `texel.a`.
     pub ras_sel: u8,
     pub tex_sel: u8,
@@ -299,8 +299,8 @@ impl Default for TevStage {
             alpha_clamp: true,
             color_dest: TevDest::Prev,
             alpha_dest: TevDest::Prev,
-            ras_sel: 0,
-            tex_sel: 0,
+            ras_sel: 3,
+            tex_sel: 3,
         }
     }
 }

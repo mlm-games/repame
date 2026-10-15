@@ -440,6 +440,7 @@ pub fn actors_view_mixed(
             let sorted: Vec<u32> = order.borrow().clone();
             let mut library = library.borrow_mut();
             let mut cursor = 0usize;
+            let mut run_index = 0u32;
             while cursor < sorted.len() {
                 let head = &entries[sorted[cursor] as usize];
                 let group = (medium_key(head.item), item_key(head.item), head.z.to_bits());
@@ -455,8 +456,11 @@ pub fn actors_view_mixed(
                 }
                 let run = cursor..end;
                 cursor = end;
+                let run_id = run_index;
+                run_index += 1;
                 emit_run(
                     run,
+                    run_id,
                     &sorted,
                     entries,
                     &group.0,
@@ -481,6 +485,7 @@ pub fn actors_view_mixed(
 #[allow(clippy::too_many_arguments)]
 fn emit_run(
     run: std::ops::Range<usize>,
+    run_id: u32,
     sorted: &[u32],
     entries: &[ActorDraw],
     medium: &Medium,
@@ -522,8 +527,10 @@ fn emit_run(
             let Some(atlas) = atlas else {
                 return;
             };
-            let mut batch =
-                repame_sprite::SpriteBatch::with_id(atlas.batch_id.clone(), atlas.desc.clone());
+            let mut batch = repame_sprite::SpriteBatch::with_id(
+                format!("{}.r{}", atlas.batch_id, run_id),
+                atlas.desc.clone(),
+            );
             batch.set_camera(camera.fit_matrix(canvas_dp, world_size));
             for i in run {
                 let draw = &entries[sorted[i] as usize];
@@ -861,8 +868,12 @@ pub fn actors_view_mixed_with_events(
     let up = state.clone();
     let move_state = state.clone();
     let leave = state.clone();
+    let sized = surface.clone();
     let modifier = Modifier::new()
         .fill_max_size()
+        .on_size_changed(move |size| {
+            *sized.borrow_mut() = [size.x, size.y];
+        })
         .on_pointer_down(move |event| {
             let mut state = down.borrow_mut();
             let (screen, world) = state.project(event.position);

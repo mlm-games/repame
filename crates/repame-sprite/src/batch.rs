@@ -1574,4 +1574,93 @@ mod tests {
         assert_eq!(at(64, 64), [0, 255, 0, 255], "flipped top-left green");
         assert_eq!(at(191, 191), [0, 0, 255, 255], "flipped bottom-right blue");
     }
+
+    /// Sibling batch nodes with distinct ids draw independently. GPU
+    /// resources are keyed by batch id, so two runs sharing one id would
+    /// collide and only the last prepared run would paint; the unified
+    /// producer gives every run its own id for exactly this reason.
+    #[test]
+    fn distinct_batch_ids_compose_in_one_scene() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, offscreen::OffscreenRenderer};
+        use std::sync::Arc;
+
+        let mut renderer = match OffscreenRenderer::new_blocking(256, 256, 1) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SKIP batch compose test (no GPU): {e}");
+                return;
+            }
+        };
+        let page = vec![
+            255, 0, 0, 255, //
+            0, 255, 0, 255, //
+            0, 0, 255, 255, //
+            255, 255, 255, 255,
+        ];
+        let uploads: Arc<[AtlasUpload]> = Arc::from(vec![AtlasUpload {
+            page: 0,
+            x: 0,
+            y: 0,
+            w: 2,
+            h: 2,
+            rgba: page,
+        }]);
+        let desc = BatchDesc {
+            layer_size: 2,
+            layers: 1,
+            filter: TextureFilter::Nearest,
+            ..Default::default()
+        };
+        let mut left = SpriteBatch::with_id("test.compose.left", desc.clone());
+        left.set_camera(screen_camera([256.0, 256.0]));
+        left.push(
+            [64.0, 128.0],
+            [64.0, 64.0],
+            0.0,
+            [0.5, 0.5],
+            false,
+            false,
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            0,
+        );
+        let mut right = SpriteBatch::with_id("test.compose.right", desc.clone());
+        right.set_camera(screen_camera([256.0, 256.0]));
+        right.push(
+            [192.0, 128.0],
+            [64.0, 64.0],
+            0.0,
+            [0.5, 0.5],
+            false,
+            false,
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            0,
+        );
+        let full = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 256.0,
+            h: 256.0,
+        };
+        let scene = Scene {
+            clear_color: Color::from_rgba(0, 0, 0, 255),
+            nodes: vec![
+                BatchFrame::new(left, uploads.clone()).node(full),
+                BatchFrame::new(right, uploads.clone()).node(full),
+            ],
+        };
+        let px = renderer
+            .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+            .expect("offscreen render");
+        let at = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * 256 + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+        assert_eq!(at(40, 104), [255, 0, 0, 255], "left run red");
+        assert_eq!(at(168, 104), [255, 0, 0, 255], "right run red");
+    }
 }

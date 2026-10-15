@@ -817,10 +817,17 @@ struct PickState {
 impl PickState {
     fn project(&self, position: repose_core::Vec2) -> ([f32; 2], glam::Vec2) {
         let density = effective_density_scale().max(1e-6);
-        let screen = [position.x as f32 / density, position.y as f32 / density];
+        let dp = [position.x as f32 / density, position.y as f32 / density];
         let fit = effective_fit(*self.canvas_dp.borrow(), self.world_size, &self.camera);
-        let world = dp_to_world(screen, self.world_size, self.camera.effective_center(), fit);
-        (screen, glam::Vec2::new(world[0], world[1]))
+        let world = dp_to_world(dp, self.world_size, self.camera.effective_center(), fit);
+        // `PickEvent.screen` is window-PHYSICAL px, not dp: consumers convert
+        // once. Emitting dp here made every consumer's own px->dp conversion a
+        // second divide, landing clicks at half their true position (the
+        // "pods do not respond" bug on a HiDPI desktop).
+        (
+            [position.x as f32, position.y as f32],
+            glam::Vec2::new(world[0], world[1]),
+        )
     }
 
     fn is_contact(&self, event: &PointerEvent) -> bool {
@@ -1313,6 +1320,36 @@ mod tests {
             Camera2d::default(),
             [800.0, 600.0],
             ctx,
+        );
+    }
+
+    /// `PickEvent.screen` is window-PHYSICAL px. The pick surface gets
+    /// physical px from Repose, so it must report them unchanged; a dp
+    /// payload made every consumer's own px->dp conversion a second
+    /// divide, so clicks landed at half their position and menu pods in
+    /// the lower half of the view never responded.
+    #[test]
+    fn pick_screen_is_window_physical_px() {
+        let canvas_dp = [800.0, 600.0];
+        let world_size = [320.0, 240.0];
+        let camera = Camera2d::default();
+        let density = effective_density_scale().max(1e-6);
+        let pick = PickState {
+            sink: Rc::new(|_| {}),
+            camera,
+            world_size,
+            canvas_dp: Rc::new(RefCell::new(canvas_dp)),
+            press: HashMap::new(),
+        };
+        let physical = repose_core::Vec2 { x: 640.0, y: 480.0 };
+        let (screen, world) = pick.project(physical);
+        assert_eq!(screen, [640.0, 480.0], "screen must stay physical px");
+        let dp = [640.0 / density, 480.0 / density];
+        let fit = effective_fit(canvas_dp, world_size, &camera);
+        let want = dp_to_world(dp, world_size, camera.effective_center(), fit);
+        assert!(
+            (world.x - want[0]).abs() < 1e-3 && (world.y - want[1]).abs() < 1e-3,
+            "world must unproject through the dp screen, got {world:?} want {want:?}"
         );
     }
 }

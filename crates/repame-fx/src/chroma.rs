@@ -42,7 +42,7 @@ impl Chroma {
         self.tick_secs(super::driver::ticks_to_secs_100hz(ticks));
     }
 
-    /// Current amount for `FrameInput::chroma`. 0.0 skips the composite.
+    /// Current aberration amount. 0.0 draws the batch straight through.
     pub fn amount(&self) -> f32 {
         self.strength.max(0.0)
     }

@@ -6,7 +6,7 @@ use web_time::Duration;
 
 use anyhow::Result;
 pub use repame_sim::{Sim, SimTime};
-pub use repame_sprite::{Camera2d, FrameInput, PickEvent, SpriteInstance};
+pub use repame_sprite::{Camera2d, PickEvent, SpriteInstance};
 use repose_core::View;
 pub use repose_core::input::{GamepadEvent, GamepadId};
 use repose_platform::gamepad::{GamepadBackend, create_backend};
@@ -33,8 +33,6 @@ pub use staging::Staging;
 
 /// Per-frame hooks the game implements.
 pub trait ShellHooks {
-    /// Build this frame's viewport snapshot from sim and UI state.
-    fn frame_input(&mut self, sim: &Sim) -> FrameInput;
     /// Variable-rate hook (tweens, audio, autosave timers).
     fn on_frame(&mut self, _sim: &mut Sim, _dt: Duration) {}
 }

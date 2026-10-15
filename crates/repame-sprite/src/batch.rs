@@ -1182,7 +1182,6 @@ impl WgpuCallback for SpriteBatch {
     fn resource_key(&self) -> Option<&str> {
         Some("repame.sprite_batch.resources")
     }
-
     fn prepare(
         &self,
         device: &wgpu::Device,
@@ -1201,6 +1200,55 @@ impl WgpuCallback for SpriteBatch {
         resources: &CallbackResources,
     ) {
         draw_batch_with_id_callback(self.id.as_str(), rpass, resources);
+    }
+}
+
+/// One view's worth of atlas draws: the sprite rows for this frame plus the
+/// shared atlas uploads. Each scene node owns its frame, so several views can
+/// batch from one atlas without sharing (and clobbering) one batch; the pixel
+/// data itself rides an `Arc` and is never cloned.
+pub struct BatchFrame {
+    batch: SpriteBatch,
+    uploads: std::sync::Arc<[AtlasUpload]>,
+}
+
+impl BatchFrame {
+    pub fn new(batch: SpriteBatch, uploads: std::sync::Arc<[AtlasUpload]>) -> Self {
+        Self { batch, uploads }
+    }
+
+    pub fn node(self, rect: repose_core::Rect) -> repose_core::SceneNode {
+        repose_core::SceneNode::Callback {
+            rect,
+            payload: repose_render_wgpu::Callback::new(self),
+        }
+    }
+}
+
+impl WgpuCallback for BatchFrame {
+    fn resource_key(&self) -> Option<&str> {
+        Some("repame.sprite_batch.resources")
+    }
+
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        screen: &ScreenDescriptor,
+        resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        self.batch
+            .prepare_with_uploads(device, queue, encoder, screen, resources, &self.uploads)
+    }
+
+    fn paint(
+        &self,
+        _info: repose_core::PaintCallbackInfo,
+        rpass: &mut CallbackRenderPass<'_, '_>,
+        resources: &CallbackResources,
+    ) {
+        draw_batch_with_id_callback(&self.batch.id, rpass, resources);
     }
 }
 

@@ -1,5 +1,5 @@
 //! Fullscreen flash: one-shot color overlay with an eased fade.
-//! The game maps [`Flash::rgba`] onto `FrameInput.overlay_color`.
+//! The game draws [`Flash::rgba`] as a fullscreen tint over the world.
 //! Step with [`Flash::tick_secs`] on the ungated clock; legacy tick counts
 //! are 100 Hz quanta.
 

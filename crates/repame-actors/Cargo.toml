@@ -11,8 +11,15 @@ description = "live vector actors (.ren rigs played through renamite-player with
 renamite-player.workspace = true
 renamite-player-ui = { workspace = true, features = ["binary"] }
 renamite-render-bridge.workspace = true
+renamite-model.workspace = true
+repame-sprite.workspace = true
 repose-core.workspace = true
 repose-canvas.workspace = true
+repose-ui.workspace = true
 glam.workspace = true
 anyhow.workspace = true
 log.workspace = true
+
+[dev-dependencies]
+renamite-animation.workspace = true
+kurbo.workspace = true

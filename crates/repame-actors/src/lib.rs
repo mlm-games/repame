@@ -20,6 +20,13 @@ use repose_canvas::{Canvas, DrawScope};
 use repose_core::input::PointerEvent;
 use repose_core::{Modifier, RenderContext, Vec2, View, request_frame, theme};
 
+pub mod draw;
+
+pub use draw::{
+    ActorDraw, ActorDrawList, ActorId, ActorItem, ActorLibrary, RasterAtlas, actors_view_mixed,
+    actors_view_mixed_with_events, actors_view_world, actors_view_world_with_events,
+};
+
 pub use renamite_player::{Player, PlayerError};
 pub use renamite_player_ui::{PlayerHost, PlayerHostRef, ViewTransform};
 

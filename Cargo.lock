@@ -4301,9 +4301,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "renamite-animation"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddb36157bb2b0b1487893b3911af0e6ef0b7c2487f5eb9175a0be6ecc2676755"
+checksum = "75e6759509f99e723fd4d0e9f73f48f76a052984e21689306292ff8f9802d048"
 dependencies = [
  "glam 0.33.12",
  "renamite-geometry",
@@ -4312,9 +4312,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-behavior-common"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c9e5181da96fdad19daba53b2851cffd22b8c4047a304c182ade3be7625cc85"
+checksum = "dd1e233ec0a364f21e9ad9c19fa434a2a51deb73d669077d19379ba5a8af9d06"
 dependencies = [
  "glam 0.33.12",
  "kurbo",
@@ -4330,9 +4330,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-geometry"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "522dae8a192e4d33d592eef44652b4ee9fe30e4435aff2bff041e244338da2c9"
+checksum = "fc6417519526dacf62f1257ee6f40c3d03a6b18c57208a1961ad853f9fddd90b"
 dependencies = [
  "glam 0.33.12",
  "kurbo",
@@ -4343,9 +4343,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-history"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ea1004343074a12626e2143d4e3ac148ae8351ff3b922c4deb1d8bbe58fa175"
+checksum = "90245ad4201aab9dc8ae86d10011e1b80364a84c510361a68cc313a2a468ecb7"
 dependencies = [
  "glam 0.33.12",
  "renamite-animation",
@@ -4360,9 +4360,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-io-ren"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff83de7e4e9708c5cadd3d9c920d6bed14d0fa6787703c6de38f9bc54e81408f"
+checksum = "597dd6e4819a7c4d02865017041ae6bc7072a3f8edb146ded8c2e7b6fff1fdb0"
 dependencies = [
  "glam 0.33.12",
  "postcard",
@@ -4378,9 +4378,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-machine"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8eda811abb5d502dea52f126784bc8783c671756277942580ad2082da0eb47f"
+checksum = "6b085c17a36277345312c2d577aa80c8e39503445807790b3a796052bb85252f"
 dependencies = [
  "glam 0.33.12",
  "renamite-animation",
@@ -4393,9 +4393,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-model"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4da3329046d635b8cba17bb5c0aed61c8721121d659bc19279068a5a52eab03"
+checksum = "47a19d73114a447ec4604c78791ee620b3ffdceb2b85a15dc81d672d27851e28"
 dependencies = [
  "glam 0.33.12",
  "kurbo",
@@ -4410,9 +4410,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-player"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bb240614c690e3fc48cc7c6a49f77c8b3d630c64a172024eaf950a9413d2f20"
+checksum = "be894ae7b8055830b571ee88ae91071eb988ccd241712546b96281efa36718a2"
 dependencies = [
  "glam 0.33.12",
  "kurbo",
@@ -4426,9 +4426,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-player-ui"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b576da9f2930369c2c387bc44a6b77b8b4ea8d9861e9db8a53d3c2b495a862f2"
+checksum = "d3015178ac2bae0fdbc459a5b0e78cf2d212cd3f1fabf3751de268078d7c05eb"
 dependencies = [
  "glam 0.33.12",
  "renamite-behavior-common",
@@ -4441,9 +4441,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-render-bridge"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38d6e7677c605581a0b1f1e0a84d94fc2a139b618666246636d07cdb5bde328b"
+checksum = "205aa9ce2ecc9f8aa056d3061a71829a928b95b114cb97280e5b93f7e9f458e0"
 dependencies = [
  "glam 0.33.12",
  "kurbo",
@@ -4460,9 +4460,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-text"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "712e67c68c0906e3b8ea70a2b79318c785467e7878027bc83faae5bd30b68c61"
+checksum = "b545f76b0502f5a86cd573178f59887161f1a6fe42685f063a258100fc581be2"
 dependencies = [
  "kurbo",
  "repose-text",

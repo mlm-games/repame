@@ -820,10 +820,11 @@ impl PickState {
         let dp = [position.x as f32 / density, position.y as f32 / density];
         let fit = effective_fit(*self.canvas_dp.borrow(), self.world_size, &self.camera);
         let world = dp_to_world(dp, self.world_size, self.camera.effective_center(), fit);
-        // `PickEvent.screen` is window-PHYSICAL px, not dp: consumers convert
-        // once. Emitting dp here made every consumer's own px->dp conversion a
-        // second divide, landing clicks at half their true position (the
-        // "pods do not respond" bug on a HiDPI desktop).
+        // `PickEvent.screen` is window-PHYSICAL px, not dp, so consumers
+        // convert once. Callers must pass `window_position`: Repose rewrites
+        // `event.position` to be hit-region-local (`repose-app` runtime), and
+        // a pick surface nested in an offset container would otherwise shift
+        // every pick by that origin.
         (
             [position.x as f32, position.y as f32],
             glam::Vec2::new(world[0], world[1]),
@@ -883,7 +884,7 @@ pub fn actors_view_mixed_with_events(
         })
         .on_pointer_down(move |event| {
             let mut state = down.borrow_mut();
-            let (screen, world) = state.project(event.position);
+            let (screen, world) = state.project(event.window_position);
             let button = match event.event {
                 PointerEventKind::Down(button) => button,
                 _ => PointerButton::Primary,
@@ -903,7 +904,7 @@ pub fn actors_view_mixed_with_events(
         })
         .on_pointer_up(move |event| {
             let mut state = up.borrow_mut();
-            let (screen, world) = state.project(event.position);
+            let (screen, world) = state.project(event.window_position);
             let button = match event.event {
                 PointerEventKind::Up(button) => button,
                 _ => PointerButton::Primary,
@@ -928,7 +929,7 @@ pub fn actors_view_mixed_with_events(
         })
         .on_pointer_move(move |event| {
             let state = move_state.borrow();
-            let (screen, world) = state.project(event.position);
+            let (screen, world) = state.project(event.window_position);
             (state.sink)(PickEvent::Hover { world, screen });
             if state.is_contact(&event) {
                 (state.sink)(PickEvent::TouchMove {
@@ -1323,13 +1324,11 @@ mod tests {
         );
     }
 
-    /// `PickEvent.screen` is window-PHYSICAL px. The pick surface gets
-    /// physical px from Repose, so it must report them unchanged; a dp
-    /// payload made every consumer's own px->dp conversion a second
-    /// divide, so clicks landed at half their position and menu pods in
-    /// the lower half of the view never responded.
+    /// `PickState::project` returns window-physical px and unprojects the world
+    /// point from dp. Emitting dp made every consumer's own px->dp conversion a
+    /// second divide, landing clicks at half their position.
     #[test]
-    fn pick_screen_is_window_physical_px() {
+    fn project_emits_physical_px_and_unprojects_from_dp() {
         let canvas_dp = [800.0, 600.0];
         let world_size = [320.0, 240.0];
         let camera = Camera2d::default();

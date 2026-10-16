@@ -655,12 +655,25 @@ fn medium_key(item: ActorItem) -> Medium {
     }
 }
 
+/// Painter's law: `z` decides, and equal `z` keeps the producer order -
+/// the stable sort preserves it, standing in for GameMaker's
+/// instance-creation order at equal depth. `REPAME_DRAW_ORDER=batch`
+/// folds the batch keys (medium, page, tint) into ties instead: fewer
+/// draw runs, but equal-`z` sprites then follow atlas packing rather
+/// than creation order (the "few elements" z-flips).
 fn compare_draws(a: &ActorDraw, b: &ActorDraw) -> std::cmp::Ordering {
-    a.z.partial_cmp(&b.z)
-        .unwrap_or(std::cmp::Ordering::Equal)
-        .then_with(|| medium_key(a.item).cmp(&medium_key(b.item)))
-        .then_with(|| item_key(a.item).cmp(&item_key(b.item)))
-        .then_with(|| tint_key(a.tint).cmp(&tint_key(b.tint)))
+    match a.z.partial_cmp(&b.z).unwrap_or(std::cmp::Ordering::Equal) {
+        std::cmp::Ordering::Equal if batch_order() => medium_key(a.item)
+            .cmp(&medium_key(b.item))
+            .then_with(|| item_key(a.item).cmp(&item_key(b.item)))
+            .then_with(|| tint_key(a.tint).cmp(&tint_key(b.tint))),
+        other => other,
+    }
+}
+
+fn batch_order() -> bool {
+    static BATCH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BATCH.get_or_init(|| std::env::var("REPAME_DRAW_ORDER").is_ok_and(|v| v == "batch"))
 }
 
 fn item_key(item: ActorItem) -> u64 {
@@ -818,7 +831,14 @@ impl PickState {
     fn project(&self, position: repose_core::Vec2) -> ([f32; 2], glam::Vec2) {
         let density = effective_density_scale().max(1e-6);
         let dp = [position.x as f32 / density, position.y as f32 / density];
-        let fit = effective_fit(*self.canvas_dp.borrow(), self.world_size, &self.camera);
+        let canvas = *self.canvas_dp.borrow();
+        if std::env::var("NT_PICK_TRACE").is_ok() {
+            eprintln!(
+                "nt-actors: canvas_dp={canvas:?} world_size={:?}",
+                self.world_size
+            );
+        }
+        let fit = effective_fit(canvas, self.world_size, &self.camera);
         let world = dp_to_world(dp, self.world_size, self.camera.effective_center(), fit);
         // `PickEvent.screen` is window-PHYSICAL px, not dp, so consumers
         // convert once. Callers must pass `window_position`: Repose rewrites
@@ -844,10 +864,13 @@ pub fn actors_view_world_with_events(
     draws: Rc<ActorDrawList>,
     camera: Camera2d,
     world_size: [f32; 2],
+    canvas_dp: [f32; 2],
     ctx: RenderContext,
     on_event: Rc<dyn Fn(PickEvent)>,
 ) -> View {
-    actors_view_mixed_with_events(library, draws, camera, world_size, ctx, None, on_event)
+    actors_view_mixed_with_events(
+        library, draws, camera, world_size, canvas_dp, ctx, None, on_event,
+    )
 }
 
 /// [`actors_view_mixed`] with the [`PickEvent`] surface of
@@ -857,11 +880,13 @@ pub fn actors_view_mixed_with_events(
     draws: Rc<ActorDrawList>,
     camera: Camera2d,
     world_size: [f32; 2],
+    canvas_dp: [f32; 2],
     ctx: RenderContext,
     atlas: Option<Rc<RasterAtlas>>,
     on_event: Rc<dyn Fn(PickEvent)>,
 ) -> View {
-    let surface: Rc<RefCell<[f32; 2]>> = Rc::new(RefCell::new([1.0, 1.0]));
+    let surface: Rc<RefCell<[f32; 2]>> =
+        Rc::new(RefCell::new([canvas_dp[0].max(1.0), canvas_dp[1].max(1.0)]));
     let state: Rc<RefCell<PickState>> = Rc::new(RefCell::new(PickState {
         sink: on_event,
         camera,
@@ -877,10 +902,21 @@ pub fn actors_view_mixed_with_events(
     let move_state = state.clone();
     let leave = state.clone();
     let sized = surface.clone();
+    let sized_paint = sized.clone();
     let modifier = Modifier::new()
         .fill_max_size()
+        // The painter is the only place the engine hands this node its laid
+        // out rect. `on_size_changed` alone left `canvas_dp` at its [1,1] value..
+        .painter(
+            move |_scene: &mut repose_core::Scene, rect: repose_core::Rect, _alpha: f32| {
+                let mut cell = sized_paint.borrow_mut();
+                if cell[0] < 1.0 || cell[1] < 1.0 {
+                    *cell = [rect.w.max(1.0), rect.h.max(1.0)];
+                }
+            },
+        )
         .on_size_changed(move |size| {
-            *sized.borrow_mut() = [size.x, size.y];
+            *sized.borrow_mut() = [size.x.max(1.0), size.y.max(1.0)];
         })
         .on_pointer_down(move |event| {
             let mut state = down.borrow_mut();

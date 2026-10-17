@@ -22,6 +22,7 @@ use super::mesh::MeshGroup;
 use super::pick::{MeshHit, pick_ray};
 use super::render::{BatchDesc, SceneBatch, SceneLight, SceneUpload};
 use super::render::{paint_scene_with_callback, prepare_scene_with_id};
+use super::skin::GpuSkinning;
 
 /// Everything the viewport draws this frame. Plain data, snapshot per frame.
 ///
@@ -74,9 +75,25 @@ pub struct Frame3d {
     /// the brightest [`MAX_POINTS`](crate::MAX_POINTS) points.
     pub rig: Option<crate::LightRig>,
     /// GPU-skinned draws for the frame (bind mesh + sampled palette).
-    /// Empty (default) disables the skin path; the palette uniform stays
-    /// bound but unread.
+    /// Empty (default) disables the skin path; on a device without vertex
+    /// storage the palette binding is omitted entirely (see
+    /// [`gpu_skinning`](Frame3d::gpu_skinning)) and these draws are
+    /// CPU-posed by the caller instead.
     pub skinned: Vec<crate::SkinnedDraw>,
+    /// GPU-skinning capability of the device this viewport draws through
+    /// ([`GpuSkinning`], read once from the adapter when the render device
+    /// is created: `GpuSkinning::from_adapter`).
+    ///
+    /// Repose hands a paint callback the device, never the adapter, so the
+    /// capability is an explicit frame input. On
+    /// [`GpuSkinning::Unsupported`] the viewport builds its camera layout
+    /// and shaders without the joint-palette storage binding and drops
+    /// [`skinned`](Frame3d::skinned) draws with a one-time warning naming
+    /// the missing `VERTEX_STORAGE` flag; the caller must CPU-pose them
+    /// through [`SkinnedMesh::pose`](crate::SkinnedMesh::pose). Defaults
+    /// to [`GpuSkinning::Supported`], which reproduces the historical GPU
+    /// path byte for byte.
+    pub gpu_skinning: GpuSkinning,
     /// Offscreen clear color (linear 0..1 RGBA). The shared UI pass this
     /// viewport paints into has its own clear; this selects the scene
     /// target clear inside the viewport-owned pass.
@@ -146,6 +163,7 @@ impl Default for Frame3d {
             shadow: None,
             rig: None,
             skinned: Vec::new(),
+            gpu_skinning: GpuSkinning::Supported,
             background: None,
             attributes: None,
             post: None,
@@ -807,6 +825,7 @@ impl WgpuCallback for GpuViewport3d {
                 _ => batch.push_group_for_pass(g, scene_pass),
             }
         }
+        batch.set_skinning(self.input.gpu_skinning);
         for s in &self.input.skinned {
             batch.push_skinned_for_pass(s, scene_pass);
         }

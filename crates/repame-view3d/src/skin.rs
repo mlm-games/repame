@@ -5,6 +5,81 @@ use glam::{Mat4, Quat, Vec3, Vec4};
 
 use super::mesh::MeshGroup;
 
+/// Whether the device behind a viewport can bind storage buffers in the
+/// vertex stage ([`wgpu::DownlevelFlags::VERTEX_STORAGE`]), i.e. whether the
+/// joint palette can feed [`SkinnedDraw`]s on the GPU.
+///
+/// wgpu exposes the flag on the adapter
+/// ([`Adapter::get_downlevel_capabilities`](wgpu::Adapter::get_downlevel_capabilities)),
+/// and a Repose paint callback only ever sees the device, so the caller
+/// reads the capability once, when it creates the render device, and hands
+/// it to the frame ([`Frame3d::gpu_skinning`](crate::Frame3d::gpu_skinning)).
+///
+/// On [`Unsupported`](GpuSkinning::Unsupported) the viewport builds its
+/// camera layout and all three scene-family shaders without the palette
+/// storage binding, and drops skinned draws at push time (logged once), so
+/// the game CPU-poses them through
+/// [`SkinnedMesh::pose`](crate::SkinnedMesh::pose) instead of the viewport
+/// failing to construct its pipelines at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuSkinning {
+    /// The device binds storage buffers in the vertex stage: skinned draws
+    /// blend on the GPU through the palette.
+    #[default]
+    Supported,
+    /// The device lacks `VERTEX_STORAGE`: the palette binding is omitted
+    /// everywhere and skinned draws are dropped for the caller to
+    /// CPU-pose.
+    Unsupported,
+}
+
+impl GpuSkinning {
+    /// Reads the capability from an adapter's downlevel flags. Call this
+    /// with the adapter the device is requested from.
+    pub fn from_adapter(adapter: &wgpu::Adapter) -> Self {
+        Self::from_downlevel_flags(adapter.get_downlevel_capabilities().flags)
+    }
+
+    /// `VERTEX_STORAGE` present ⇒ [`GpuSkinning::Supported`], absent ⇒
+    /// [`GpuSkinning::Unsupported`].
+    pub fn from_downlevel_flags(flags: wgpu::DownlevelFlags) -> Self {
+        if flags.contains(wgpu::DownlevelFlags::VERTEX_STORAGE) {
+            Self::Supported
+        } else {
+            Self::Unsupported
+        }
+    }
+
+    /// True when the GPU skin path is usable on this device.
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+}
+
+/// The WGSL `SkinPalette` struct every scene-family shader declares for the
+/// GPU joint palette. The declaration text (this struct plus
+/// [`SKIN_PALETTE_BINDING_WGSL`]) is shared by the scene prefix, the shadow
+/// depth pass and the depth/velocity pass; unsupported devices splice both
+/// fragments out so naga and the binder never see a storage binding.
+pub(crate) const SKIN_PALETTE_STRUCT_WGSL: &str =
+    "struct SkinPalette {\n    joints: array<mat4x4<f32>>,\n};\n";
+
+/// The `@group(0) @binding(1)` storage binding the palette declaration
+/// carries (see [`SKIN_PALETTE_STRUCT_WGSL`]).
+pub(crate) const SKIN_PALETTE_BINDING_WGSL: &str =
+    "@group(0) @binding(1) var<storage, read> skin_palette: SkinPalette;\n";
+
+/// Splices the GPU joint-palette declaration out of a scene-family shader
+/// source: the `SkinPalette` struct and its storage binding. The camera
+/// binding 0 and every other declaration stay untouched, so the result
+/// matches a camera layout whose binding 1 is omitted.
+pub(crate) fn strip_skin_palette(source: &mut String) {
+    for fragment in [SKIN_PALETTE_STRUCT_WGSL, SKIN_PALETTE_BINDING_WGSL] {
+        let stripped = source.replace(fragment, "");
+        *source = stripped;
+    }
+}
+
 /// One joint's local transform (glTF TRS, game-driven per frame).
 #[derive(Clone, Copy, Debug)]
 pub struct JointPose {
@@ -1551,7 +1626,7 @@ pub fn attach_to_joint(group: &mut MeshGroup, node: &Mat4, offset: &Mat4) {
 /// `joints`/`weights` ride the vertex (u16x4 + f32x4, same data
 /// [`SkinnedMesh`] parses); `palette` is `joint_world * inverse_bind` per
 /// joint slot, padded with identity to exactly
-/// [`MAX_SKIN_JOINTS`](crate::MAX_SKIN_JOINTS) so the uniform shape is
+/// [`MAX_SKIN_JOINTS`](crate::MAX_SKIN_JOINTS) so the palette size is
 /// frame-stable. Meshes with more joints than the cap return `None` from
 /// [`from_mesh`](SkinnedDraw::from_mesh) (caller falls back to
 /// [`pose`](SkinnedMesh::pose)).
@@ -1644,6 +1719,28 @@ impl SkinnedDraw {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The capability decision maps exactly one downlevel flag.
+    #[test]
+    fn gpu_skinning_follows_vertex_storage_flag() {
+        assert_eq!(GpuSkinning::default(), GpuSkinning::Supported);
+        assert_eq!(
+            GpuSkinning::from_downlevel_flags(wgpu::DownlevelFlags::VERTEX_STORAGE),
+            GpuSkinning::Supported
+        );
+        assert_eq!(
+            GpuSkinning::from_downlevel_flags(wgpu::DownlevelFlags::empty()),
+            GpuSkinning::Unsupported
+        );
+        assert_eq!(
+            GpuSkinning::from_downlevel_flags(
+                wgpu::DownlevelFlags::COMPUTE_SHADERS | wgpu::DownlevelFlags::FRAGMENT_STORAGE
+            ),
+            GpuSkinning::Unsupported
+        );
+        assert!(GpuSkinning::Supported.is_supported());
+        assert!(!GpuSkinning::Unsupported.is_supported());
+    }
 
     /// Two-vertex "limb": vert 0 bound to joint 0, vert 1 split 50/50.
     fn limb() -> SkinnedMesh {

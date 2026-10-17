@@ -444,16 +444,167 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// The default pipeline's module: shared prefix plus the legacy fragment
-/// stage. Material programs reuse the same prefix with their own fragment
-/// stage, so the vertex path and every binding stay identical.
-fn default_shader() -> String {
-    String::from(SHADER_PREFIX) + SHADER_LEGACY_FS
+/// The GPU-skin blend [`SHADER_PREFIX`]'s `vs_main` carries, verbatim.
+/// Spliced out for devices without `VERTEX_STORAGE` (see [`scene_prefix`]);
+/// `skinned_pos`/`skinned_nrm` stay as plain copies of the bind position
+/// and normal, so every other vertex output is untouched.
+const SCENE_SKIN_BODY_WGSL: &str = r#"if (skin_mix > 0.5) {
+        let wsum = weights.x + weights.y + weights.z + weights.w;
+        if (wsum > 1e-8) {
+            let base = i32(skin_base + 0.5);
+            var acc_pos = vec3<f32>(0.0);
+            var acc_nrm = vec3<f32>(0.0);
+            for (var k: i32 = 0; k < 4; k = k + 1) {
+                var w: f32 = 0.0;
+                var slot: i32 = 0;
+                if (k == 0) { w = weights.x; slot = i32(joints.x); }
+                else if (k == 1) { w = weights.y; slot = i32(joints.y); }
+                else if (k == 2) { w = weights.z; slot = i32(joints.z); }
+                else { w = weights.w; slot = i32(joints.w); }
+                w = w / wsum;
+                if (w > 0.0) {
+                    let m = skin_palette.joints[base + slot];
+                    acc_pos = acc_pos + (m * vec4<f32>(pos, 1.0)).xyz * w;
+                    acc_nrm = acc_nrm + (m * vec4<f32>(normal, 0.0)).xyz * w;
+                }
+            }
+            skinned_pos = acc_pos;
+            // Renormalise here, not per fragment: the reference normalises the
+            // blended normal in the vertex stage, and so does the CPU path
+            // (`SkinnedMesh::blend_vertex`). Interpolating unnormalised normals
+            // and normalising afterwards gives a different direction, and a
+            // singular blend can yield zero, which `normalize` does not define.
+            skinned_nrm = select(
+                acc_nrm,
+                normalize(acc_nrm),
+                dot(acc_nrm, acc_nrm) > 1e-10,
+            );
+        }
+    }"#;
+
+/// The scene vertex prefix for `skinning`.
+///
+/// The supported form is [`SHADER_PREFIX`] byte for byte. The unsupported
+/// form splices out the palette declaration and
+/// [`SCENE_SKIN_BODY_WGSL`], leaving a module that reads no storage buffer
+/// and therefore matches a camera layout without binding 1.
+fn scene_prefix(skinning: GpuSkinning) -> String {
+    let mut source = String::from(SHADER_PREFIX);
+    if !skinning.is_supported() {
+        strip_skin_palette(&mut source);
+        let stripped = source.replace(SCENE_SKIN_BODY_WGSL, "");
+        source = stripped;
+    }
+    source
+}
+
+/// The default pipeline's module for `skinning`: shared prefix plus the
+/// legacy fragment stage. Material programs reuse the same prefix with
+/// their own fragment stage, so the vertex path and every binding stay
+/// identical.
+fn scene_shader(skinning: GpuSkinning) -> String {
+    let mut source = scene_prefix(skinning);
+    source.push_str(SHADER_LEGACY_FS);
+    source
+}
+
+/// Depth-only vertex shader for the shadow pass: skinned position
+/// through the shadow matrix (bind pose + palette, same blend as
+/// the scene pass, so animated casters shadow their posed shape,
+/// not their bind pose). Static verts carry skin_mix 0 and skip
+/// the palette exactly like the scene shader.
+///
+/// Locations are depth-pass-local (0..4): the pass uses its own
+/// buffer layout below (same offsets, remapped locations), because
+/// the scene layout's 17 attributes exceed the device's 16-slot
+/// vertex limit.
+const SHADOW_DEPTH_SHADER: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+};
+
+struct SkinPalette {
+    joints: array<mat4x4<f32>>,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var<storage, read> skin_palette: SkinPalette;
+
+@vertex
+fn vs_main(
+    @location(0) pos: vec3<f32>,
+    @location(1) joints: vec4<u32>,
+    @location(2) weights: vec4<f32>,
+    @location(3) skin_mix: f32,
+    @location(4) skin_base: f32,
+) -> @builtin(position) vec4<f32> {
+    var p = pos;
+    if (skin_mix > 0.5) {
+        let wsum = weights.x + weights.y + weights.z + weights.w;
+        if (wsum > 1e-8) {
+            let base = i32(skin_base + 0.5);
+            var acc = vec3<f32>(0.0);
+            for (var k: i32 = 0; k < 4; k = k + 1) {
+                var w: f32 = 0.0;
+                var slot: i32 = 0;
+                if (k == 0) { w = weights.x; slot = i32(joints.x); }
+                else if (k == 1) { w = weights.y; slot = i32(joints.y); }
+                else if (k == 2) { w = weights.z; slot = i32(joints.z); }
+                else { w = weights.w; slot = i32(joints.w); }
+                w = w / wsum;
+                if (w > 0.0) {
+                    let m = skin_palette.joints[base + slot];
+                    acc = acc + (m * vec4<f32>(pos, 1.0)).xyz * w;
+                }
+            }
+            p = acc;
+        }
+    }
+    return camera.view_proj * vec4<f32>(p, 1.0);
+}
+"#;
+
+/// The GPU-skin blend [`SHADOW_DEPTH_SHADER`] carries, verbatim; spliced
+/// out for devices without `VERTEX_STORAGE`.
+const SHADOW_SKIN_BODY_WGSL: &str = r#"if (skin_mix > 0.5) {
+        let wsum = weights.x + weights.y + weights.z + weights.w;
+        if (wsum > 1e-8) {
+            let base = i32(skin_base + 0.5);
+            var acc = vec3<f32>(0.0);
+            for (var k: i32 = 0; k < 4; k = k + 1) {
+                var w: f32 = 0.0;
+                var slot: i32 = 0;
+                if (k == 0) { w = weights.x; slot = i32(joints.x); }
+                else if (k == 1) { w = weights.y; slot = i32(joints.y); }
+                else if (k == 2) { w = weights.z; slot = i32(joints.z); }
+                else { w = weights.w; slot = i32(joints.w); }
+                w = w / wsum;
+                if (w > 0.0) {
+                    let m = skin_palette.joints[base + slot];
+                    acc = acc + (m * vec4<f32>(pos, 1.0)).xyz * w;
+                }
+            }
+            p = acc;
+        }
+    }"#;
+
+/// [`SHADOW_DEPTH_SHADER`] for `skinning`: the supported form is the
+/// constant byte for byte, the unsupported form drops the palette
+/// declaration and blend so the module matches a camera layout without
+/// binding 1.
+fn shadow_depth_shader(skinning: GpuSkinning) -> String {
+    let mut source = String::from(SHADOW_DEPTH_SHADER);
+    if !skinning.is_supported() {
+        strip_skin_palette(&mut source);
+        let stripped = source.replace(SHADOW_SKIN_BODY_WGSL, "");
+        source = stripped;
+    }
+    source
 }
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
@@ -468,8 +619,8 @@ use super::particles::{
     pack_colliders, pack_emitter, request_capacity,
 };
 use super::reflection::ProbeSettings;
-use super::postfx::{DEPTH_VELOCITY_WGSL, PostProcess, PostStage, POST_WGSL};
-use super::skin::SkinnedDraw;
+use super::postfx::{PostProcess, PostStage, POST_WGSL, depth_velocity_shader};
+use super::skin::{GpuSkinning, SkinnedDraw, strip_skin_palette};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -2337,9 +2488,13 @@ pub struct SceneBatch {
     /// plus one `DrawRange` each (skinned ranges sort with the opaque
     /// pass; transparency on skinned draws follows the same back-to-front
     /// path by AABB center of the *bind* pose).
+    ///
+    /// Only staged when [`SceneBatch::set_skinning`] is supported: on
+    /// [`GpuSkinning::Unsupported`] draws drop here (logged once) for the
+    /// caller to CPU-pose.
     skinned: Vec<SkinnedPending>,
     /// Joint palette store for the frame: every skinned draw appends its
-    /// (padded) palette here; ranges record the base offset. One uniform
+    /// (padded) palette here; ranges record the base offset. One palette
     /// upload per frame, sized to the frame's joint count.
     palette: Vec<[[f32; 4]; 4]>,
     /// Cascade desc staged by [`set_rig`](SceneBatch::set_rig) (`None` =
@@ -2383,6 +2538,10 @@ pub struct SceneBatch {
     /// Post-process settings staged with [`SceneBatch::set_post`]; the depth
     /// pass reads `previous_view_proj` from it for camera motion vectors.
     post: Option<PostProcess>,
+    /// Device GPU-skinning capability staged with
+    /// [`SceneBatch::set_skinning`]. Drives the shader/layout variant and
+    /// the push-time drop.
+    skinning: GpuSkinning,
 }
 
 /// Dispatch order for a frame's systems: a system that sub-emits into
@@ -2545,6 +2704,35 @@ fn probe_cube_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// Camera bind group over `camera`: binding 0 always, binding 1 (the joint
+/// palette storage buffer) only when `skin` is present. The entry set must
+/// match the camera layout exactly, and the layout omits binding 1 on
+/// devices without `VERTEX_STORAGE` (see [`SceneBatch::set_skinning`]).
+fn camera_bind_group(
+    device: &wgpu::Device,
+    label: &'static str,
+    layout: &wgpu::BindGroupLayout,
+    camera: &wgpu::Buffer,
+    skin: Option<&wgpu::Buffer>,
+) -> wgpu::BindGroup {
+    let mut entries = Vec::with_capacity(2);
+    entries.push(wgpu::BindGroupEntry {
+        binding: 0,
+        resource: camera.as_entire_binding(),
+    });
+    if let Some(skin) = skin {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 1,
+            resource: skin.as_entire_binding(),
+        });
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &entries,
+    })
+}
+
 /// Group 2 of the scene pipelines: shadow maps plus the reflection-probe
 /// cubes. Built once per probe set (a probe cube cannot be sampled while it
 /// is a render attachment, so the capture passes use a group with stand-ins
@@ -2674,6 +2862,7 @@ impl SceneBatch {
             occluded: 0,
             occlusion_candidates: Vec::new(),
             post: None,
+            skinning: GpuSkinning::Supported,
             verts: Vec::new(),
             indices: Vec::new(),
             ranges: Vec::new(),
@@ -3183,7 +3372,8 @@ impl SceneBatch {
         for entry in &self.materials {
             let fragment = super::shading::material_fragment(&entry.model)
                 .expect("registered materials validate");
-            let source = String::from(SHADER_PREFIX) + &fragment;
+            let mut source = scene_prefix(res.skin);
+            source.push_str(&fragment);
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("repame_view3d_material"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -3683,20 +3873,13 @@ impl SceneBatch {
                                 | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
-                        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("repame_view3d_probe_cam_bg"),
-                            layout: &cam_layout,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: buffer.as_entire_binding(),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: skin.as_entire_binding(),
-                                },
-                            ],
-                        });
+                        let bind = camera_bind_group(
+                            device,
+                            "repame_view3d_probe_cam_bg",
+                            &cam_layout,
+                            &buffer,
+                            skin.as_ref(),
+                        );
                         (buffer, bind)
                     })
                     .collect();
@@ -3884,6 +4067,27 @@ impl SceneBatch {
     /// declared through [`SceneBatch::set_passes`].
     pub fn set_post(&mut self, post: Option<PostProcess>) {
         self.post = post;
+    }
+
+    /// Declares the device's GPU-skinning capability
+    /// ([`GpuSkinning`], read from the adapter at device creation).
+    ///
+    /// On [`GpuSkinning::Unsupported`] the camera layout and every
+    /// scene-family shader are built without the joint-palette storage
+    /// binding (a device without `VERTEX_STORAGE` cannot construct the
+    /// binding at all), and [`push_skinned`](SceneBatch::push_skinned) /
+    /// [`push_skinned_for_pass`](SceneBatch::push_skinned_for_pass) drop
+    /// their draws with a one-time warning naming the reason: the caller
+    /// must CPU-pose them through
+    /// [`SkinnedMesh::pose`](crate::SkinnedMesh::pose) instead. Nothing
+    /// silently no-ops; the drop is the honest degradation.
+    ///
+    /// The mode is part of the pipeline/texture cache key, so switching it
+    /// rebuilds the batch (texture contents drop, re-upload required).
+    /// Defaults to [`GpuSkinning::Supported`], which reproduces the
+    /// historical GPU path byte for byte.
+    pub fn set_skinning(&mut self, skinning: GpuSkinning) {
+        self.skinning = skinning;
     }
 
     /// Passes declared for this frame, in execution order.
@@ -4708,6 +4912,7 @@ impl SceneBatch {
     /// Append one GPU-skinned draw: bind-pose geometry plus the sampled
     /// palette. The batch uploads bind verts once and the palette into
     /// the per-frame uniform; the vertex shader blends in hardware.
+    ///
     /// Validation mirrors [`push_group`](SceneBatch::push_group) (lengths,
     /// index range, page, alpha) plus skin-specific checks: joints/weights
     /// must match positions when present, joint slots past the mesh's
@@ -4715,6 +4920,11 @@ impl SceneBatch {
     /// and meshes past [`MAX_SKIN_JOINTS`](crate::MAX_SKIN_JOINTS) drop
     /// (caller falls back to CPU [`pose`](crate::SkinnedMesh::pose)).
     /// Degenerate triangles cull tri-by-tri like static groups.
+    ///
+    /// On a device staged as [`GpuSkinning::Unsupported`]
+    /// ([`SceneBatch::set_skinning`]) the draw drops here with a one-time
+    /// warning naming the missing `VERTEX_STORAGE` flag: there is no
+    /// palette binding to read, and the caller CPU-poses instead.
     pub fn push_skinned(&mut self, draw: &SkinnedDraw) {
         self.push_skinned_inner(draw, 0);
     }
@@ -4727,6 +4937,20 @@ impl SceneBatch {
     }
 
     fn push_skinned_inner(&mut self, draw: &SkinnedDraw, pass: u32) {
+        // One latch for the process: the viewport rebuilds its batch every
+        // frame, so a per-batch latch would log every frame.
+        static SKIN_UNSUPPORTED_WARNED: AtomicBool = AtomicBool::new(false);
+        if !self.skinning.is_supported() {
+            if !SKIN_UNSUPPORTED_WARNED.swap(true, Ordering::Relaxed) {
+                log::warn!(
+                    "scene_batch[{}]: dropping GPU-skinned draws (device lacks \
+                     DownlevelFlags::VERTEX_STORAGE, no storage buffer can bind in the \
+                     vertex stage); CPU-pose them via SkinnedMesh::pose",
+                    self.id
+                );
+            }
+            return;
+        }
         let mesh = &draw.mesh;
         let n = mesh.positions.len();
         if mesh.is_empty() {
@@ -5305,6 +5529,10 @@ impl SceneBatch {
             .len()
             .next_power_of_two()
             .max(crate::MAX_SKIN_JOINTS);
+        // The skin variant is part of the cache key: a device swap (or a
+        // capability change) must never reuse pipelines built for the other
+        // mode, even when every other dimension matches.
+        let skin_supported = self.skinning.is_supported();
         let key = (
             screen.target_format,
             screen.sample_count,
@@ -5316,6 +5544,7 @@ impl SceneBatch {
             cascade_count,
             cube_size,
             skin_slots,
+            skin_supported,
         );
         let fresh = resources
             .get::<SceneResources>()
@@ -5329,13 +5558,13 @@ impl SceneBatch {
         }
         if stale {
             log::warn!(
-                "scene_batch[{}]: rebuilding pipeline/texture (format/sample/desc/shadow/rig changed); texture contents dropped, re-upload required",
+                "scene_batch[{}]: rebuilding pipeline/texture (format/sample/desc/shadow/rig/skin changed); texture contents dropped, re-upload required",
                 self.id
             );
         }
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("repame_view3d"),
-            source: wgpu::ShaderSource::Wgsl(default_shader().into()),
+            source: wgpu::ShaderSource::Wgsl(scene_shader(self.skinning).into()),
         });
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("repame_view3d_camera"),
@@ -5387,51 +5616,52 @@ impl SceneBatch {
             anisotropy_clamp: 1,
             border_color: None,
         });
+        // Binding 1 carries the joint palette and is visible to the vertex
+        // stage, which `wgpu` gates on `DownlevelFlags::VERTEX_STORAGE`. A
+        // device without the flag cannot construct this layout at all, so
+        // the entry (and the matching shader declaration and bind group
+        // entry) only exists when the capability does.
+        let mut cam_entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }];
+        if skin_supported {
+            cam_entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            });
+        }
         let cam_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_cam_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
+            entries: &cam_entries,
         });
-        let skin_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("repame_view3d_skin"),
-            size: (skin_slots * 64) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let skin_buffer = skin_supported.then(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("repame_view3d_skin"),
+                size: (skin_slots * 64) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
-        let cam_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("repame_view3d_cam_bg"),
-            layout: &cam_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: skin_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let cam_bind = camera_bind_group(
+            device,
+            "repame_view3d_cam_bg",
+            &cam_layout,
+            &camera,
+            skin_buffer.as_ref(),
+        );
         let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_tex_bgl"),
             entries: &[
@@ -5781,65 +6011,9 @@ impl SceneBatch {
         let mk = |_label: &'static str, depth_test: bool, transparent: bool| {
             mk_with(&shader, depth_test, transparent).0
         };
-        /// Depth-only vertex shader for the shadow pass: skinned position
-        /// through the shadow matrix (bind pose + palette, same blend as
-        /// the scene pass, so animated casters shadow their posed shape,
-        /// not their bind pose). Static verts carry skin_mix 0 and skip
-        /// the palette exactly like the scene shader.
-        ///
-        /// Locations are depth-pass-local (0..4): the pass uses its own
-        /// buffer layout below (same offsets, remapped locations), because
-        /// the scene layout's 17 attributes exceed the device's 16-slot
-        /// vertex limit.
-        const SHADOW_DEPTH_SHADER: &str = r#"
-struct Camera {
-    view_proj: mat4x4<f32>,
-};
-
-struct SkinPalette {
-    joints: array<mat4x4<f32>>,
-};
-
-@group(0) @binding(0) var<uniform> camera: Camera;
-@group(0) @binding(1) var<storage, read> skin_palette: SkinPalette;
-
-@vertex
-fn vs_main(
-    @location(0) pos: vec3<f32>,
-    @location(1) joints: vec4<u32>,
-    @location(2) weights: vec4<f32>,
-    @location(3) skin_mix: f32,
-    @location(4) skin_base: f32,
-) -> @builtin(position) vec4<f32> {
-    var p = pos;
-    if (skin_mix > 0.5) {
-        let wsum = weights.x + weights.y + weights.z + weights.w;
-        if (wsum > 1e-8) {
-            let base = i32(skin_base + 0.5);
-            var acc = vec3<f32>(0.0);
-            for (var k: i32 = 0; k < 4; k = k + 1) {
-                var w: f32 = 0.0;
-                var slot: i32 = 0;
-                if (k == 0) { w = weights.x; slot = i32(joints.x); }
-                else if (k == 1) { w = weights.y; slot = i32(joints.y); }
-                else if (k == 2) { w = weights.z; slot = i32(joints.z); }
-                else { w = weights.w; slot = i32(joints.w); }
-                w = w / wsum;
-                if (w > 0.0) {
-                    let m = skin_palette.joints[base + slot];
-                    acc = acc + (m * vec4<f32>(pos, 1.0)).xyz * w;
-                }
-            }
-            p = acc;
-        }
-    }
-    return camera.view_proj * vec4<f32>(p, 1.0);
-}
-"#;
-
         let shadow_depth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("repame_view3d_shadow_depth"),
-            source: wgpu::ShaderSource::Wgsl(SHADOW_DEPTH_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shadow_depth_shader(self.skinning).into()),
         });
         let shadow_depth_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("repame_view3d_shadow_depth_pl"),
@@ -5852,20 +6026,13 @@ fn vs_main(
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let shadow_cam_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("repame_view3d_shadow_cam_bg"),
-            layout: &cam_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: shadow_camera_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: skin_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let shadow_cam_bind = camera_bind_group(
+            device,
+            "repame_view3d_shadow_cam_bg",
+            &cam_layout,
+            &shadow_camera_buf,
+            skin_buffer.as_ref(),
+        );
         // One camera per cascade slice and per cube face: `write_buffer` is
         // applied at the start of the submission, so reusing a single buffer
         // across the loop's passes would give every pass the last write.
@@ -5876,20 +6043,13 @@ fn vs_main(
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("repame_view3d_slice_cam_bg"),
-                layout: &cam_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: skin_buffer.as_entire_binding(),
-                    },
-                ],
-            });
+            let bind = camera_bind_group(
+                device,
+                "repame_view3d_slice_cam_bg",
+                &cam_layout,
+                &buffer,
+                skin_buffer.as_ref(),
+            );
             (buffer, bind)
         };
         let cascade_cam_binds: Vec<(wgpu::Buffer, wgpu::BindGroup)> = (0..crate::MAX_CASCADES)
@@ -5975,7 +6135,7 @@ fn vs_main(
         });
         let dv_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("repame_view3d_depth_velocity"),
-            source: wgpu::ShaderSource::Wgsl(DEPTH_VELOCITY_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(depth_velocity_shader(self.skinning).into()),
         });
         let dv_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("repame_view3d_dv_pl"),
@@ -6160,6 +6320,7 @@ fn vs_main(
             _probe_dummies: probe_dummies,
             probe_dummy_views,
             point_faces: None,
+            skin: self.skinning,
             skin_buffer,
             verts: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("repame_view3d_verts"),
@@ -6273,8 +6434,10 @@ fn vs_main(
             .point_caster
             .and_then(|i| self.staged_points.get(i))
             .and_then(|p| p.cube_faces());
-        if !self.palette.is_empty() {
-            queue.write_buffer(&res.skin_buffer, 0, bytemuck::cast_slice(&self.palette));
+        if !self.palette.is_empty()
+            && let Some(skin) = &res.skin_buffer
+        {
+            queue.write_buffer(skin, 0, bytemuck::cast_slice(&self.palette));
         }
         if !self.verts.is_empty() {
             queue.write_buffer(&res.verts, 0, bytemuck::cast_slice(&self.verts));
@@ -6410,6 +6573,7 @@ struct SceneEntry {
         u32,
         u32,
         usize,
+        bool,
     ),
     pipeline_depth: wgpu::RenderPipeline,
     pipeline_flat: wgpu::RenderPipeline,
@@ -6488,7 +6652,14 @@ struct SceneEntry {
     /// Caster cube faces sampled this frame (six VPs), written by
     /// `upload_all` from the staged points. `None` = cube pass off.
     point_faces: Option<[[[f32; 4]; 4]; 6]>,
-    skin_buffer: wgpu::Buffer,
+    /// GPU-skinning capability this entry's shaders and camera layout were
+    /// built for (the mode rides the resource key, so a change rebuilds
+    /// the entry).
+    skin: GpuSkinning,
+    /// Joint-palette storage buffer. `None` on devices without
+    /// `VERTEX_STORAGE`: the layout omits binding 1 and skinned draws drop
+    /// before any palette exists.
+    skin_buffer: Option<wgpu::Buffer>,
     verts: wgpu::Buffer,
     vert_cap: usize,
     indices: wgpu::Buffer,
@@ -7653,7 +7824,15 @@ mod tests {
     #[test]
     fn every_generated_scene_shader_parses() {
         parses("SHADER_PREFIX", SHADER_PREFIX);
-        parses("default_shader", &default_shader());
+        parses("scene_shader(supported)", &scene_shader(GpuSkinning::Supported));
+        parses(
+            "scene_shader(unsupported)",
+            &scene_shader(GpuSkinning::Unsupported),
+        );
+        parses(
+            "shadow_depth_shader(unsupported)",
+            &shadow_depth_shader(GpuSkinning::Unsupported),
+        );
         parses("FULLSCREEN_SHADER", FULLSCREEN_SHADER);
         parses("HIZ_WGSL", HIZ_WGSL);
         parses("HIZ_TEST_WGSL", HIZ_TEST_WGSL);
@@ -7671,11 +7850,69 @@ mod tests {
         let model = crate::shading::material_fragment(&crate::material::ShadingModel::default())
             .expect("default model validates");
         parses("material_fragment", &(String::from(SHADER_PREFIX) + &model));
+        parses(
+            "material_fragment(unsupported)",
+            &(scene_prefix(GpuSkinning::Unsupported) + &model),
+        );
+    }
+
+    /// The scene-family shader selection: the supported form is the
+    /// historical source byte for byte, the unsupported form drops every
+    /// reference to the palette binding (struct + storage binding + blend)
+    /// so it matches a camera layout without binding 1, and both keep the
+    /// entry points and the camera binding 0.
+    #[test]
+    fn unsupported_shaders_drop_the_palette() {
+        let supported = scene_shader(GpuSkinning::Supported);
+        assert_eq!(supported, String::from(SHADER_PREFIX) + SHADER_LEGACY_FS);
+        assert!(supported.contains("skin_palette.joints[base + slot]"));
+        let unsupported = scene_shader(GpuSkinning::Unsupported);
+        assert!(!unsupported.contains("skin_palette"), "{unsupported}");
+        assert!(!unsupported.contains("SkinPalette"), "{unsupported}");
+        assert!(unsupported.contains("fn vs_main("), "entry point stays");
+        assert!(unsupported.contains("fn fs_main("), "entry point stays");
+
+        let shadow_supported = shadow_depth_shader(GpuSkinning::Supported);
+        assert_eq!(shadow_supported, SHADOW_DEPTH_SHADER);
+        assert!(shadow_supported.contains("skin_palette.joints[base + slot]"));
+        let shadow_unsupported = shadow_depth_shader(GpuSkinning::Unsupported);
+        assert!(!shadow_unsupported.contains("skin_palette"));
+        assert!(!shadow_unsupported.contains("SkinPalette"));
+        assert!(shadow_unsupported.contains("fn vs_main("), "entry point stays");
+    }
+
+    /// Minimal valid GPU-skinned draw for the push-path gate.
+    fn skinned_draw() -> SkinnedDraw {
+        let mesh = crate::skin::SkinnedMesh {
+            name: "gate".into(),
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            colors: vec![[1.0, 1.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
+            joints: vec![[0, 0, 0, 0]; 3],
+            weights: vec![[1.0, 0.0, 0.0, 0.0]; 3],
+            ..Default::default()
+        };
+        SkinnedDraw::from_matrices(&mesh, &[Mat4::IDENTITY]).expect("one joint fits the cap")
+    }
+
+    /// The capability gate: unsupported mode drops skinned draws at push
+    /// (the caller CPU-poses them, never a silent no-op - the drop logs);
+    /// the default mode stages them exactly like before.
+    #[test]
+    fn unsupported_skinning_drops_pushed_draws() {
+        let draw = skinned_draw();
+        let mut batch = SceneBatch::with_id("test.skin_gate");
+        batch.set_skinning(GpuSkinning::Unsupported);
+        batch.push_skinned(&draw);
+        assert_eq!(batch.skinned_count(), 0, "unsupported drops at push");
+        batch.set_skinning(GpuSkinning::Supported);
+        batch.push_skinned(&draw);
+        assert_eq!(batch.skinned_count(), 1, "supported stages");
     }
 
     #[test]
     fn tonemap_curves_differ_on_highlights() {
-        let src = default_shader();
+        let src = scene_shader(GpuSkinning::Supported);
         assert!(src.contains("repame_tonemap("), "both paths must share it");
         assert!(
             src.contains("repame_pbr_neutral("),
@@ -7695,7 +7932,7 @@ mod tests {
 
     #[test]
     fn reinhard_branch_is_the_unchanged_historical_curve() {
-        let src = default_shader();
+        let src = scene_shader(GpuSkinning::Supported);
         let helper = src
             .split("fn repame_tonemap(")
             .nth(1)

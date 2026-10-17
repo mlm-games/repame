@@ -43,6 +43,7 @@ use crate::pass::{
     MAX_PASS_TARGETS, PassError, PassKind, RenderPass, RenderTarget, RenderTargetFormat,
     TargetSemantics,
 };
+use crate::skin::{GpuSkinning, strip_skin_palette};
 
 /// Kind of screen-space effect one [`PostStage`] runs.
 ///
@@ -1080,6 +1081,76 @@ fn fs_depth(in: VsDepthOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// The `skin` helper both depth vertex stages route through, verbatim from
+/// [`DEPTH_VELOCITY_WGSL`]. Spliced out for devices without
+/// `VERTEX_STORAGE` (see [`depth_velocity_shader`]).
+const DEPTH_SKIN_FN_WGSL: &str = r#"/// Skins a bind-pose position by the palette slots its weights name: the
+/// shared body of both depth vertex stages.
+fn skin(
+    pos: vec3<f32>,
+    joints: vec4<u32>,
+    weights: vec4<f32>,
+    skin_mix: f32,
+    skin_base: f32,
+) -> vec3<f32> {
+    if (skin_mix <= 0.5) {
+        return pos;
+    }
+    let wsum = weights.x + weights.y + weights.z + weights.w;
+    if (wsum <= 1e-8) {
+        return pos;
+    }
+    let base = i32(skin_base + 0.5);
+    var acc = vec3<f32>(0.0);
+    for (var k: i32 = 0; k < 4; k = k + 1) {
+        var w: f32 = 0.0;
+        var slot: i32 = 0;
+        if (k == 0) { w = weights.x; slot = i32(joints.x); }
+        else if (k == 1) { w = weights.y; slot = i32(joints.y); }
+        else if (k == 2) { w = weights.z; slot = i32(joints.z); }
+        else { w = weights.w; slot = i32(joints.w); }
+        w = w / wsum;
+        if (w > 0.0) {
+            let m = skin_palette.joints[base + slot];
+            acc = acc + (m * vec4<f32>(pos, 1.0)).xyz * w;
+        }
+    }
+    return acc;
+}
+"#;
+
+/// Passthrough replacement for [`DEPTH_SKIN_FN_WGSL`] on devices that
+/// cannot read the palette storage buffer. Skinned draws never reach the
+/// depth pipelines on such a device (they drop at push time), so the
+/// passthrough only serves static and CPU-posed geometry.
+const DEPTH_SKIN_FN_PASSTHROUGH_WGSL: &str = r#"// No GPU palette: the device lacks DownlevelFlags::VERTEX_STORAGE.
+fn skin(
+    pos: vec3<f32>,
+    joints: vec4<u32>,
+    weights: vec4<f32>,
+    skin_mix: f32,
+    skin_base: f32,
+) -> vec3<f32> {
+    return pos;
+}
+"#;
+
+/// [`DEPTH_VELOCITY_WGSL`] for `skinning`.
+///
+/// The supported form is the constant byte for byte. On
+/// [`GpuSkinning::Unsupported`] the palette declaration is spliced out and
+/// the `skin` helper becomes a passthrough, so the module never names a
+/// binding the camera layout omits.
+pub(crate) fn depth_velocity_shader(skinning: GpuSkinning) -> String {
+    let mut source = String::from(DEPTH_VELOCITY_WGSL);
+    if !skinning.is_supported() {
+        strip_skin_palette(&mut source);
+        let stripped = source.replace(DEPTH_SKIN_FN_WGSL, DEPTH_SKIN_FN_PASSTHROUGH_WGSL);
+        source = stripped;
+    }
+    source
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1094,6 +1165,30 @@ mod tests {
     fn post_shaders_parse() {
         parses("POST_WGSL", POST_WGSL);
         parses("DEPTH_VELOCITY_WGSL", DEPTH_VELOCITY_WGSL);
+        parses(
+            "depth_velocity_shader(supported)",
+            &depth_velocity_shader(GpuSkinning::Supported),
+        );
+        parses(
+            "depth_velocity_shader(unsupported)",
+            &depth_velocity_shader(GpuSkinning::Unsupported),
+        );
+    }
+
+    /// The depth/velocity shader selection: the supported form is the
+    /// historical constant, the unsupported form drops every reference to
+    /// the palette binding.
+    #[test]
+    fn depth_velocity_shader_splices_the_palette() {
+        let supported = depth_velocity_shader(GpuSkinning::Supported);
+        assert_eq!(supported, DEPTH_VELOCITY_WGSL);
+        assert!(supported.contains("skin_palette.joints[base + slot]"));
+        let unsupported = depth_velocity_shader(GpuSkinning::Unsupported);
+        assert!(!unsupported.contains("skin_palette"), "{unsupported}");
+        assert!(!unsupported.contains("SkinPalette"), "{unsupported}");
+        assert!(unsupported.contains("fn skin("), "call sites stay bound");
+        assert!(unsupported.contains("fn vs_main("), "entry points stay");
+        assert!(unsupported.contains("fn vs_depth("), "entry points stay");
     }
 
     /// The bloom pyramid halves each level and stops at a single pixel: the

@@ -108,9 +108,9 @@ pub use shadow::{
 };
 pub use shadow::{MAX_CASCADES, MAX_POINTS, MAX_SKIN_JOINTS};
 pub use skin::{
-    Animation, Interp, JointPose, MorphSet, MorphTrack, NodePose, SkeletalAdvance, Skeleton,
-    SkeletonLoop, SkeletonPlayer, SkinnedDraw, SkinnedMesh, attach_to_joint, import_animations,
-    import_morphs, import_skeleton, import_skinned,
+    Animation, GpuSkinning, Interp, JointPose, MorphSet, MorphTrack, NodePose, SkeletalAdvance,
+    Skeleton, SkeletonLoop, SkeletonPlayer, SkinnedDraw, SkinnedMesh, attach_to_joint,
+    import_animations, import_morphs, import_skeleton, import_skinned,
 };
 pub use stats::{FrameStats, LatestFrame, RollingAverage, StatsSink};
 pub use stream::{ChunkBuild, ChunkPriority, ChunkStreamer, StreamPlan, plan_stream};

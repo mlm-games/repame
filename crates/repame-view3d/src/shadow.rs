@@ -24,7 +24,7 @@ pub const MAX_POINTS: usize = 8;
 
 /// Max skinned joints per GPU draw. glTF files with more joints fall back
 /// to the CPU [`pose`](crate::SkinnedMesh::pose) path (the batch checks and
-/// warns); 128 joints is 8 KiB of palette uniforms per draw.
+/// warns); 128 joints is 8 KiB of palette per draw.
 pub const MAX_SKIN_JOINTS: usize = 128;
 
 /// Shadow-casting configuration. `None` on [`Frame3d`](crate::Frame3d)

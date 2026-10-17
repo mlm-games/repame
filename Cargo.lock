@@ -3907,6 +3907,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "playgama-bridge"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18a11b946ec1c9fe4fff0528b4fc2a48ac88374a780fc78b2f98e9471c703c6a"
+dependencies = [
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4498,7 +4512,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "repame-actors"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "anyhow",
  "glam 0.33.12",
@@ -4517,7 +4531,7 @@ dependencies = [
 
 [[package]]
 name = "repame-anim"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "bevy_ecs",
  "repame-atlas",
@@ -4528,11 +4542,11 @@ dependencies = [
 
 [[package]]
 name = "repame-atlas"
-version = "0.3.24"
+version = "0.3.25"
 
 [[package]]
 name = "repame-audio"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "anyhow",
  "cpal",
@@ -4547,13 +4561,14 @@ dependencies = [
 
 [[package]]
 name = "repame-content"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "bevy_ecs",
  "flate2",
  "game-utils",
  "gltf",
  "image",
+ "repame-atlas",
  "ron",
  "serde",
  "symphonia",
@@ -4561,7 +4576,7 @@ dependencies = [
 
 [[package]]
 name = "repame-fx"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "bevy_ecs",
  "getrandom 0.4.3",
@@ -4578,7 +4593,7 @@ dependencies = [
 
 [[package]]
 name = "repame-ik"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "glam 0.33.12",
  "repame-view3d",
@@ -4586,7 +4601,7 @@ dependencies = [
 
 [[package]]
 name = "repame-input"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "bevy_ecs",
  "glam 0.33.12",
@@ -4597,7 +4612,7 @@ dependencies = [
 
 [[package]]
 name = "repame-l10n"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "ron",
  "serde",
@@ -4605,7 +4620,7 @@ dependencies = [
 
 [[package]]
 name = "repame-nav"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "glam 0.33.12",
  "repame-physics",
@@ -4613,7 +4628,7 @@ dependencies = [
 
 [[package]]
 name = "repame-net"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "bevy_ecs",
  "repame-sim",
@@ -4621,7 +4636,7 @@ dependencies = [
 
 [[package]]
 name = "repame-physics"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "bevy_ecs",
  "glam 0.33.12",
@@ -4631,7 +4646,7 @@ dependencies = [
 
 [[package]]
 name = "repame-rapier2d"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "bevy_ecs",
  "glam 0.33.12",
@@ -4642,7 +4657,7 @@ dependencies = [
 
 [[package]]
 name = "repame-rapier3d"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "bevy_ecs",
  "glam 0.33.12",
@@ -4653,7 +4668,7 @@ dependencies = [
 
 [[package]]
 name = "repame-reflect"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "bevy_ecs",
  "log",
@@ -4664,7 +4679,7 @@ dependencies = [
 
 [[package]]
 name = "repame-save"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "game-utils",
  "repame-input",
@@ -4676,12 +4691,13 @@ dependencies = [
 
 [[package]]
 name = "repame-shell"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "anyhow",
  "glam 0.33.12",
  "js-sys",
  "log",
+ "playgama-bridge",
  "repame-input",
  "repame-sim",
  "repame-sprite",
@@ -4689,6 +4705,8 @@ dependencies = [
  "repose-core",
  "repose-platform",
  "repose-ui",
+ "serde",
+ "serde_json",
  "wasm-bindgen",
  "web-time",
  "winit",
@@ -4696,7 +4714,7 @@ dependencies = [
 
 [[package]]
 name = "repame-sim"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "bevy_ecs",
  "glam 0.33.12",
@@ -4707,7 +4725,7 @@ dependencies = [
 
 [[package]]
 name = "repame-sprite"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -4722,8 +4740,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "repame-ui"
+version = "0.3.25"
+dependencies = [
+ "glam 0.33.12",
+ "repame-input",
+ "repame-sim",
+ "repose-core",
+ "repose-ui",
+]
+
+[[package]]
 name = "repame-view3d"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "bytemuck",
  "glam 0.33.12",
@@ -4741,7 +4770,7 @@ dependencies = [
 
 [[package]]
 name = "repame-xr"
-version = "0.3.24"
+version = "0.3.25"
 dependencies = [
  "glam 0.33.12",
  "js-sys",

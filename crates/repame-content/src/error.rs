@@ -14,6 +14,12 @@ use std::path::{Path, PathBuf};
 pub enum ContentErrorKind {
     /// The underlying filesystem or stream failed.
     Io,
+    /// The named asset, manifest or archive is not there. Distinct from [`Io`]
+    /// so a caller can substitute a placeholder for an absent asset without
+    /// matching on message text.
+    ///
+    /// [`Io`]: ContentErrorKind::Io
+    Missing,
     /// The bytes were read but did not match the expected structure.
     Format,
     /// The structure is understood, but the format or feature is deliberately
@@ -59,6 +65,21 @@ impl ContentError {
             ContentErrorKind::Unsupported,
             format!("unsupported: {}", message.into()),
         )
+    }
+
+    /// The named file, asset, manifest or archive is not there. `what` names
+    /// the kind of thing that is missing; the path is the caller's key, so a
+    /// missing asset reports its content path and not an absolute location.
+    pub fn missing(path: impl Into<PathBuf>, what: impl Into<String>) -> Self {
+        Self::of(
+            path,
+            ContentErrorKind::Missing,
+            format!("{} is missing", what.into()),
+        )
+    }
+
+    pub fn is_missing(&self) -> bool {
+        self.kind == ContentErrorKind::Missing
     }
 
     /// A malformed structure.

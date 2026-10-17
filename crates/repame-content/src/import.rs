@@ -26,7 +26,11 @@ use game_utils::storage::{FsStorage, Storage};
 pub const IMPORT_FORMAT: u32 = 1;
 pub const IMPORTER_VERSION: u32 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The kind of source an asset is, as declared by a manifest and resolved by
+/// an [`Importer`]. Serializes as its lowercase [`AssetKind::as_str`] name, so
+/// a manifest reads `kind: image`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AssetKind {
     Image,
     Audio,

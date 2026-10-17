@@ -18,7 +18,17 @@ repose-platform = { workspace = true, features = ["gamepad", "sensors"] }
 repose-app.workspace = true
 anyhow.workspace = true
 log.workspace = true
+playgama-bridge = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 web-time.workspace = true
+
+[features]
+# The Playgama web portal backend. Off by default: a desktop build has no
+# bridge to talk to, and the bridge crate's desktop stand-ins answer every call
+# immediately, so a rewarded ad there would read as a reward the player never
+# watched.
+playgama = ["dep:playgama-bridge", "dep:serde", "dep:serde_json"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen.workspace = true

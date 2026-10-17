@@ -1,4 +1,4 @@
-//! App wiring: Repose platform runners plus sim and gamepad helpers.
+//! App wiring: Repose platform runners plus sim, gamepad and portal helpers.
 /// Games provide the root view; `run_*` runners mount only, stepping
 /// stays game-side via [`Sim::step`].
 use std::collections::HashSet;
@@ -16,6 +16,7 @@ mod haptics;
 mod levels;
 mod motion;
 mod pads;
+pub mod portal;
 mod quit;
 mod shortcuts;
 mod staging;
@@ -24,6 +25,7 @@ pub use haptics::{RUMBLE_REFRESH, RUMBLE_UPLOAD_MS, RumbleBridge};
 pub use levels::apply_scheduler_levels;
 pub use motion::{MotionPoller, PadMotion};
 pub use pads::{PadBank, PadBridge, TRIGGER_HELD};
+pub use portal::{AdKind, AdOutcome, GameState, PortalHost, PortalReport, Suspend};
 pub use quit::Quit;
 pub use shortcuts::{
     SharedEdges, ShortcutEdges, game_shortcut_map, install_game_shortcuts, install_handler_into,

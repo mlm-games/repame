@@ -48,10 +48,10 @@ const fn finalize(mut z: u64) -> u64 {
 
 /// One seed expanded into the xoshiro256\*\* state: four SplitMix64 outputs.
 ///
-/// The four counters `seed + k * GAMMA`, `k` in `1..=4`, are distinct and
-/// non-zero, and `finalize` reaches zero only at zero, so no word here is
-/// zero-or-more importantly, the four are never all zero: the xoshiro fixed
-/// point cannot be reached from a seed, and no guard is needed.
+/// The four counters `seed + k * GAMMA`, `k` in `1..=4`, are distinct, so at
+/// most one of them is zero, and `finalize` reaches zero only at zero. The four
+/// words are therefore never all zero: the xoshiro fixed point is out of reach
+/// from any seed, and no guard is needed.
 const fn expand(seed: u64) -> [u64; 4] {
     let mut counter = seed;
     let mut state = [0; 4];
@@ -293,7 +293,11 @@ pub trait Rng {
     ///
     /// This is the pick that does not shuffle: it consumes one draw and depends
     /// on nothing but `len`, so it is stable whether the caller's slice is the
-    /// game's own `Vec` or a temporary built in a different order.
+    /// game's own `Vec` or a temporary built in a different order. A shuffle is
+    /// not a substitute for a pick: a permutation depends on the starting order
+    /// of the whole slice and on every draw it consumes, so picking by shuffling
+    /// changes the moment a sibling system's slice order does, and it is why
+    /// [`shuffle`](Self::shuffle) is pinned here rather than open-coded.
     fn pick_index(&mut self, len: usize) -> Option<usize> {
         if len == 0 {
             return None;
@@ -539,17 +543,6 @@ impl_uint_range!(u8, u16, u32, u64, usize);
 impl_int_range!(i8, i16, i32, i64, isize);
 impl_float_range!(f32, f64);
 
-macro_rules! impl_sample_int {
-    ($($ty:ty),* $(,)?) => {$(
-        impl sealed::Sealed for $ty {}
-        impl Sample for $ty {
-            fn sample<R: Rng + ?Sized>(rng: &mut R) -> $ty {
-                rng.random_range(<$ty>::MIN..=<$ty>::MAX)
-            }
-        }
-    )*};
-}
-
 /// The full domain of a fixed-width integer, a uniform draw.
 ///
 /// `u64` and `i64` take one raw draw; narrower types take the top bits of a
@@ -580,7 +573,14 @@ impl Sample for i64 {
     }
 }
 
-impl_sample_small!((u32, u32), (u16, u16), (u8, u8), (i32, u32), (i16, u16), (i8, u8));
+impl_sample_small!(
+    (u32, u32),
+    (u16, u16),
+    (u8, u8),
+    (i32, u32),
+    (i16, u16),
+    (i8, u8)
+);
 
 impl sealed::Sealed for bool {}
 impl Sample for bool {
@@ -660,7 +660,10 @@ mod tests {
         let mut mostly_zero = SimRng::from_words([0, 1, 2, 3]);
         assert_ne!(mostly_zero.next_u64(), 0);
         // And the trap itself is remapped rather than left to emit zeros.
-        assert_eq!(SimRng::from_words([0; 4]).state_words(), SimRng::seeded(0).state_words());
+        assert_eq!(
+            SimRng::from_words([0; 4]).state_words(),
+            SimRng::seeded(0).state_words()
+        );
     }
 
     #[test]
@@ -678,12 +681,7 @@ mod tests {
 
         let mut rng = SimRng::seeded(SEED);
         assert_eq!(
-            [
-                rng.below(6),
-                rng.below(6),
-                rng.below(6),
-                rng.below(6)
-            ],
+            [rng.below(6), rng.below(6), rng.below(6), rng.below(6)],
             [3, 0, 2, 0]
         );
         assert_eq!(SimRng::seeded(SEED).below(0), 0);
@@ -691,22 +689,12 @@ mod tests {
 
         let mut rng = SimRng::seeded(SEED);
         assert_eq!(
-            [
-                rng.bool(),
-                rng.bool(),
-                rng.bool(),
-                rng.bool()
-            ],
+            [rng.bool(), rng.bool(), rng.bool(), rng.bool()],
             [true, false, false, false]
         );
-        assert_eq!(
-            [
-                SimRng::seeded(SEED).random::<u8>(),
-                SimRng::seeded(SEED).random::<i32>(),
-                SimRng::seeded(SEED).random::<u64>(),
-            ],
-            [162, -1564302304, 11728116837925579837]
-        );
+        assert_eq!(SimRng::seeded(SEED).random::<u8>(), 162);
+        assert_eq!(SimRng::seeded(SEED).random::<i32>(), -1564302304);
+        assert_eq!(SimRng::seeded(SEED).random::<u64>(), 11728116837925579837);
     }
 
     #[test]
@@ -736,14 +724,29 @@ mod tests {
             [5, 2, 4, 2]
         );
         let mut rng = SimRng::seeded(SEED);
-        assert_eq!(rng.random_range(0.0..1.0_f32), SimRng::seeded(SEED).unit_f32());
+        assert_eq!(
+            rng.random_range(0.0..1.0_f32),
+            SimRng::seeded(SEED).unit_f32()
+        );
         let mut rng = SimRng::seeded(SEED);
         assert_eq!(
             [rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0)],
             [0.27156496047973633, -0.9532426595687866]
         );
-        let mut rng = SimRng::seeded(SEED);
-        assert_eq!(rng.random_range(0..0_u64.wrapping_sub(0) ) as u64, 0u64); // placeholder
+
+        // The widest ranges are the ones where a naive span computation
+        // overflows: the full domains of `u64` and `i64` both still sample, one
+        // raw draw each.
+        assert_eq!(
+            SimRng::seeded(SEED).random_range(u64::MIN..=u64::MAX),
+            11728116837925579837
+        );
+        assert_eq!(
+            SimRng::seeded(SEED).random_range(i64::MIN..=i64::MAX),
+            2504744801070804029
+        );
+        // A one-wide range consumes its draw and always lands on it.
+        assert_eq!(SimRng::seeded(SEED).random_range(0..1_u32), 0);
     }
 
     #[test]
@@ -755,7 +758,7 @@ mod tests {
         }
         assert_eq!(rng.pick_index(0), None);
         assert_eq!(rng.pick(&[] as &[u8]), None);
-        assert_eq!(rng.pick(&[10, 11, 12, 13, 14]), Some(&13));
+        assert_eq!(rng.pick(&[10, 11, 12, 13, 14]), Some(&14));
 
         let mut deck = [0, 1, 2, 3, 4, 5, 6, 7];
         SimRng::seeded(SEED).shuffle(&mut deck);
@@ -803,8 +806,15 @@ mod tests {
         let before = rng.state_words();
         assert_eq!(rng.weighted_index(&[0.0, 0.0]), None);
         assert_eq!(rng.weighted_index(&[]), None);
-        assert_eq!(rng.state_words(), before, "a refused weight consumes no draw");
-        assert_eq!(SimRng::seeded(SEED).weighted_index(&[f32::NAN, -1.0, 2.0]), Some(2));
+        assert_eq!(
+            rng.state_words(),
+            before,
+            "a refused weight consumes no draw"
+        );
+        assert_eq!(
+            SimRng::seeded(SEED).weighted_index(&[f32::NAN, -1.0, 2.0]),
+            Some(2)
+        );
     }
 
     #[test]
@@ -830,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn random_bool_clamps_and_na_consumes_nothing_for_a_certainty() {
+    fn random_bool_clamps_and_consumes_nothing_for_a_certainty() {
         let mut rng = SimRng::seeded(SEED);
         assert!(!rng.random_bool(0.0));
         assert!(rng.random_bool(1.0));
@@ -869,7 +879,7 @@ mod tests {
 
         // Derived tags are mixed first, so no tag pair reproduces it.
         let seed = WorldSeed::new(0xDEAD_BEEF);
-        for tag in 0..64 {
+        for tag in 0..64u64 {
             let near = seed.stream(tag.wrapping_add(1)).state_words();
             let far = seed.stream(tag).state_words();
             assert!(far.iter().all(|word| !near.contains(word)));

@@ -1,0 +1,15 @@
+[package]
+name = "repame-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "shared game UI kit: action queue, run flow, focus navigation, palette voices, touch overlay"
+
+[dependencies]
+repame-sim.workspace = true
+repame-input.workspace = true
+glam.workspace = true
+repose-core.workspace = true
+repose-ui.workspace = true

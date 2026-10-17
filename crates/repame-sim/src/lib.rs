@@ -10,8 +10,11 @@
 //! affected system, or replays diverge the moment allocation history does.
 //! Cross-platform float equality (notably `Perlin`/`sin`/`powf` in fx) is
 //! additionally *not* guaranteed between native libm and wasm; same-binary
-//! replay is the supported claim, cross-target equality needs a harness
-//! (run one trace twice, hash the world per tick, diff).
+//! replay is the supported claim. [`tape`] is the harness that turns the claim
+//! into a check inside one binary (record one intent per tick, hash the world
+//! after each tick in a canonical order, replay, diff), and carrying a tape
+//! plus its hashes to another target is what makes that target's claim one
+//! comparison instead of an argument.
 
 use web_time::Duration;
 
@@ -21,11 +24,17 @@ use bevy_ecs::system::ScheduleSystem;
 
 pub use bevy_ecs;
 
+pub mod hash;
+pub mod rng;
 pub mod state;
+pub mod tape;
 pub mod task;
 pub mod timer;
 
+pub use hash::Hash64;
+pub use rng::{Rng, SimRng, WorldSeed};
 pub use state::{NextState, State, States, in_state};
+pub use tape::{Divergence, Intent, Setup, Tape, VerifyError, WorldHasher};
 pub use task::{Task, TaskPool};
 pub use timer::{StepTimer, TimerMode};
 

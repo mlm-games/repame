@@ -632,7 +632,7 @@ dependencies = [
  "spin",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1274,7 +1274,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1457,7 +1457,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3634,7 +3634,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4321,9 +4321,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "renamite-animation"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75e6759509f99e723fd4d0e9f73f48f76a052984e21689306292ff8f9802d048"
+checksum = "94f11befeab6e9a5fa459e7dc8a7539efec0ab9aea607ccdb6641a97ec92b69b"
 dependencies = [
  "glam 0.33.12",
  "renamite-geometry",
@@ -4332,9 +4332,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-behavior-common"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd1e233ec0a364f21e9ad9c19fa434a2a51deb73d669077d19379ba5a8af9d06"
+checksum = "0425c0bd9792230dbf4642597ad6b9151c01687f72fc0405ccf87d6e6ebf4b7d"
 dependencies = [
  "glam 0.33.12",
  "kurbo",
@@ -4350,9 +4350,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-geometry"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc6417519526dacf62f1257ee6f40c3d03a6b18c57208a1961ad853f9fddd90b"
+checksum = "9233f85787bd1d4888c5333d29341a0440e93b5125c7be2740f4028aee83f862"
 dependencies = [
  "glam 0.33.12",
  "kurbo",
@@ -4363,9 +4363,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-history"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90245ad4201aab9dc8ae86d10011e1b80364a84c510361a68cc313a2a468ecb7"
+checksum = "3ea22cc0764822449fd07c40b866b2f5ade296e9a68092890312775f75138ff7"
 dependencies = [
  "glam 0.33.12",
  "renamite-animation",
@@ -4380,9 +4380,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-io-ren"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "597dd6e4819a7c4d02865017041ae6bc7072a3f8edb146ded8c2e7b6fff1fdb0"
+checksum = "32e7da6f27ff535ad2e8c7646c2442d07f63f674868c347d0b339a84f6a7bfd4"
 dependencies = [
  "glam 0.33.12",
  "postcard",
@@ -4398,9 +4398,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-machine"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b085c17a36277345312c2d577aa80c8e39503445807790b3a796052bb85252f"
+checksum = "d92f77a4ec8322fd45ea21775cbf95cf7e275058c24b5888506805d35aa4fc4e"
 dependencies = [
  "glam 0.33.12",
  "renamite-animation",
@@ -4413,9 +4413,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-model"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47a19d73114a447ec4604c78791ee620b3ffdceb2b85a15dc81d672d27851e28"
+checksum = "9dc7c896cd785cdeda6d31213b93780d28a065ca321d301ad8aa8833184169c3"
 dependencies = [
  "glam 0.33.12",
  "kurbo",
@@ -4430,9 +4430,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-player"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be894ae7b8055830b571ee88ae91071eb988ccd241712546b96281efa36718a2"
+checksum = "5b68ad1d58ff7205fa677dc4fdaf0e90bea1268142f7f4b5972426304e6e0945"
 dependencies = [
  "glam 0.33.12",
  "kurbo",
@@ -4446,9 +4446,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-player-ui"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3015178ac2bae0fdbc459a5b0e78cf2d212cd3f1fabf3751de268078d7c05eb"
+checksum = "6ca11a4e2673e7f900686aa25002ddcefeedba77d2704fd0355b0e963f266cdc"
 dependencies = [
  "glam 0.33.12",
  "renamite-behavior-common",
@@ -4461,9 +4461,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-render-bridge"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "205aa9ce2ecc9f8aa056d3061a71829a928b95b114cb97280e5b93f7e9f458e0"
+checksum = "2fef1117b4a54e0d7218e7886b129bd4528b50e5831f583e676deaddcb99f1b3"
 dependencies = [
  "glam 0.33.12",
  "kurbo",
@@ -4480,9 +4480,9 @@ dependencies = [
 
 [[package]]
 name = "renamite-text"
-version = "0.3.17"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b545f76b0502f5a86cd573178f59887161f1a6fe42685f063a258100fc581be2"
+checksum = "aa90bc3d5e0fd0384e39916084471d475c19165e452151681697b4151c6d4519"
 dependencies = [
  "kurbo",
  "repose-text",
@@ -5070,7 +5070,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5677,10 +5677,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5689,7 +5689,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6613,7 +6613,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

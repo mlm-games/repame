@@ -5,6 +5,8 @@ use bevy_ecs::schedule::IntoScheduleConfigs;
 use glam::Vec3;
 use repame_sim::{Sim, SimTime};
 
+pub mod flat;
+
 /// Feet position plus half extents. `pos` is the AABB min corner, so standing
 /// on cell `y` means `pos.y == y + 1`.
 #[derive(Clone, Copy, Debug)]

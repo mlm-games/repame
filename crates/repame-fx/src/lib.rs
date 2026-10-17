@@ -32,6 +32,7 @@ pub mod flash;
 pub mod numbers;
 pub mod particles;
 pub mod particles3d;
+pub mod timestop;
 pub mod transitions;
 pub mod trauma;
 
@@ -53,6 +54,7 @@ pub use particles3d::{
     Particle3, Spawner3, burst3, particle_groups, spawn_particle3, step_particles3,
     step_particles3_secs, tick_spawners3, tick_spawners3_secs,
 };
+pub use timestop::{HitStop, SlowMotion, slow_motion, step_hitstop_slowmo_secs};
 pub use transitions::{
     TransitionFx, TransitionVisual, VORTEX_CUSTOM_ID, secs_to_ticks as transition_secs_to_ticks,
     ticks_to_secs as transition_ticks_to_secs,

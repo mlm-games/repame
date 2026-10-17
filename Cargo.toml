@@ -53,6 +53,7 @@ renamite-render-bridge = { version = "0.3" }
 renamite-model = { version = "0.3" }
 renamite-animation = { version = "0.3" }
 kurbo = "0.13"
+flate2 = "1"
 
 repame-sim = { path = "crates/repame-sim", version = "0.3.20" }
 repame-view3d = { path = "crates/repame-view3d", version = "0.3.20" }

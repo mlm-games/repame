@@ -1,0 +1,12 @@
+[package]
+name = "repame-l10n"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "runtime localization: catalogs, CLDR plurals, locale registry, missing-key reporting"
+
+[dependencies]
+ron.workspace = true
+serde.workspace = true

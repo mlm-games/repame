@@ -1,0 +1,31 @@
+[package]
+name = "repame-xr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "XR: session lifecycle, reference spaces, stereo views, action sets, and the runtime seam"
+
+[features]
+default = []
+openxr = ["dep:openxr"]
+webxr = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
+
+[dependencies]
+glam.workspace = true
+log.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `loaded` (the default feature) is what lets a machine with no runtime answer
+# `Unavailable` instead of failing to link. OpenXR is a native loader: the
+# dependency is kept off wasm32 so that even `--all-features` can be built for
+# the browser, where WebXR is the runtime.
+openxr = { version = "0.22", optional = true, default-features = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+# The WebXR interfaces web-sys gates behind `--cfg=web_sys_unstable_apis` are
+# declared in `src/webxr.rs`; only the stable WebGL2 types are taken from here.
+web-sys = { version = "0.3.106", features = ["DomPointReadOnly", "WebGl2RenderingContext", "WebGlFramebuffer"], optional = true }

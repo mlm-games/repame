@@ -1,17 +1,46 @@
+//! Headless RON project, scene, resource and asset content foundation.
+//!
+//! * [`Project`] loads and validates a `project.ron` manifest with its scenes,
+//!   assets and resources, and spawns scenes into a `bevy_ecs` [`World`].
+//! * [`ImporterRegistry`] is the plugin-shaped import pipeline: one [`Importer`]
+//!   per source kind, with provenance written to a sidecar record.
+//! * [`HotReloader`] watches the content root in development, re-imports only
+//!   what changed and publishes [`ArtifactSwap`]s to apply at a boundary.
+//! * [`codec`] parses DDS and KTX 2 containers and decodes BC1, BC3 and BC4
+//!   blocks; [`package`] reads and writes ZIP archives and PCK-like indexes.
+//!
+//! [`World`]: bevy_ecs::prelude::World
+
+pub mod codec;
+pub mod package;
+
 mod error;
 mod import;
 mod model;
 mod project;
+mod reload;
+mod watch;
 
 pub const PROJECT_FORMAT: u32 = 1;
 pub const PROJECT_FILE: &str = "project.ron";
 
-pub use error::ContentError;
+pub use codec::{
+    BlockCodec, BlockCodecRegistry, DecodedImage, TextureFormat, TextureInfo, TextureKind,
+    TextureLevel, parse_container,
+};
+pub use error::{ContentError, ContentErrorKind};
 pub use import::{
-    AssetKind, IMPORT_FORMAT, IMPORTER_VERSION, ImportCache, ImportRecord, ImportedAsset,
+    AssetKind, AudioImporter, BinaryImporter, GltfImporter, IMPORT_FORMAT, IMPORTER_VERSION,
+    ImageImporter, ImportCache, ImportContext, ImportOutput, ImportRecord, ImportedAsset, Importer,
+    ImporterRegistry, RonImporter, TextImporter,
 };
 pub use model::{
     AssetEntry, ProjectManifest, ResourceEntry, SceneDocument, SceneEntity, SceneEntityData,
     SceneEntry, SceneInstance, TypeRegistry,
 };
+pub use package::{
+    Compression, Package, PackageEntry, PackageWriter, PckDirectory, PckEntry, crc32,
+};
 pub use project::{AssetSource, Project, ResourceSource, content_hash};
+pub use reload::{ArtifactSwap, HotReloader, ReloadOutcome};
+pub use watch::{AssetWatcher, FileStamp, WatchEvent, WatchEventKind, diff_snapshots};

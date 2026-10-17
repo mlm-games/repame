@@ -21,12 +21,22 @@ use bevy_ecs::system::ScheduleSystem;
 
 pub use bevy_ecs;
 
+pub mod state;
+pub mod task;
+pub mod timer;
+
+pub use state::{NextState, State, States, in_state};
+pub use task::{Task, TaskPool};
+pub use timer::{StepTimer, TimerMode};
+
 /// Fixed-step sim state. Game registers systems,
 /// feeds wall time with `step`, reads `world` for the snapshot.
 pub struct Sim {
     /// Entity/component store. Game crates add their own components here.
     pub world: World,
     schedule: Schedule,
+    /// Per-state transition appliers, run before `schedule` each tick.
+    state_appliers: Vec<Box<dyn FnMut(&mut World) + Send + Sync>>,
     accumulator: Duration,
     /// Fixed step size. Default 60 Hz.
     ///
@@ -58,6 +68,7 @@ impl Sim {
         Self {
             world,
             schedule: Schedule::default(),
+            state_appliers: Vec::new(),
             accumulator: Duration::ZERO,
             step,
             time_scale: 1.0,
@@ -85,6 +96,73 @@ impl Sim {
     ) -> &mut Self {
         self.schedule.add_systems(systems);
         self
+    }
+
+    /// Register a state set with its initial value.
+    ///
+    /// Call once per state type, before `on_enter`/`on_exit`/`on_transition`.
+    /// Transitions are applied at the head of each step, before the main
+    /// schedule, so gameplay never observes a half-switched state.
+    pub fn add_state<S: States>(&mut self, initial: S) -> &mut Self {
+        self.world.insert_resource(State::<S>::new(initial));
+        self.world.insert_resource(NextState::<S>::new());
+        state::init_schedules::<S>(&mut self.world);
+        self.state_appliers.push(Box::new(state::apply::<S>));
+        self
+    }
+
+    /// Systems that run when `state` is entered.
+    ///
+    /// Panics if `add_state` was not called for this state set first.
+    pub fn on_enter<S, M>(
+        &mut self,
+        state: S,
+        systems: impl IntoScheduleConfigs<ScheduleSystem, M>,
+    ) -> &mut Self
+    where
+        S: States,
+    {
+        state::add_enter(&mut self.world, state, systems);
+        self
+    }
+
+    /// Systems that run when `state` is exited.
+    pub fn on_exit<S, M>(
+        &mut self,
+        state: S,
+        systems: impl IntoScheduleConfigs<ScheduleSystem, M>,
+    ) -> &mut Self
+    where
+        S: States,
+    {
+        state::add_exit(&mut self.world, state, systems);
+        self
+    }
+
+    /// Systems that run on the `exited -> entered` edge.
+    pub fn on_transition<S, M>(
+        &mut self,
+        exited: S,
+        entered: S,
+        systems: impl IntoScheduleConfigs<ScheduleSystem, M>,
+    ) -> &mut Self
+    where
+        S: States,
+    {
+        state::add_transition(&mut self.world, exited, entered, systems);
+        self
+    }
+
+    /// Request a state change, equivalent to writing `NextState<S>` from a
+    /// system. Panics if the state set was not registered.
+    pub fn set_state<S: States>(&mut self, next: S) -> &mut Self {
+        self.world.resource_mut::<NextState<S>>().set(next);
+        self
+    }
+
+    /// The current value of a state set.
+    pub fn state<S: States>(&self) -> &S {
+        self.world.resource::<State<S>>().get()
     }
 
     /// Advance by `dt` wall time. Returns ticks run.
@@ -173,8 +251,17 @@ impl Sim {
             time.delta_secs = self.step.as_secs_f32() * time_scale;
             time.elapsed_secs += self.step.as_secs_f64() * time_scale as f64;
         }
-        self.schedule.run(&mut self.world);
-        after_tick(&mut self.world);
+        let Sim {
+            state_appliers,
+            world,
+            schedule,
+            ..
+        } = self;
+        for apply in state_appliers.iter_mut() {
+            apply(world);
+        }
+        schedule.run(world);
+        after_tick(world);
     }
 }
 

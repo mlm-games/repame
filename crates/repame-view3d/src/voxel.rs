@@ -713,6 +713,136 @@ fn push_water_quad<F, G>(
     push_face(water, quad, tint, dir, normal, input.lit, input.textured);
 }
 
+/// Aggregated view of a [`VoxelSource`] at `stride` cells per coarse cell,
+/// used by [`build_chunk_mesh_lod`]. One coarse cell covers a
+/// `stride`-cubed block: it is solid when any sub-cell is (conservative, a
+/// coarse mesh never punches holes a fine one would not have), takes the
+/// first solid kind found in fixed axis order, and is fluid only when no
+/// opaque sub-cell exists.
+struct CoarseVoxels<'a, S, F> {
+    source: &'a S,
+    stride: i32,
+    origin: [i32; 3],
+    classify: &'a F,
+}
+
+impl<S, F> VoxelSource for CoarseVoxels<'_, S, F>
+where
+    S: VoxelSource,
+    F: Fn(u32) -> FaceKind,
+{
+    fn get(&self, cell: [i32; 3]) -> Option<Cell> {
+        let base = [
+            self.origin[0] + cell[0] * self.stride,
+            self.origin[1] + cell[1] * self.stride,
+            self.origin[2] + cell[2] * self.stride,
+        ];
+        let mut fluid: Option<u32> = None;
+        for dz in 0..self.stride {
+            for dy in 0..self.stride {
+                for dx in 0..self.stride {
+                    let Some(block) = self
+                        .source
+                        .get([base[0] + dx, base[1] + dy, base[2] + dz])
+                    else {
+                        continue;
+                    };
+                    match (self.classify)(block.kind) {
+                        FaceKind::Empty => {}
+                        FaceKind::Opaque => return Some(Cell::full(block.kind)),
+                        FaceKind::Fluid => fluid = fluid.or(Some(block.kind)),
+                    }
+                }
+            }
+        }
+        fluid.map(Cell::full)
+    }
+}
+
+/// Appends `src`'s geometry to `dst`, offsetting indices; copies the pass
+/// flags when `dst` is still empty.
+fn append_group(dst: &mut MeshGroup, src: &MeshGroup) {
+    if src.is_empty() {
+        return;
+    }
+    if dst.is_empty() {
+        dst.transparent = src.transparent;
+        dst.depth_test = src.depth_test;
+        dst.alpha = src.alpha;
+        dst.alpha_cutoff = src.alpha_cutoff;
+        dst.texture_page = src.texture_page;
+        dst.material = src.material;
+        dst.material_index = src.material_index;
+        dst.pick_id = src.pick_id;
+    }
+    let base = dst.positions.len() as u32;
+    dst.positions.extend_from_slice(&src.positions);
+    dst.colors.extend_from_slice(&src.colors);
+    dst.normals.extend_from_slice(&src.normals);
+    dst.uvs.extend_from_slice(&src.uvs);
+    dst.indices
+        .extend(src.indices.iter().map(|index| index + base));
+}
+
+/// Scales a coarse chunk's geometry into world space: coarse cell `c`
+/// becomes `origin + c * stride`.
+fn scale_group(group: &mut MeshGroup, stride: i32, origin: [i32; 3]) {
+    let stride = stride as f32;
+    for p in &mut group.positions {
+        p[0] = origin[0] as f32 + p[0] * stride;
+        p[1] = origin[1] as f32 + p[1] * stride;
+        p[2] = origin[2] as f32 + p[2] * stride;
+    }
+}
+
+/// Builds one chunk's meshes at a coarser level: `stride^3` source blocks
+/// aggregate into one coarse cell, the coarse grid runs through the same
+/// greedy mesher as [`build_chunk_mesh`], and the result is scaled back into
+/// world space. `stride == 1` is exactly [`build_chunk_mesh`].
+///
+/// Level-`stride` chunks cover `CHUNK_SIZE * stride` world units, so the
+/// chunk grid coarsens with the level by the same factor (a level-2 chunk is
+/// the area of four level-1 chunks); callers stream coarse chunk
+/// coordinates, not the fine ones. `stride` is clamped to `1..=CHUNK_SIZE`,
+/// and appends into `output` like the fine path.
+pub fn build_chunk_mesh_lod<S, F, G>(
+    grid: &S,
+    cpos: [i32; 3],
+    stride: i32,
+    input: &ChunkMeshInput<F, G>,
+    output: &mut ChunkMeshOutput,
+) where
+    S: VoxelSource,
+    F: Fn(u32) -> FaceKind,
+    G: Fn(u32) -> bool,
+{
+    let stride = stride.clamp(1, CHUNK_SIZE);
+    if stride == 1 {
+        build_chunk_mesh(grid, cpos, input, output);
+        return;
+    }
+    let origin = chunk_origin(cpos);
+    let coarse = CoarseVoxels {
+        source: grid,
+        stride,
+        origin,
+        classify: &input.classify,
+    };
+    let mut coarse_out = ChunkMeshOutput::default();
+    build_chunk_mesh(&coarse, [0, 0, 0], input, &mut coarse_out);
+    for group in coarse_out.opaque.values_mut() {
+        scale_group(group, stride, origin);
+    }
+    scale_group(&mut coarse_out.water, stride, origin);
+    output.merged_quads += coarse_out.merged_quads;
+    output.fallback_quads += coarse_out.fallback_quads;
+    for (kind, group) in coarse_out.opaque {
+        append_group(output.opaque.entry(kind).or_default(), &group);
+    }
+    append_group(&mut output.water, &coarse_out.water);
+    output.opaque.retain(|_, group| !group.is_empty());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -962,5 +1092,76 @@ mod tests {
         build_chunk_mesh(&grid, [1, 0, 0], &input(), &mut right);
         let total = left.tri_count() / 2 + right.tri_count() / 2;
         assert_eq!(total, 10, "12 faces minus 2 shared: {total}");
+    }
+
+    /// Stride 1 is the fine path, triangle for triangle.
+    #[test]
+    fn lod_stride_one_matches_the_fine_path() {
+        let grid = grid_of(&[
+            ([0, 0, 0], Cell::full(GRASS)),
+            ([5, 0, 3], Cell::full(STONE)),
+        ]);
+        let mut fine = ChunkMeshOutput::default();
+        build_chunk_mesh(&grid, [0, 0, 0], &input(), &mut fine);
+        let mut lod = ChunkMeshOutput::default();
+        build_chunk_mesh_lod(&grid, [0, 0, 0], 1, &input(), &mut lod);
+        assert_eq!(lod.tri_count(), fine.tri_count());
+        assert_eq!(
+            lod.opaque[&GRASS].tri_count(),
+            fine.opaque[&GRASS].tri_count()
+        );
+        assert!(super::super::chunk::validate_group(&lod.opaque[&GRASS]));
+    }
+
+    /// `stride^3` blocks aggregate into one coarse cell, and the coarse mesh
+    /// comes back scaled into world units.
+    #[test]
+    fn lod_aggregates_blocks_into_coarse_cells() {
+        let mut cells = Vec::new();
+        for x in 0..2 {
+            for y in 0..2 {
+                for z in 0..2 {
+                    cells.push(([x, y, z], Cell::full(STONE)));
+                }
+            }
+        }
+        let grid = grid_of(&cells);
+        let mut out = ChunkMeshOutput::default();
+        build_chunk_mesh_lod(&grid, [0, 0, 0], 2, &input(), &mut out);
+        let mesh = &out.opaque[&STONE];
+        assert_eq!(mesh.tri_count() / 2, 6, "one coarse cube");
+        let max = |axis: usize| {
+            mesh.positions
+                .iter()
+                .map(|p| p[axis])
+                .fold(f32::MIN, f32::max)
+        };
+        assert!((max(0) - 2.0).abs() < 1e-6, "x scaled to 2 units: {}", max(0));
+        assert!((max(1) - 2.0).abs() < 1e-6, "y scaled to 2 units: {}", max(1));
+        assert!((max(2) - 2.0).abs() < 1e-6, "z scaled to 2 units: {}", max(2));
+        assert!(super::super::chunk::validate_group(mesh));
+    }
+
+    /// A comb mesh collapses to a slab at stride 2: the level really trades
+    /// triangles, not just vertex positions.
+    #[test]
+    fn lod_trades_detail_for_triangle_count() {
+        let mut cells = Vec::new();
+        for x in (0..16).step_by(2) {
+            for z in 0..16 {
+                cells.push(([x, 0, z], Cell::full(GRASS)));
+            }
+        }
+        let grid = grid_of(&cells);
+        let mut fine = ChunkMeshOutput::default();
+        build_chunk_mesh(&grid, [0, 0, 0], &input(), &mut fine);
+        let mut coarse = ChunkMeshOutput::default();
+        build_chunk_mesh_lod(&grid, [0, 0, 0], 2, &input(), &mut coarse);
+        assert!(
+            coarse.tri_count() * 4 < fine.tri_count(),
+            "coarse {} tris vs fine {}",
+            coarse.tri_count(),
+            fine.tri_count()
+        );
     }
 }

@@ -9,8 +9,7 @@
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use glam::Vec2;
-use glam::Vec3;
+use glam::{Mat4, Vec2, Vec3};
 use repose_core::input::{PointerButton, PointerEventKind};
 use repose_core::{Modifier, View};
 use repose_render_wgpu::{
@@ -82,6 +81,53 @@ pub struct Frame3d {
     /// viewport paints into has its own clear; this selects the scene
     /// target clear inside the viewport-owned pass.
     pub background: Option<[f32; 4]>,
+    /// Camera exposure and depth-of-field attributes. `Some` overrides
+    /// [`light`](Frame3d::light)`s exposure with the resolved value, and its
+    /// DOF (when [`post`](Frame3d::post) leaves `dof` unset) enables the
+    /// post-process chain.
+    pub attributes: Option<crate::CameraAttributes>,
+    /// Post-process + anti-aliasing. `None` (default) keeps the legacy single
+    /// scene pass; `Some` plans the bloom/DOF/motion-blur/FXAA chain and
+    /// renders the scene into it (see [`crate::postfx::PostProcess`]).
+    pub post: Option<crate::PostProcess>,
+    /// GPU particle systems for this frame. `None` (default) skips the
+    /// simulation and the billboard draws entirely; `Some` runs one compute
+    /// dispatch per live system before the frame's geometry and draws each
+    /// system's billboards into its declared pass. The frame's `dt` lives on
+    /// [`ParticleFrame::dt`](crate::ParticleFrame::dt): a fixed `dt` and a
+    /// fixed seed replay identically.
+    pub particles: Option<crate::ParticleFrame>,
+    /// Reflection probes for this frame, capped at
+    /// [`MAX_PROBES`](crate::MAX_PROBES). Empty (default) leaves probe
+    /// sampling off. Each probe captures its cube on its own interval and
+    /// every lit fragment samples the cubes with the probe's falloff
+    /// volume.
+    pub probes: Vec<crate::ProbeSettings>,
+    /// Hierarchical-Z occlusion culling state for this frame (`None` =
+    /// off). Build the pyramid from the depth pass's readback and feed it
+    /// the frame after; see [`crate::OcclusionCulling`]. An explicit state
+    /// here wins over the viewport-driven feed
+    /// ([`occlusion_feed`](Frame3d::occlusion_feed)), which is the path
+    /// games normally use.
+    pub occlusion: Option<crate::OcclusionCulling>,
+    /// Viewport-driven occlusion feed (`Some` = armed, the default). When
+    /// the frame also declares a depth pass, the viewport runs a compute
+    /// pass chain over that pass's target: tile maxima, then each coarser
+    /// level, the whole chain mapped back without waiting and built into the
+    /// [`DepthPyramid`](crate::DepthPyramid), staging the culling state on
+    /// the next frame - occlusion culling with no game-side readback
+    /// plumbing, at the cost of one dispatch (plus one per extra level) and
+    /// the level chain (about 4/3 of the level-0 tile count) read back per
+    /// frame. A frame that declares no depth pass gets the engine's own
+    /// [`PassKind::Occlusion`](crate::PassKind::Occlusion) pass, sized to
+    /// the viewport, so the feed works without a post chain. With
+    /// [`OcclusionFeedDesc::phase_two`] armed the same frame's
+    /// chain is also used before the scene pass draws: the depth pass runs
+    /// first, a compute pass re-tests the phase-one rejects and the scene
+    /// pass draws them through indirect args, so no false negative survives
+    /// a frame. `None` disables the feed (no dispatch, no map) and leaves
+    /// [`occlusion`](Frame3d::occlusion) as the only source.
+    pub occlusion_feed: Option<crate::OcclusionFeedDesc>,
     /// Cold-start viewport size in physical px, used for the GPU camera
     /// until the first painted size arrives (same role as `repame-sprite`
     /// `FrameInput::viewport_dp`). Falls back to 16:9.
@@ -101,6 +147,12 @@ impl Default for Frame3d {
             rig: None,
             skinned: Vec::new(),
             background: None,
+            attributes: None,
+            post: None,
+            particles: None,
+            probes: Vec::new(),
+            occlusion: None,
+            occlusion_feed: Some(crate::OcclusionFeedDesc::default()),
             viewport_px: [1600.0, 900.0],
         }
     }
@@ -129,6 +181,28 @@ impl Frame3d {
         self.light = rig.sun;
         self.rig = Some(rig);
         self.shadow = None;
+    }
+
+    /// Resolves the frame's post-process settings: the frame's own
+    /// [`post`](Frame3d::post), with the camera attributes' DOF folded in when
+    /// the post block left it unset.
+    pub fn resolved_post(&self) -> Option<crate::PostProcess> {
+        let mut post = self.post?;
+        if post.dof.is_none()
+            && let Some(dof) = self.attributes.and_then(|attributes| attributes.dof)
+        {
+            post.dof = Some(dof);
+        }
+        Some(post)
+    }
+
+    /// Expands `gizmos` into the frame's overlay channel using `eye` as the
+    /// camera position, so debug lines billboard toward the viewer and draw
+    /// on top of the scene.
+    pub fn push_gizmos(&mut self, gizmos: &crate::gizmos::Gizmos, eye: Vec3) {
+        if let Some(group) = gizmos.to_group(eye) {
+            self.groups.push(group);
+        }
     }
 
     /// Push one GPU-skinned draw (bind mesh + sampled palette).
@@ -346,6 +420,15 @@ struct DragState {
 /// `batch_desc` must match `input.desc` (the texture shape the groups
 /// pack against): the batch is keyed on it and rebuilds, dropping
 /// texture contents, when it changes, exactly like the sprite batch.
+///
+/// Occlusion culling needs no game-side wiring: with the feed armed
+/// ([`Frame3d::occlusion_feed`], the default) and a depth pass declared for
+/// the frame, the viewport copies that pass's target after submission, maps
+/// it without ever waiting and stages the pyramid on the next frame. A frame
+/// whose readback has not landed yet culls nothing rather than pacing the
+/// frame around the GPU; the price is one frame of latency, which the state
+/// absorbs by carrying the camera the depth was captured with. A caller that
+/// stages [`Frame3d::occlusion`] itself wins over the feed.
 #[allow(non_snake_case)] // Repose view convention (cf. resims `Viewport3d`).
 pub fn Viewport3d(
     input: Frame3d,
@@ -474,6 +557,7 @@ pub fn Viewport3d(
     let payload = GpuViewport3d {
         input: draw_input.clone(),
         geom: geom_out.arc(),
+        history: geom_out.history(),
         batch_id: draw_id,
         batch_desc,
     };
@@ -505,34 +589,55 @@ impl Default for ViewportGeom {
 /// Shared paint-time geometry. GPU callbacks need `Send + Sync`, so the
 /// inner cell is mutex-backed (same pattern as `repame-sprite`
 /// `GeomHandle`).
+///
+/// It also owns the view's cross-frame camera history (the previous frame's
+/// view-projection for motion vectors), so a `Viewport3d` call that rebuilds
+/// its payload every frame still sees the previous frame's camera.
 #[derive(Clone, Default)]
-pub struct GeomHandle(Arc<Mutex<ViewportGeom>>);
+pub struct GeomHandle {
+    geom: Arc<Mutex<ViewportGeom>>,
+    history: Arc<Mutex<CameraHistory>>,
+}
 
 impl GeomHandle {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(ViewportGeom::default())))
+        Self::default()
     }
 
     pub fn get(&self) -> ViewportGeom {
-        self.0.lock().map(|g| *g).unwrap_or_default()
+        self.geom.lock().map(|g| *g).unwrap_or_default()
     }
 
     pub fn set(&self, g: ViewportGeom) {
-        if let Ok(mut slot) = self.0.lock() {
+        if let Ok(mut slot) = self.geom.lock() {
             *slot = g;
         }
     }
 
     pub fn arc(&self) -> Arc<Mutex<ViewportGeom>> {
-        self.0.clone()
+        self.geom.clone()
+    }
+
+    fn history(&self) -> Arc<Mutex<CameraHistory>> {
+        self.history.clone()
     }
 }
 
 struct GpuViewport3d {
     input: Arc<Frame3d>,
     geom: Arc<Mutex<ViewportGeom>>,
+    /// Previous frame's view-projection, for camera motion vectors. Shared
+    /// across the payloads the view rebuilds each frame.
+    history: Arc<Mutex<CameraHistory>>,
     batch_id: String,
     batch_desc: BatchDesc,
+}
+
+/// Camera state that must outlive a single frame's payload (the payload is
+/// rebuilt during composition every frame).
+#[derive(Clone, Copy, Debug, Default)]
+struct CameraHistory {
+    previous_view_proj: Option<Mat4>,
 }
 
 impl GpuViewport3d {
@@ -564,36 +669,41 @@ impl WgpuCallback for GpuViewport3d {
         screen: &ScreenDescriptor,
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        let vp = self
+        let vp_px = self
             .geom
             .lock()
             .map(|g| g.viewport_px)
             .unwrap_or(self.input.viewport_px);
-        let w = vp[0].max(1.0) as u32;
-        let h = vp[1].max(1.0) as u32;
-        let aspect = Frame3d::aspect(vp);
+        let w = vp_px[0].max(1.0) as u32;
+        let h = vp_px[1].max(1.0) as u32;
+        let aspect = Frame3d::aspect(vp_px);
         let desc = self.effective_desc();
+        let view_proj = self.input.cam.view_proj(aspect);
+        let eye = self.input.cam.eye();
         let mut batch = SceneBatch::with_desc(self.batch_id.clone(), desc);
-        batch.set_camera(self.input.cam.view_proj(aspect));
-        batch.set_camera_pos(self.input.cam.eye().into());
+        batch.set_camera(view_proj);
+        batch.set_camera_pos(eye.into());
         batch.set_camera_forward(self.input.cam.forward().into());
+        let mut light = self.input.light;
+        if let Some(attributes) = &self.input.attributes {
+            attributes.apply_to(&mut light);
+        }
         match &self.input.rig {
             Some(rig) => {
-                let vp = self.input.cam.view_proj(aspect);
+                let mut rig = rig.clone();
+                if let Some(attributes) = &self.input.attributes {
+                    attributes.apply_to(&mut rig.sun);
+                }
                 batch.set_rig(
-                    rig,
-                    self.input.cam.eye().into(),
+                    &rig,
+                    eye.into(),
                     self.input.cam.view_matrix(),
-                    vp.inverse(),
+                    view_proj.inverse(),
                 );
             }
             None => {
-                batch.set_light(self.input.light);
-                batch.set_shadow(
-                    self.input.shadow,
-                    self.input.cam.target.into(),
-                    self.input.cam.dist,
-                );
+                batch.set_light(light);
+                batch.set_shadow(self.input.shadow, self.input.cam.target.into(), self.input.cam.dist);
             }
         }
         let slots: Vec<u32> = self
@@ -608,16 +718,112 @@ impl WgpuCallback for GpuViewport3d {
                 }
             })
             .collect();
+        // Frame history: the depth/velocity pass reprojects through this,
+        // so it must be the previous frame's view-projection, not this one.
+        let previous = self
+            .history
+            .lock()
+            .map(|mut history| history.previous_view_proj.replace(view_proj))
+            .unwrap_or_default();
+        let mut post = self.input.resolved_post();
+        if let Some(post) = post.as_mut()
+            && post.previous_view_proj.is_none()
+        {
+            post.previous_view_proj = previous;
+        }
+        let batch_format = crate::pass::RenderTargetFormat::from_wgpu(screen.target_format)
+            .unwrap_or(crate::pass::RenderTargetFormat::Rgba8UnormSrgb);
+        let chain = match post.as_ref().map(|post| post.plan([w, h], batch_format)) {
+            Some(Ok(chain)) => chain,
+            Some(Err(err)) => {
+                log::warn!("viewport: post-process disabled this frame: {err}");
+                None
+            }
+            None => None,
+        };
+        // The scene renders into the plan's first pass when a post chain is
+        // active, otherwise into the shared offscreen scene target.
+        let scene_pass = chain.as_ref().map_or(0, |chain| chain.scene_pass);
+        if chain.is_some() {
+            batch.set_post(post);
+        }
+        // Caller-staged occlusion wins over the feed; a frame that stages its
+        // own state owns its pass list too.
+        let feed = if self.input.occlusion.is_some() {
+            None
+        } else {
+            self.input.occlusion_feed
+        };
+        // The feed owns a view-depth pass: when the frame declares none, the
+        // engine appends its own, so occlusion culling never depends on the
+        // post chain. A declared Depth pass is used as-is.
+        let mut passes = chain
+            .as_ref()
+            .map(|chain| chain.passes.clone())
+            .unwrap_or_default();
+        if feed.is_some()
+            && !passes.iter().any(|pass| {
+                matches!(
+                    pass.kind,
+                    crate::PassKind::Depth | crate::PassKind::Occlusion
+                )
+            })
+        {
+            passes.push(crate::pass::RenderPass {
+                target: crate::pass::RenderTarget::new(
+                    "__repame_occlusion",
+                    w,
+                    h,
+                    crate::pass::RenderTargetFormat::Rgba16Float,
+                    crate::pass::TargetSemantics::LinearDepth,
+                ),
+                kind: crate::PassKind::Occlusion,
+                source: None,
+                groups: Vec::new(),
+                presents: false,
+                overlay: [0.0; 4],
+                post: None,
+                aux: None,
+            });
+        }
+        if !passes.is_empty()
+            && let Err(error) = batch.set_passes(&passes)
+        {
+            // A user pass may already own the synthesized target's name;
+            // stage the declared list alone, which is the pre-feed behavior.
+            log::warn!("viewport: pass list dropped: {error:?}");
+            let declared = chain
+                .as_ref()
+                .map(|chain| chain.passes.as_slice())
+                .unwrap_or(&[]);
+            batch.set_passes(declared).ok();
+        }
         for g in &self.input.groups {
             match g.material_index {
-                index if index < slots.len() => batch.push_group_with_material(g, slots[index]),
-                _ => batch.push_group(g),
+                index if index < slots.len() => {
+                    batch.push_group_with_material_for_pass(g, slots[index], scene_pass)
+                }
+                _ => batch.push_group_for_pass(g, scene_pass),
             }
         }
         for s in &self.input.skinned {
-            batch.push_skinned(s);
+            batch.push_skinned_for_pass(s, scene_pass);
         }
         batch.extend_uploads(self.input.uploads.iter().cloned());
+        batch.set_particles(self.input.particles.clone());
+        batch.set_probes(&self.input.probes);
+        // Occlusion: a caller-staged state wins outright; otherwise the
+        // viewport's own feed (armed by `occlusion_feed`) supplies the
+        // previous frame's pyramid when its readback has landed. The poll
+        // never waits: a map still in flight leaves the frame with no
+        // occlusion state instead of pacing the frame around the GPU (one
+        // frame of latency is the design, see `crate::occlusion`).
+        let fed = match feed {
+            Some(_) => batch.poll_occlusion_feed(device, resources),
+            None => None,
+        };
+        batch.set_occlusion(self.input.occlusion.clone().or(fed));
+        batch.set_occlusion_feed(feed);
         batch.finish();
         batch.ensure_resources(device, screen, resources);
         batch.upload_all(device, queue, resources);
@@ -632,6 +838,29 @@ impl WgpuCallback for GpuViewport3d {
             h,
             self.input.background.unwrap_or([0.0, 0.0, 0.0, 1.0]),
         );
+        // Request the next frame's occlusion feed: a compute chain reduces
+        // the depth target into the packed level pyramid in this frame's
+        // encoder, after the depth pass drew, and its host map is scheduled
+        // for submission, so the chain lands a frame later and is tested
+        // with the camera that captured it. A frame the depth pass had
+        // nothing to draw for drops the feed instead: its target still
+        // holds an older frame, which must not be fed forward.
+        match feed {
+            Some(desc) => {
+                batch.encode_occlusion_readback(
+                    device,
+                    queue,
+                    resources,
+                    encoder,
+                    view_proj,
+                    eye.into(),
+                    self.input.cam.forward().into(),
+                    desc.clamped_tile(),
+                    desc.clamped_bias(),
+                );
+            }
+            None => batch.retire_occlusion_feed(device, resources),
+        }
         Vec::new()
     }
 

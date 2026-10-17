@@ -1,0 +1,12 @@
+[package]
+name = "repame-ik"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "IK solvers and skeleton modifiers over repame-view3d skeletons"
+
+[dependencies]
+repame-view3d.workspace = true
+glam.workspace = true

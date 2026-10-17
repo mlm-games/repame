@@ -1,7 +1,18 @@
-//! [`Music`]: track director with crossfade, intensity stems, ducking.
-//! `play` crossfades between tracks; `set_intensity` mixes stems by
-//! window; `duck` dips under dialog and releases. `update(dt)` advances
-//! the duck envelope.
+//! [`Music`]: track director with crossfade, intensity stems, ducking, and
+//! interactive (vertical and horizontal) remixing.
+//!
+//! - **Vertical remix**: [`Music::set_intensity`] mixes the layered stems of
+//!   the current track by their `[lo, hi]` windows, retargeted through short
+//!   fades, so intensity layers cross in and out without a seam.
+//! - **Horizontal remix**: [`Music::play_synced`] and [`Music::stinger`] hand
+//!   control to another track (or fire a one-shot) at a musical branch point.
+//!   The game names the quantum (see [`SyncPoint::beats`]) and the audio
+//!   thread resolves the branch to the next multiple of that quantum in the
+//!   outgoing loop's phase, so the hand-off lands on an exact sample rather
+//!   than on a frame boundary.
+//! - **Ducking**: [`Music::duck`] dips under dialog and releases.
+//!
+//! `update(dt)` advances the duck envelope and pumps the decode worker.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -9,7 +20,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use web_workers::sync::mpsc::Sender;
 
-use crate::command::{PlayCmd, RealtimeCommand, SharedFrames};
+use crate::command::{MusicStart, MusicTransition, PlayCmd, RealtimeCommand, SharedFrames};
 use crate::loader::{DecodeDone, DecodeJob, Loader, spawn as spawn_loader};
 use crate::{AudioChannel, AudioState, decode_to_device, retarget_to};
 
@@ -19,6 +30,43 @@ pub struct StemDef {
     pub lo: f32,
     pub hi: f32,
     pub gain: f32,
+}
+
+/// Where a horizontal transition should land.
+///
+/// The branch frame is resolved on the audio thread against the outgoing
+/// loop's phase, so it is sample-exact even though the request crosses a
+/// command queue. `Quantum` is in device frames; use [`SyncPoint::beats`] to
+/// build one from a tempo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPoint {
+    /// Branch as soon as the audio thread sees the request.
+    Immediate,
+    /// Branch at the next multiple of `quantum_frames` of the outgoing
+    /// loop's playback position.
+    Quantum(u64),
+}
+
+impl SyncPoint {
+    /// Branch on the next multiple of `beat_frames * beats`. A zero length is
+    /// [`SyncPoint::Immediate`], because every frame is a boundary then.
+    pub fn beats(beat_frames: u64, beats: u32) -> Self {
+        let quantum = beat_frames.saturating_mul(beats.max(1) as u64);
+        if quantum == 0 {
+            Self::Immediate
+        } else {
+            Self::Quantum(quantum)
+        }
+    }
+
+    /// Device frames per beat at `bpm` and the given sample rate, for
+    /// [`SyncPoint::beats`].
+    pub fn beat_frames(sample_rate: u32, bpm: f32) -> u64 {
+        if sample_rate == 0 || bpm <= 0.0 {
+            return 0;
+        }
+        (sample_rate as f64 * 60.0 / bpm as f64).round() as u64
+    }
 }
 
 struct Stem {
@@ -81,7 +129,7 @@ pub struct Music {
     /// Track names queued on the loader but not decoded yet.
     pending: HashSet<String>,
     /// `play` requested while the track was still decoding.
-    desired: Option<(String, f32)>,
+    desired: Option<(String, f32, SyncPoint)>,
 }
 
 impl Music {
@@ -207,7 +255,7 @@ impl Music {
             None => {
                 if self.pending.contains(name) {
                     // Still on the loader worker: start when it lands.
-                    self.desired = Some((name.to_owned(), fade_secs));
+                    self.desired = Some((name.to_owned(), fade_secs, SyncPoint::Immediate));
                     return true;
                 }
                 self.desired = None;
@@ -269,9 +317,141 @@ impl Music {
         true
     }
 
-    /// Hard stop with a fade-out. Also cancels a deferred play.
-    pub fn stop(&mut self, fade_secs: f32) {
+    /// Crossfade to a track at a musical branch point (horizontal remix).
+    ///
+    /// Same contract as [`Music::play`], except the hand-off is resolved on
+    /// the audio thread at the next multiple of `sync`'s quantum in the
+    /// outgoing loop's phase. Silence between now and the branch, if any, is
+    /// the outgoing track playing on; nothing is cut short.
+    pub fn play_synced(&mut self, name: &str, fade_secs: f32, sync: SyncPoint) -> bool {
+        let (tx, state) = match (&self.tx, &self.state) {
+            (Some(tx), Some(state)) => (tx.clone(), state.clone()),
+            _ => return false,
+        };
+        if !self.tracks.contains_key(name) {
+            if self.pending.contains(name) {
+                self.desired = Some((name.to_owned(), fade_secs, sync));
+                return true;
+            }
+            self.desired = None;
+            log::warn!("unknown music track `{name}`");
+            return false;
+        }
+        let track = self.tracks.get(name).expect("checked above");
+        let mut starts = Vec::new();
+        let mut voices = Vec::new();
+        let main = state.alloc_voice();
+        starts.push(MusicStart {
+            voice: main,
+            sound: track.main.clone(),
+            gain: self.stem_target(None, track),
+            looping: true,
+            bus: AudioChannel::Music,
+        });
+        voices.push((main, None));
+        for (i, stem) in track.stems.iter().enumerate() {
+            let id = state.alloc_voice();
+            starts.push(MusicStart {
+                voice: id,
+                sound: stem.sound.clone(),
+                gain: self.stem_target(Some(i), track),
+                looping: true,
+                bus: AudioChannel::Music,
+            });
+            voices.push((id, Some(i)));
+        }
+        let quantum_frames = match sync {
+            SyncPoint::Immediate => None,
+            SyncPoint::Quantum(f) => Some(f),
+        };
+        let phase_from = self.main_voice();
+        let transition = self.build_transition(phase_from, quantum_frames, starts, fade_secs);
         self.desired = None;
+        // The outgoing voices ride in the transition: they keep playing until
+        // the branch frame and then crossfade, so nothing is cut early.
+        let _ = tx.send_spin(RealtimeCommand::MusicTransition(transition));
+        self.current = Some(Playing {
+            name: name.to_string(),
+            voices,
+        });
+        true
+    }
+
+    /// Fire a one-shot over the current track at a branch point, optionally
+    /// ducking the music under it (horizontal remix stinger).
+    ///
+    /// Stingers are not tracked as the current track, so [`Music::now_playing`]
+    /// keeps reporting the loop underneath. `duck_db` shades the loop for the
+    /// stinger's length plus a short release; `0.0` leaves it alone.
+    pub fn stinger(&mut self, name: &str, sync: SyncPoint, duck_db: f32) -> bool {
+        let (tx, state) = match (&self.tx, &self.state) {
+            (Some(tx), Some(state)) => (tx.clone(), state.clone()),
+            _ => return false,
+        };
+        let Some(track) = self.tracks.get(name) else {
+            log::warn!("unknown music stinger `{name}`");
+            return false;
+        };
+        let start = MusicStart {
+            voice: state.alloc_voice(),
+            sound: track.main.clone(),
+            gain: track.gain,
+            looping: false,
+            bus: AudioChannel::Music,
+        };
+        let quantum_frames = match sync {
+            SyncPoint::Immediate => None,
+            SyncPoint::Quantum(f) => Some(f),
+        };
+        let phase_from = self.main_voice();
+        let transition = self.build_transition(phase_from, quantum_frames, vec![start], 0.02);
+        // Stinger length at the device rate, for the duck hold.
+        let hold = track.main.len_frames() as f32 / state.sample_rate().max(1) as f32;
+        let _ = tx.send_spin(RealtimeCommand::MusicTransition(transition));
+        if duck_db < 0.0 {
+            self.duck(duck_db, hold, 0.4);
+        }
+        true
+    }
+
+    /// Assemble a transition against the live current track.
+    fn build_transition(
+        &self,
+        phase_from: Option<u64>,
+        quantum_frames: Option<u64>,
+        starts: Vec<MusicStart>,
+        fade_secs: f32,
+    ) -> MusicTransition {
+        let outgoing = self
+            .current
+            .as_ref()
+            .map(|c| c.voices.iter().map(|(v, _)| *v).collect())
+            .unwrap_or_default();
+        MusicTransition {
+            phase_from,
+            outgoing,
+            starts,
+            quantum_frames,
+            fade_out_secs: fade_secs.max(0.0),
+            fade_in_secs: fade_secs.max(0.0),
+        }
+    }
+
+    /// Voice id of the current track's main mix: the loop whose phase defines
+    /// the branch quantum.
+    fn main_voice(&self) -> Option<u64> {
+        self.current
+            .as_ref()
+            .and_then(|c| c.voices.iter().find(|(_, s)| s.is_none()).map(|(v, _)| *v))
+    }
+
+    /// Device sample rate, or `0` before the stream opens.
+    pub fn sample_rate(&self) -> u32 {
+        self.state.as_ref().map(|s| s.sample_rate()).unwrap_or(0)
+    }
+
+    /// Hard stop with a fade-out. Also cancels a deferred play.
+    pub fn stop(&mut self, fade_secs: f32) {        self.desired = None;
         if let (Some(tx), Some(old)) = (&self.tx, self.current.take()) {
             for (voice, _) in old.voices {
                 let _ = tx.send_spin(RealtimeCommand::Fade {
@@ -334,7 +514,11 @@ impl Music {
                 },
                 DecodeDone::TrackFailed { name, error } => {
                     self.pending.remove(&name);
-                    if self.desired.as_ref().is_some_and(|(n, _)| n == &name) {
+                    if self
+                        .desired
+                        .as_ref()
+                        .is_some_and(|(n, _, _)| n == &name)
+                    {
                         self.desired = None;
                     }
                     log::warn!("music track `{name}` failed to load: {error}");
@@ -349,10 +533,17 @@ impl Music {
         if self
             .desired
             .as_ref()
-            .is_some_and(|(n, _)| self.tracks.contains_key(n))
+            .is_some_and(|(n, _, _)| self.tracks.contains_key(n))
         {
-            let (name, fade) = self.desired.take().expect("checked above");
-            let _ = self.play(&name, fade);
+            let (name, fade, sync) = self.desired.take().expect("checked above");
+            match sync {
+                SyncPoint::Immediate => {
+                    let _ = self.play(&name, fade);
+                }
+                _ => {
+                    let _ = self.play_synced(&name, fade, sync);
+                }
+            }
         }
     }
 

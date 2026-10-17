@@ -7,6 +7,7 @@ use std::sync::Arc;
 use web_workers::sync::mpsc::{Receiver, Sender, channel};
 
 use crate::AudioChannel;
+use crate::bus::BusTree;
 use crate::state::AudioState;
 
 /// Decoded PCM shared with the audio thread. Interleaved f32.
@@ -47,6 +48,37 @@ pub struct PlayCmd {
     pub looping: bool,
 }
 
+/// Voice to start at a scheduled music branch point.
+#[derive(Debug, Clone)]
+pub struct MusicStart {
+    pub voice: u64,
+    pub sound: Arc<SharedFrames>,
+    /// Gain the fade-in ramps to.
+    pub gain: f32,
+    pub looping: bool,
+    pub bus: AudioChannel,
+}
+
+/// A music transition handed to the audio thread, which resolves the branch
+/// frame itself so the hand-off is sample-exact.
+///
+/// `phase_from` is the voice whose loop position defines the musical grid
+/// (normally the outgoing main mix). With `quantum_frames` set and that voice
+/// alive, the branch lands on the next multiple of the quantum in its phase;
+/// otherwise it happens immediately. `outgoing` voices ramp down over
+/// `fade_out_secs` and `starts` ramp up over `fade_in_secs`, both starting at
+/// the resolved frame.
+#[derive(Debug, Clone)]
+pub struct MusicTransition {
+    pub phase_from: Option<u64>,
+    pub outgoing: Vec<u64>,
+    pub starts: Vec<MusicStart>,
+    /// Frames between branch points; `None` branches immediately.
+    pub quantum_frames: Option<u64>,
+    pub fade_out_secs: f32,
+    pub fade_in_secs: f32,
+}
+
 /// Game to audio commands. Unknown voice ids are ignored.
 #[derive(Debug, Clone)]
 pub enum RealtimeCommand {
@@ -57,6 +89,14 @@ pub enum RealtimeCommand {
         bus: AudioChannel,
         gain: f32,
     },
+    /// Fader move on any bus of the tree.
+    SetBusGain {
+        bus: crate::BusId,
+        gain: f32,
+    },
+    /// Replace the routing/effects layout. Gains already in the tree travel
+    /// with it; use [`RealtimeCommand::SetBusGain`] for a live fader.
+    SetBusTree(Arc<BusTree>),
     Pause(bool),
     /// Ramp a voice gain to `target` over `secs` (linear).
     Fade {
@@ -64,6 +104,13 @@ pub enum RealtimeCommand {
         target: f32,
         secs: f32,
     },
+    /// Retune a live voice (Doppler, playback speed).
+    SetRate {
+        voice: u64,
+        rate: f32,
+    },
+    /// Sample-accurate music hand-off.
+    MusicTransition(MusicTransition),
 }
 
 /// Audio -> game events, drained in [`crate::Audio::update`].

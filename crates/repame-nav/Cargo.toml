@@ -1,0 +1,12 @@
+[package]
+name = "repame-nav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Spatial navigation: heightfield navmesh bake, A* path queries, funnel corridors, agents, obstacles and links"
+
+[dependencies]
+glam.workspace = true
+repame-physics.workspace = true

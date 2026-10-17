@@ -4,6 +4,22 @@
 //! The batch draws mesh groups with depth testing and reports orbit and pick events.
 //! Camera state lives in game signals. Groups carry verts, indices, tint, normals, uvs.
 //!
+//! Beyond the mesh path the frame can carry:
+//!
+//! * [`ParticleFrame`] - GPU particle emitters ([`particles`]): a compute pass
+//!   spawns/integrates/collides/sub-emits, and camera-facing billboards draw
+//!   through the same depth buffer and pass chain as the scene.
+//! * [`ProbeSettings`] - reflection probes ([`reflection`]): a cube captured
+//!   at a point and sampled by the material path with a falloff volume.
+//! * [`OcclusionCulling`] - hierarchical-Z occlusion from the previous frame's
+//!   depth ([`occlusion`]), applied before the frustum phase. The viewport
+//!   drives the readback itself with [`OcclusionFeedDesc`] (armed by default on
+//!   frames that declare a depth pass), so games need no feed of their own.
+//! * [`PostProcess`] - bloom, DOF, camera motion blur, FXAA and ray-marched
+//!   volumetric fog ([`postfx`]).
+//! * [`LodGroup`] - distance/hysteresis mesh LOD ([`lod`]), with coarse voxel
+//!   chunks from [`build_chunk_mesh_lod`].
+//!
 //! ```ignore
 //! let mut frame = Frame3d::default();
 //! frame.push(ground_group());
@@ -16,11 +32,17 @@
 
 pub mod camera;
 pub mod chunk;
+pub mod gizmos;
 pub mod gltf;
+pub mod lod;
 pub mod material;
 pub mod mesh;
+pub mod occlusion;
+pub mod particles;
 pub mod pass;
 pub mod pick;
+pub mod postfx;
+pub mod reflection;
 pub mod render;
 pub mod shading;
 pub mod shadow;
@@ -34,23 +56,50 @@ pub mod vertex;
 pub mod viewport;
 pub mod voxel;
 
-pub use camera::{FAR, NEAR, OPENGL_TO_WGPU, OrbitCamera};
+pub use camera::{
+    AabbColliders, CameraAttributes, CameraCollision, DampValue, FAR, NEAR, NoCollision,
+    OPENGL_TO_WGPU, OrbitCamera, Smoothed, SmoothedCamera, SpringArm, SpringArmState,
+    exp_decay, exp_decay_alpha, ray_aabb_entry, wrap_pi,
+};
 pub use chunk::{ChunkCache, ChunkDraw, ChunkEntry, validate_group};
+pub use gizmos::{AXIS_X, AXIS_Y, AXIS_Z, GizmoColor, Gizmos, WHITE, YELLOW};
 pub use gltf::{
     ImportSkip, ImportedMesh, alpha_mode, fan_to_list, flatten_imported, import_slice, material_of,
     strip_to_list,
 };
+pub use lod::{LodError, LodGroup, LodSelector, MAX_LOD_LEVELS, select_level};
 pub use material::{
     DEFAULT_KCOLORS, KColors, Light, MAX_KCOLORS, MAX_LIGHTS, MAX_TEV_STAGES, MAX_TEX_UNITS,
     MaterialFog, Rgba, ShadingError, ShadingModel, TevArg, TevBias, TevDest, TevMode, TevOp,
     TevScale, TevStage,
 };
 pub use mesh::{Material, MeshGroup, Rgb, shade, shade_for_dir};
+pub use occlusion::{
+    DEFAULT_BIAS, DEFAULT_TILE, DepthPyramid, DepthSource, MAX_TILE, OcclusionCulling,
+    OcclusionFeedDesc, aabb_ndc, decode_f16, nearest_view_depth,
+};
 pub use pass::{
     MAX_PASS_TARGETS, PassError, PassKind, RenderPass, RenderTarget, RenderTargetFormat,
     TargetSemantics, pass_order, validate_passes,
 };
+pub use particles::{
+    Attractor, CollisionMode, EmitterShape, MAX_ATTRACTORS, MAX_COLLIDER_BOXES, MAX_CURVE_KEYS,
+    MAX_REQUEST_RING, PARTICLE_BILLBOARD_WGSL, PARTICLE_BYTES, PARTICLE_COMPUTE_WGSL, Particle,
+    ParticleColliders, ParticleCurve, ParticleDisplay, ParticleError, ParticleFrame,
+    ParticleGradient, ParticleSystem, ParticleVoxels, SIMULATE_WORKGROUP, SUB_REQUEST_BYTES,
+    SubEmitter, SubEmitterMode, bounce_velocity, curve_sample, gradient_sample, hash_u32,
+    integrate_step, random01, sample_cone, segment_box, segment_voxels,
+};
 pub use pick::{MeshHit, group_bounds, pick_ray, pick_screen, ray_aabb, ray_triangle};
+pub use postfx::{
+    AntiAliasing, BloomSettings, DEPTH_TARGET, DofSettings, FxaaSettings, MAX_BLOOM_LEVELS,
+    MotionBlurSettings, PostChain, PostEffect, PostError, PostProcess, PostStage, SCENE_TARGET,
+    VolumetricFogSettings, bloom_pyramid, coc_radius, fxaa_direction, fxaa_edge_applies, fxaa_luma,
+};
+pub use reflection::{
+    MAX_PROBES, MAX_PROBE_RESOLUTION, MIN_PROBE_RESOLUTION, ProbeError, ProbeSettings,
+    probe_weight,
+};
 pub use render::{BatchDesc, LightRig, SceneBatch, SceneFilter, SceneLight, SceneUpload};
 pub use render::{paint_scene_with_id, prepare_scene_with_id};
 pub use shading::{ShadedBatch, ShadedGroup, ShaderCache, ShadingUniform, kcolor_view};
@@ -80,5 +129,5 @@ pub use vertex::{
 pub use viewport::{CLICK_SLOP_PX, Frame3d, GeomHandle, View3dEvent, Viewport3d, ViewportGeom};
 pub use voxel::{
     CHUNK_SIZE, Cell, ChunkMeshInput, ChunkMeshOutput, DIRS, FaceKind, THIN_HEIGHT, VoxelShape,
-    VoxelSource, build_chunk_mesh, neighbor_occludes, world_dir_to_local,
+    VoxelSource, build_chunk_mesh, build_chunk_mesh_lod, neighbor_occludes, world_dir_to_local,
 };

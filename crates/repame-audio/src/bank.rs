@@ -327,6 +327,22 @@ impl SoundBank {
         self.play_at_ms(name, g, 1.0, pan, now_ms).map(|(id, _)| id)
     }
 
+    /// Scaled play for callers that computed their own gain/rate/pan, such as
+    /// the 3D spatializer. Returns the voice id and the cue's own gain, which
+    /// a live re-target needs to preserve.
+    pub fn play_scaled(
+        &mut self,
+        name: &str,
+        gain_scale: f32,
+        rate_scale: f32,
+        pan: f32,
+    ) -> Option<(u64, f32)> {
+        let cue_gain = self.cues.get(name)?.def.gain.max(0.0);
+        let now_ms = self.boot.elapsed().as_millis() as u64;
+        self.play_at_ms(name, gain_scale, rate_scale, pan, now_ms)
+            .map(|(id, _)| (id, cue_gain))
+    }
+
     /// Deterministic entry: explicit spatial shaping and clock.
     /// Returns `(voice, rate)` so tests can observe the wobble.
     /// Stealing drops the oldest voice and sends `Stop` without waiting;

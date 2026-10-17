@@ -185,8 +185,10 @@ pub fn material_fragment(model: &ShadingModel) -> Result<String, ShadingError> {
     body.push_str("    var lit_in = vec4<f32>(in.color, in.alpha);\n");
     body.push_str("    if (in.lit_flag > 0.5) {\n");
     body.push_str("        let n = normalize(in.normal);\n");
+    body.push_str("        let v = normalize(camera.cam_pos - in.world_pos);\n");
     body.push_str("        let ndl = max(dot(n, camera.light_dir), 0.0);\n");
-    body.push_str("        lit_in = vec4<f32>(in.color * (camera.ambient + camera.light_color * ndl * camera.diffuse), in.alpha);\n");
+    body.push_str("        let probe = repame_probe(in.world_pos, n, v, in.color, in.metallic, in.roughness);\n");
+    body.push_str("        lit_in = vec4<f32>(in.color * (camera.ambient + camera.light_color * ndl * camera.diffuse) + probe, in.alpha);\n");
     body.push_str("    }\n");
     for line in wgsl_program(model).lines() {
         if !line.trim().is_empty() {

@@ -6,6 +6,12 @@
 //! [`Frame3d::passes`](crate::Frame3d::passes) to the batch, which runs them in
 //! order and hands each resolved result back as a plain RGBA8 image the next
 //! pass (or the game) can sample.
+//!
+//! [`crate::postfx::PostProcess`] builds such a list automatically; a declared
+//! [`PassKind::Depth`] target is filled by replaying the frame's scene geometry
+//! (see [`crate::render::prepare_scene_with_id`]), and the viewport appends a
+//! [`PassKind::Occlusion`] pass of its own when a frame arms
+//! [`crate::Frame3d::occlusion_feed`] and declares no depth pass.
 
 /// Pixel format of a render target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -32,6 +38,21 @@ impl RenderTargetFormat {
     pub const fn is_depth(self) -> bool {
         matches!(self, Self::Depth32Float)
     }
+
+    /// The target format matching a GPU texture format, or `None` when the
+    /// batch cannot render into it. Lets a caller planning passes (post
+    /// processing) pick a scene format that the batch's pipelines accept.
+    pub const fn from_wgpu(format: wgpu::TextureFormat) -> Option<Self> {
+        match format {
+            wgpu::TextureFormat::Rgba8Unorm => Some(Self::Rgba8Unorm),
+            wgpu::TextureFormat::Rgba8UnormSrgb => Some(Self::Rgba8UnormSrgb),
+            wgpu::TextureFormat::Bgra8Unorm => Some(Self::Bgra8Unorm),
+            wgpu::TextureFormat::Rgba16Float => Some(Self::Rgba16Float),
+            wgpu::TextureFormat::R32Float => Some(Self::R32Float),
+            wgpu::TextureFormat::Depth32Float => Some(Self::Depth32Float),
+            _ => None,
+        }
+    }
 }
 
 /// What a target holds, so the batch can pick a pipeline and a clear policy.
@@ -54,6 +75,17 @@ pub enum TargetSemantics {
 pub enum PassKind {
     /// Draw groups into the target.
     Render,
+    /// Fill the target by replaying the frame's scene geometry as view-depth
+    /// and camera velocity (`RGBA16F`: depth, velocity x, velocity y, 1). The
+    /// batch owns the geometry, so this pass takes no `groups`.
+    Depth,
+    /// The engine's own view-depth replay for the occlusion feed, identical
+    /// in target requirements and content to [`PassKind::Depth`]. The
+    /// viewport appends one when a frame arms
+    /// [`crate::Frame3d::occlusion_feed`] and declares no depth pass, so
+    /// occlusion culling never depends on the post chain; games do not
+    /// declare it themselves.
+    Occlusion,
     /// Resolve the source target into a sampled texture.
     Resolve,
     /// Fullscreen blit or post chain over the source.
@@ -140,6 +172,11 @@ pub struct RenderPass {
     pub presents: bool,
     /// Tint and opacity applied by a presenting composite.
     pub overlay: [f32; 4],
+    /// Screen-space effect a [`PassKind::Fullscreen`] pass runs. `None` keeps
+    /// the plain tinted blit.
+    pub post: Option<crate::postfx::PostStage>,
+    /// Second target a post stage samples (`None` binds a dummy).
+    pub aux: Option<String>,
 }
 
 impl RenderPass {
@@ -151,6 +188,8 @@ impl RenderPass {
             groups,
             presents: false,
             overlay: [1.0, 1.0, 1.0, 1.0],
+            post: None,
+            aux: None,
         }
     }
 
@@ -163,6 +202,8 @@ impl RenderPass {
             groups: Vec::new(),
             presents: false,
             overlay: [1.0, 1.0, 1.0, 1.0],
+            post: None,
+            aux: None,
         }
     }
 
@@ -170,6 +211,12 @@ impl RenderPass {
     pub fn presenting(mut self, overlay: [f32; 4]) -> Self {
         self.presents = true;
         self.overlay = overlay;
+        self
+    }
+
+    /// Runs `stage` in this fullscreen pass.
+    pub fn with_post(mut self, stage: crate::postfx::PostStage) -> Self {
+        self.post = Some(stage);
         self
     }
 }
@@ -189,8 +236,10 @@ pub enum PassError {
     MultiplePresenting,
 }
 
-/// Hardware ceiling on simultaneously bound targets in one pass list.
-pub const MAX_PASS_TARGETS: usize = 8;
+/// Ceiling on the length of one frame's pass list. A bloom pyramid plus DOF,
+/// motion blur and FXAA lands around a dozen, so the old value of 8 is raised
+/// to leave the post chain headroom.
+pub const MAX_PASS_TARGETS: usize = 16;
 
 /// Validates a frame's pass list before it reaches the GPU.
 pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
@@ -219,19 +268,25 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
             return Err(PassError::DuplicateTarget);
         }
         match pass.kind {
-            PassKind::Render => {}
+            PassKind::Render | PassKind::Depth | PassKind::Occlusion => {}
             PassKind::Resolve | PassKind::Fullscreen => {
                 let source = pass.source.as_deref().ok_or(PassError::MissingSource)?;
-                let (_, source) = names
+                let (_, source_target) = names
                     .iter()
                     .find(|(name, _)| *name == source)
                     .ok_or(PassError::UnknownSource)?;
                 if pass.kind == PassKind::Resolve
-                    && (source.width != pass.target.width || source.height != pass.target.height)
+                    && (source_target.width != pass.target.width
+                        || source_target.height != pass.target.height)
                 {
                     return Err(PassError::SizeMismatch);
                 }
             }
+        }
+        if let Some(aux) = pass.aux.as_deref()
+            && !names.iter().any(|(name, _)| *name == aux)
+        {
+            return Err(PassError::UnknownSource);
         }
         names.push((&pass.target.name, &pass.target));
     }

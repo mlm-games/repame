@@ -1,0 +1,12 @@
+[package]
+name = "repame-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "game networking: TCP and reliable-UDP transports, channels, replication and RPC"
+
+[dependencies]
+repame-sim.workspace = true
+bevy_ecs.workspace = true

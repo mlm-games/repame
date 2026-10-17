@@ -11,9 +11,12 @@ use super::mesh::MeshGroup;
 ///
 /// wgpu exposes the flag on the adapter
 /// ([`Adapter::get_downlevel_capabilities`](wgpu::Adapter::get_downlevel_capabilities)),
-/// and a Repose paint callback only ever sees the device, so the caller
-/// reads the capability once, when it creates the render device, and hands
-/// it to the frame ([`Frame3d::gpu_skinning`](crate::Frame3d::gpu_skinning)).
+/// and a Repose paint callback only ever sees the device. Repose publishes
+/// the adapter's capabilities into `CallbackResources`, so the viewport
+/// resolves the mode from the device automatically; a caller can still pin
+/// it explicitly through [`Frame3d::gpu_skinning`](crate::Frame3d::gpu_skinning)
+/// (`Some`), and a device with nothing published (an older repose) falls
+/// back to [`Supported`](GpuSkinning::Supported).
 ///
 /// On [`Unsupported`](GpuSkinning::Unsupported) the viewport builds its
 /// camera layout and all three scene-family shaders without the palette

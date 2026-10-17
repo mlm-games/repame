@@ -80,20 +80,25 @@ pub struct Frame3d {
     /// [`gpu_skinning`](Frame3d::gpu_skinning)) and these draws are
     /// CPU-posed by the caller instead.
     pub skinned: Vec<crate::SkinnedDraw>,
-    /// GPU-skinning capability of the device this viewport draws through
-    /// ([`GpuSkinning`], read once from the adapter when the render device
-    /// is created: `GpuSkinning::from_adapter`).
+    /// GPU-skinning capability mode, resolved when `prepare` runs. A
+    /// three-way choice:
+    /// 1. an explicit `Some(mode)` staged here wins;
+    /// 2. `None` derives from the device: the adapter's
+    ///    [`wgpu::DownlevelCapabilities`], which repose publishes into
+    ///    `CallbackResources`, maps through
+    ///    [`GpuSkinning::from_downlevel_flags`] (`VERTEX_STORAGE`);
+    /// 3. a device with no capabilities published (an older repose) falls
+    ///    back to [`GpuSkinning::Supported`], the historical GPU path,
+    ///    byte for byte.
     ///
-    /// Repose hands a paint callback the device, never the adapter, so the
-    /// capability is an explicit frame input. On
-    /// [`GpuSkinning::Unsupported`] the viewport builds its camera layout
-    /// and shaders without the joint-palette storage binding and drops
-    /// [`skinned`](Frame3d::skinned) draws with a one-time warning naming
-    /// the missing `VERTEX_STORAGE` flag; the caller must CPU-pose them
-    /// through [`SkinnedMesh::pose`](crate::SkinnedMesh::pose). Defaults
-    /// to [`GpuSkinning::Supported`], which reproduces the historical GPU
-    /// path byte for byte.
-    pub gpu_skinning: GpuSkinning,
+    /// On the resolved [`GpuSkinning::Unsupported`] the viewport builds its
+    /// camera layout and shaders without the joint-palette storage binding
+    /// and drops [`skinned`](Frame3d::skinned) draws with a one-time
+    /// warning naming the missing `VERTEX_STORAGE` flag; the caller must
+    /// CPU-pose them through
+    /// [`SkinnedMesh::pose`](crate::SkinnedMesh::pose). Defaults to `None`
+    /// (derive from the device).
+    pub gpu_skinning: Option<GpuSkinning>,
     /// Offscreen clear color (linear 0..1 RGBA). The shared UI pass this
     /// viewport paints into has its own clear; this selects the scene
     /// target clear inside the viewport-owned pass.
@@ -163,7 +168,7 @@ impl Default for Frame3d {
             shadow: None,
             rig: None,
             skinned: Vec::new(),
-            gpu_skinning: GpuSkinning::Supported,
+            gpu_skinning: None,
             background: None,
             attributes: None,
             post: None,
@@ -672,6 +677,24 @@ impl GpuViewport3d {
             self.input.desc
         }
     }
+
+    /// Resolves this frame's [`GpuSkinning`] mode: an explicit
+    /// [`Frame3d::gpu_skinning`] wins; otherwise the device's downlevel
+    /// capabilities, published by repose in [`CallbackResources`], decide
+    /// through [`GpuSkinning::from_downlevel_flags`] (`VERTEX_STORAGE`);
+    /// a device with no capabilities published (an older repose) falls
+    /// back to [`GpuSkinning::Supported`], the historical GPU path, byte
+    /// for byte.
+    fn effective_skinning(&self, resources: &CallbackResources) -> GpuSkinning {
+        self.input
+            .gpu_skinning
+            .or_else(|| {
+                resources
+                    .get::<wgpu::DownlevelCapabilities>()
+                    .map(|capabilities| GpuSkinning::from_downlevel_flags(capabilities.flags))
+            })
+            .unwrap_or(GpuSkinning::Supported)
+    }
 }
 
 impl WgpuCallback for GpuViewport3d {
@@ -825,7 +848,7 @@ impl WgpuCallback for GpuViewport3d {
                 _ => batch.push_group_for_pass(g, scene_pass),
             }
         }
-        batch.set_skinning(self.input.gpu_skinning);
+        batch.set_skinning(self.effective_skinning(resources));
         for s in &self.input.skinned {
             batch.push_skinned_for_pass(s, scene_pass);
         }

@@ -669,9 +669,15 @@ impl GpuViewport3d {
     /// caller passes a placeholder. Keeps old call sites drawing instead of
     /// rebuilding pipelines + dropping textures every frame.
     fn effective_desc(&self) -> BatchDesc {
-        if (self.batch_desc.layer_size, self.batch_desc.layers)
-            == (self.input.desc.layer_size, self.input.desc.layers)
-        {
+        if (
+            self.batch_desc.layer_size,
+            self.batch_desc.layers,
+            self.batch_desc.mip_levels(),
+        ) == (
+            self.input.desc.layer_size,
+            self.input.desc.layers,
+            self.input.desc.mip_levels(),
+        ) {
             self.batch_desc
         } else {
             self.input.desc

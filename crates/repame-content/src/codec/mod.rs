@@ -10,11 +10,16 @@
 //!   formats) is refused with [`ContentErrorKind::Unsupported`], never
 //!   approximated.
 //!
+//! [`stream`] is the per-level path on top of both: it opens a header, exposes
+//! each level's byte range, and reads (and decodes) only the level asked for,
+//! from a file, a slice, or a package entry.
+//!
 //! [`ContentErrorKind::Unsupported`]: crate::ContentErrorKind::Unsupported
 
 pub mod bc;
 pub mod dds;
 pub mod ktx2;
+pub mod stream;
 
 use std::path::Path;
 
@@ -251,6 +256,14 @@ pub struct TextureLevel {
     pub uncompressed_size: u64,
 }
 
+impl TextureLevel {
+    /// Stored byte range of this level inside the container. The parsers
+    /// check that `offset + size` cannot overflow, so this is exact.
+    pub fn stored_range(&self) -> std::ops::Range<u64> {
+        self.offset..self.offset + self.size
+    }
+}
+
 /// Parsed container header: format, dimensions and the level table.
 ///
 /// `levels` is in file order. For cube maps and arrays the codecs lay out one
@@ -276,6 +289,11 @@ pub struct TextureInfo {
 impl TextureInfo {
     pub fn level(&self, index: usize) -> Option<&TextureLevel> {
         self.levels.get(index)
+    }
+
+    /// Stored byte range of one level, without reading it.
+    pub fn level_range(&self, index: usize) -> Option<std::ops::Range<u64>> {
+        self.level(index).map(TextureLevel::stored_range)
     }
 
     pub fn is_supercompressed(&self) -> bool {
@@ -347,12 +365,48 @@ impl BlockCodecRegistry {
         self.codecs.iter().map(|codec| codec.format())
     }
 
-    /// Decode the first image of mip `level`.
+    /// Decode the first image of mip `level` out of a whole container.
+    ///
+    /// Extracts the level's stored bytes with the table's range and hands
+    /// them to [`decode_level_data`](Self::decode_level_data); the streamed
+    /// path ([`MipReader`](stream::MipReader)) reads those bytes itself and
+    /// calls `decode_level_data` directly.
     pub fn decode_level(
         &self,
         info: &TextureInfo,
         level: usize,
         bytes: &[u8],
+        path: &Path,
+    ) -> Result<DecodedImage, ContentError> {
+        let info_level = info.level(level).ok_or_else(|| {
+            ContentError::format(path, format!("texture has no mip level {level}"))
+        })?;
+        let start = usize::try_from(info_level.offset)
+            .map_err(|_| ContentError::format(path, "texture level offset overflows"))?;
+        let end = start
+            .checked_add(usize::try_from(info_level.size).map_err(|_| {
+                ContentError::format(path, "texture level size overflows")
+            })?)
+            .ok_or_else(|| ContentError::format(path, "texture level range overflows"))?;
+        let data = bytes.get(start..end).ok_or_else(|| {
+            ContentError::format(path, format!("texture mip level {level} is truncated"))
+        })?;
+        self.decode_level_data(info, level, data, path)
+    }
+
+    /// Decode the first image of mip `level` from `data`, which must hold
+    /// exactly that level's stored bytes (see
+    /// [`TextureInfo::level_range`] and [`MipReader`](stream::MipReader)).
+    ///
+    /// Supercompressed payloads and formats without a registered codec stay
+    /// typed [`Unsupported`](crate::ContentErrorKind::Unsupported); a data
+    /// buffer shorter than the level's decoded surface is a format error,
+    /// never a silently short decode.
+    pub fn decode_level_data(
+        &self,
+        info: &TextureInfo,
+        level: usize,
+        data: &[u8],
         path: &Path,
     ) -> Result<DecodedImage, ContentError> {
         if info.is_supercompressed() {
@@ -368,17 +422,6 @@ impl BlockCodecRegistry {
         let info_level = info.level(level).ok_or_else(|| {
             ContentError::format(path, format!("texture has no mip level {level}"))
         })?;
-        let start = usize::try_from(info_level.offset)
-            .map_err(|_| ContentError::format(path, "texture level offset overflows"))?;
-        let end = start
-            .checked_add(usize::try_from(info_level.size).map_err(|_| {
-                ContentError::format(path, "texture level size overflows")
-            })?)
-            .ok_or_else(|| ContentError::format(path, "texture level range overflows"))?;
-        let data = bytes.get(start..end).ok_or_else(|| {
-            ContentError::format(path, format!("texture mip level {level} is truncated"))
-        })?;
-
         let expected = info
             .format
             .surface_bytes(info_level.width, info_level.height);

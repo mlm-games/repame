@@ -2291,6 +2291,21 @@ pub struct BatchDesc {
     /// Array layer count (= max pages).
     pub layers: u32,
     pub filter: SceneFilter,
+    /// Mip levels each page is created with (`1` = the historical single
+    /// level). Levels above 0 are written by [`SceneBatch::upload_mip`]; the
+    /// scene shader samples level 0 of a page, so a page whose level 0 has not
+    /// been uploaded must not be drawn textured. Clamped to what `layer_size`
+    /// allows by [`BatchDesc::mip_levels`].
+    pub mips: u32,
+}
+
+impl BatchDesc {
+    /// Mip levels the page array actually gets: `mips` clamped to
+    /// `layer_size`'s chain (a 1x1 page has one level).
+    pub fn mip_levels(&self) -> u32 {
+        let max = 32 - self.layer_size.max(1).leading_zeros();
+        self.mips.clamp(1, max)
+    }
 }
 
 impl Default for BatchDesc {
@@ -2299,8 +2314,28 @@ impl Default for BatchDesc {
             layer_size: 1024,
             layers: 4,
             filter: SceneFilter::Nearest,
+            mips: 1,
         }
     }
+}
+
+/// One pending mip-level upload: blit `texels` (tight `width`*`height`*4
+/// bytes) into `page`'s mip `level`.
+///
+/// Same shape as [`SceneUpload`] one level down, and the same contract: the
+/// game queues it on the frame thread and it is written in
+/// [`SceneBatch::upload_all`] on the render thread. Streamed textures fill
+/// these from a residency drain
+/// ([`TextureResidency::take_uploads`](crate::texture_stream::TextureResidency::take_uploads)).
+#[derive(Clone, Debug)]
+pub struct MipUpload {
+    pub page: u32,
+    /// Mip level, `< BatchDesc::mip_levels`.
+    pub level: u32,
+    /// Level extent in texels; must equal the page's edge at `level`.
+    pub width: u32,
+    pub height: u32,
+    pub texels: Vec<u8>,
 }
 
 /// One pending texture upload: blit `rgba` (tight `w`*`h`*4 bytes) into
@@ -2480,6 +2515,9 @@ pub struct SceneBatch {
     culled: usize,
     pending: Vec<Pending>,
     uploads: Vec<SceneUpload>,
+    /// Streamed mip levels queued by [`SceneBatch::upload_mip`], applied in the
+    /// same pass as `uploads`.
+    mip_uploads: Vec<MipUpload>,
     verts: Vec<Vert>,
     indices: Vec<u32>,
     ranges: Vec<DrawRange>,
@@ -2849,6 +2887,7 @@ impl SceneBatch {
             culled: 0,
             pending: Vec::new(),
             uploads: Vec::new(),
+            mip_uploads: Vec::new(),
             stats: super::stats::FrameStats::new(),
             overrides: super::texfmt::TextureOverrides::new(),
             materials: Vec::new(),
@@ -3161,6 +3200,7 @@ impl SceneBatch {
     pub fn clear(&mut self) {
         self.pending.clear();
         self.uploads.clear();
+        self.mip_uploads.clear();
         self.verts.clear();
         self.indices.clear();
         self.ranges.clear();
@@ -3205,6 +3245,53 @@ impl SceneBatch {
     pub fn extend_uploads(&mut self, uploads: impl IntoIterator<Item = SceneUpload>) {
         for upload in uploads {
             self.upload(upload);
+        }
+    }
+
+    /// Queue one streamed mip level, applied in the next
+    /// [`upload_all`](Self::upload_all) on the render thread (same contract as
+    /// [`upload`](Self::upload)).
+    ///
+    /// The level is written whole, at its own mip: the game never has to move
+    /// or rescale texels. An out-of-range page or level, or a payload whose
+    /// extent does not match the page's mip edge, drops with a warning — never
+    /// a partial or fabricated write
+    /// ([`TextureResidency::resolve_level`](crate::texture_stream::TextureResidency::resolve_level)
+    /// is the level to sample). Texture contents do not survive a batch
+    /// rebuild, so re-queue the resident levels afterwards.
+    pub fn upload_mip(&mut self, upload: MipUpload) {
+        let mips = self.desc.mip_levels();
+        if upload.page >= self.desc.layers || upload.level >= mips {
+            log::warn!(
+                "scene_batch[{}]: dropping mip upload page={} level={} (pages {}, levels {mips})",
+                self.id,
+                upload.page,
+                upload.level,
+                self.desc.layers
+            );
+            return;
+        }
+        let edge = (self.desc.layer_size.max(1) >> upload.level).max(1);
+        let expected = upload.width as usize * upload.height as usize * 4;
+        if upload.width != edge || upload.height != edge || upload.texels.len() != expected {
+            log::warn!(
+                "scene_batch[{}]: dropping mis-sized mip upload page={} level={} {}x{} ({} bytes); page edge {edge}",
+                self.id,
+                upload.page,
+                upload.level,
+                upload.width,
+                upload.height,
+                upload.texels.len()
+            );
+            return;
+        }
+        self.mip_uploads.push(upload);
+    }
+
+    /// Queue several mip levels at once (per-frame streamed drains).
+    pub fn extend_mip_uploads(&mut self, uploads: impl IntoIterator<Item = MipUpload>) {
+        for upload in uploads {
+            self.upload_mip(upload);
         }
     }
 
@@ -5539,6 +5626,7 @@ impl SceneBatch {
             self.desc.layer_size,
             self.desc.layers,
             self.desc.filter as u32,
+            self.desc.mip_levels(),
             shadow_size,
             cascade_size,
             cascade_count,
@@ -5591,7 +5679,7 @@ impl SceneBatch {
                 height: self.desc.layer_size,
                 depth_or_array_layers: self.desc.layers,
             },
-            mip_level_count: 1,
+            mip_level_count: self.desc.mip_levels(),
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -6491,6 +6579,34 @@ impl SceneBatch {
                 },
             );
         }
+        // Streamed mip levels, straight into their own level of the page.
+        // Validated at queue time against the desc the game packed against;
+        // dropped levels never reach the texture.
+        for up in &self.mip_uploads {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &res.texture,
+                    mip_level: up.level,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: up.page,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &up.texels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(up.width * 4),
+                    rows_per_image: Some(up.height),
+                },
+                wgpu::Extent3d {
+                    width: up.width,
+                    height: up.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         res.last_ranges = self.ranges.clone();
         res.occlusion_feed_desc = self.occlusion_feed;
         res.occlusion_phase_two = self.occlusion_phase_two;
@@ -6561,20 +6677,26 @@ impl SceneBatch {
     }
 }
 
+/// GPU-resource cache key for one batch: every dimension that forces a
+/// pipeline or texture rebuild. `SceneEntry::key` and `ensure_resources` must
+/// agree on it, so it lives in one place.
+type SceneKey = (
+    wgpu::TextureFormat,
+    u32,   // sample count
+    u32,   // layer size
+    u32,   // layers
+    u32,   // filter
+    u32,   // mip levels
+    u32,   // shadow map size
+    u32,   // cascade map size
+    u32,   // cascade count
+    u32,   // point shadow size
+    usize, // skin slots
+    bool,  // GPU skinning supported
+);
+
 struct SceneEntry {
-    key: (
-        wgpu::TextureFormat,
-        u32,
-        u32,
-        u32,
-        u32,
-        u32,
-        u32,
-        u32,
-        u32,
-        usize,
-        bool,
-    ),
+    key: SceneKey,
     pipeline_depth: wgpu::RenderPipeline,
     pipeline_flat: wgpu::RenderPipeline,
     pipeline_transparent: wgpu::RenderPipeline,
@@ -8378,6 +8500,83 @@ mod tests {
             rgba: vec![255; 3],
         });
         assert_eq!(batch.uploads.len(), 1, "only the valid upload queues");
+    }
+
+    #[test]
+    fn mip_uploads_validate_against_the_page_chain() {
+        let mut batch = SceneBatch::with_desc(
+            "test.mips",
+            BatchDesc {
+                layer_size: 4,
+                layers: 2,
+                mips: 3, // 4x4, 2x2, 1x1
+                ..BatchDesc::default()
+            },
+        );
+        assert_eq!(batch.desc.mip_levels(), 3);
+        // Valid levels 1 and 2 (2x2 and 1x1).
+        batch.upload_mip(MipUpload {
+            page: 1,
+            level: 1,
+            width: 2,
+            height: 2,
+            texels: vec![7; 2 * 2 * 4],
+        });
+        batch.upload_mip(MipUpload {
+            page: 1,
+            level: 2,
+            width: 1,
+            height: 1,
+            texels: vec![7; 1 * 1 * 4],
+        });
+        // Level past the chain, page past the layers, mis-sized, short bytes.
+        batch.upload_mip(MipUpload {
+            page: 0,
+            level: 3,
+            width: 1,
+            height: 1,
+            texels: vec![7; 4],
+        });
+        batch.upload_mip(MipUpload {
+            page: 2,
+            level: 0,
+            width: 4,
+            height: 4,
+            texels: vec![7; 4 * 4 * 4],
+        });
+        batch.upload_mip(MipUpload {
+            page: 0,
+            level: 1,
+            width: 4,
+            height: 4,
+            texels: vec![7; 4 * 4 * 4],
+        });
+        batch.upload_mip(MipUpload {
+            page: 0,
+            level: 0,
+            width: 4,
+            height: 4,
+            texels: vec![7; 8],
+        });
+        assert_eq!(batch.mip_uploads.len(), 2, "only the valid levels queue");
+        // A single-level batch accepts level 0 only (`mips` defaults to 1).
+        let mut plain = SceneBatch::with_id("test.no-mips");
+        assert_eq!(plain.desc.mip_levels(), 1);
+        plain.upload_mip(MipUpload {
+            page: 0,
+            level: 0,
+            width: 1024,
+            height: 1024,
+            texels: vec![0; 1024 * 1024 * 4],
+        });
+        plain.upload_mip(MipUpload {
+            page: 0,
+            level: 1,
+            width: 512,
+            height: 512,
+            texels: vec![0; 512 * 512 * 4],
+        });
+        assert_eq!(plain.mip_uploads.len(), 1);
     }
 
     #[test]

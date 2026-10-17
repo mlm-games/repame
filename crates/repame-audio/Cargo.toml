@@ -28,6 +28,7 @@ symphonia-caf = ["symphonia/caf"]
 [dependencies]
 anyhow.workspace = true
 log.workspace = true
+serde.workspace = true
 web-time.workspace = true
 cpal.workspace = true
 symphonia.workspace = true

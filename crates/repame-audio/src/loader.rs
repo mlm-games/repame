@@ -10,6 +10,7 @@ use web_workers::sync::mpsc::{Receiver, Sender, channel};
 use crate::bank::CueDef;
 use crate::command::SharedFrames;
 use crate::music::StemDef;
+use crate::synth::CueSpec;
 use crate::{AudioState, decode_to_device};
 
 /// One queued decode job.
@@ -28,6 +29,12 @@ pub(crate) enum DecodeJob {
         name: String,
         def: CueDef,
         files: Vec<Vec<u8>>,
+    },
+    /// Cue rendered from a table rather than decoded from bytes.
+    Synth {
+        name: String,
+        def: CueDef,
+        specs: Vec<CueSpec>,
     },
 }
 
@@ -97,6 +104,23 @@ fn decode_job(job: DecodeJob, state: &AudioState) -> DecodeDone {
             let mut failure = None;
             for bytes in &files {
                 match decode_to_device(bytes, Some(state)) {
+                    Ok(sound) => sounds.push(sound),
+                    Err(e) => {
+                        failure = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
+            match failure {
+                None => DecodeDone::Cue { name, def, sounds },
+                Some(error) => DecodeDone::CueFailed { name, error },
+            }
+        }
+        DecodeJob::Synth { name, def, specs } => {
+            let mut sounds = Vec::with_capacity(specs.len());
+            let mut failure = None;
+            for spec in &specs {
+                match crate::synth::render_for_device(spec, Some(state)) {
                     Ok(sound) => sounds.push(sound),
                     Err(e) => {
                         failure = Some(e.to_string());

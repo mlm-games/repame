@@ -12,6 +12,7 @@ use web_workers::sync::mpsc::Sender;
 
 use crate::command::{PlayCmd, RealtimeCommand, SharedFrames};
 use crate::loader::{DecodeDone, DecodeJob, Loader, spawn as spawn_loader};
+use crate::synth::{CueSpec, render_for_device};
 use crate::{AudioChannel, AudioState, decode_to_device, retarget_to};
 
 /// How a cue picks among its variations.
@@ -190,6 +191,29 @@ impl SoundBank {
         for bytes in files {
             sounds.push(decode_to_device(bytes, self.state.as_deref())?);
         }
+        self.insert(name, def, sounds);
+        Ok(())
+    }
+
+    /// Register a cue rendered from a [`CueSpec`] table: one spec per
+    /// variation, no bytes and no encoder on the game side. `Err` carries the
+    /// [`SynthError`](crate::SynthError) of the first spec that cannot
+    /// render; check a table up front with [`CueSpec::validate`].
+    pub fn load_synth(&mut self, name: &str, def: CueDef, specs: &[CueSpec]) -> Result<()> {
+        if specs.is_empty() {
+            anyhow::bail!("cue `{name}` needs at least one spec");
+        }
+        let mut sounds = Vec::with_capacity(specs.len());
+        for spec in specs {
+            sounds.push(render_for_device(spec, self.state.as_deref())?);
+        }
+        self.insert(name, def, sounds);
+        Ok(())
+    }
+
+    /// Register one decoded or rendered cue. Names are unique: a repeat
+    /// registration replaces the sounds.
+    fn insert(&mut self, name: &str, def: CueDef, sounds: Vec<Arc<SharedFrames>>) {
         self.cues.insert(
             name.to_string(),
             Cue {
@@ -204,7 +228,6 @@ impl SoundBank {
                 live: Vec::new(),
             },
         );
-        Ok(())
     }
 
     /// Ask for a cue, decoding on the loader worker when one is running.
@@ -248,6 +271,45 @@ impl SoundBank {
         CueRequest::Queued
     }
 
+    /// Ask for a cue rendered from [`CueSpec`]s. Same contract as
+    /// [`SoundBank::request`]: the loads happen on the loader worker when one
+    /// is running, so a large table does not stall the frame it is registered
+    /// on, and [`SoundBank::request`] answers `Ready` on a later frame.
+    pub fn request_synth(&mut self, name: &str, def: CueDef, specs: &[CueSpec]) -> CueRequest {
+        if specs.is_empty() {
+            return CueRequest::Failed(format!("cue `{name}` needs at least one spec"));
+        }
+        if self.cues.contains_key(name) {
+            return CueRequest::Ready;
+        }
+        if let Some(error) = self.undecodable.get(name) {
+            return CueRequest::Failed(error.clone());
+        }
+        if self.pending.contains(name) {
+            return CueRequest::Queued;
+        }
+        let Some(loader) = &self.loader else {
+            return match self.load_synth(name, def, specs) {
+                Ok(()) => CueRequest::Ready,
+                Err(e) => {
+                    let error = e.to_string();
+                    self.undecodable.insert(name.to_owned(), error.clone());
+                    CueRequest::Failed(error)
+                }
+            };
+        };
+        if let Err(e) = loader.jobs.send_block(DecodeJob::Synth {
+            name: name.to_owned(),
+            def,
+            specs: specs.to_vec(),
+        }) {
+            log::warn!("synth cue `{name}` not queued: {e}");
+            return CueRequest::Failed("audio loader stopped".to_owned());
+        }
+        self.pending.insert(name.to_owned());
+        CueRequest::Queued
+    }
+
     /// Cues that failed to decode since the last call, as
     /// `(name, reason)`. Diagnostics only - [`SoundBank::request`] already
     /// reports `Failed` for the same cue.
@@ -255,33 +317,23 @@ impl SoundBank {
         std::mem::take(&mut self.failed)
     }
 
-    /// Pull finished cue decodes off the loader worker. Called by
+    /// Pull finished cue loads off the loader worker. Called by
     /// [`Audio::update`](crate::Audio::update).
     pub(crate) fn drain_loader(&mut self) {
-        let Some(loader) = &self.loader else {
-            return;
-        };
-        while let Ok(outcome) = loader.done.try_recv() {
+        let mut done = Vec::new();
+        if let Some(loader) = &self.loader {
+            while let Ok(outcome) = loader.done.try_recv() {
+                done.push(outcome);
+            }
+        }
+        for outcome in done {
             match outcome {
                 DecodeDone::Cue { name, def, sounds } => {
                     self.pending.remove(&name);
                     if sounds.is_empty() {
                         continue;
                     }
-                    self.cues.insert(
-                        name.clone(),
-                        Cue {
-                            def,
-                            sounds,
-                            rr_index: 0,
-                            rng: {
-                                let r = self.seed ^ name.len() as u64;
-                                if r == 0 { 0x9E3779B97F4A7C15 } else { r }
-                            },
-                            last_play_ms: None,
-                            live: Vec::new(),
-                        },
-                    );
+                    self.insert(&name, def, sounds);
                 }
                 DecodeDone::CueFailed { name, error } => {
                     self.pending.remove(&name);
@@ -506,7 +558,7 @@ impl Default for SoundBank {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{audio_link, synth_sine_wav};
+    use crate::{CueSpec, Waveform, audio_link, synth_sine_wav};
 
     fn banked() -> (SoundBank, crate::GameAudioLink, crate::ThreadAudioLink) {
         let (game, thread) = audio_link();
@@ -517,6 +569,18 @@ mod tests {
 
     fn wav(freq: f32) -> Vec<u8> {
         synth_sine_wav(freq, 0.05, 22050)
+    }
+
+    /// Pump the loader until an async cue render has landed and plays.
+    fn settle(bank: &mut SoundBank, name: &str) {
+        for _ in 0..5000 {
+            bank.drain_loader();
+            if bank.play_at_ms(name, 1.0, 1.0, 0.0, 0).is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("async cue `{name}` never settled");
     }
 
     #[test]
@@ -755,5 +819,94 @@ mod tests {
         assert_eq!(bank.live_count("alarm"), 2);
         bank.stop_cue("alarm");
         assert_eq!(bank.live_count("alarm"), 0);
+    }
+
+    #[test]
+    fn synth_cues_render_at_spec_rate_then_device_rate() {
+        let (game, thread) = audio_link();
+        let mut bank = SoundBank::new();
+        let spec = CueSpec::new(Waveform::Sine, 660.0, 0.05).with_sample_rate(32000);
+        bank.load_synth("early", CueDef::default(), &[spec.clone()])
+            .expect("renders");
+        thread.state.set_sample_rate(48000);
+        bank.attach(game.tx.clone(), game.state.clone());
+        bank.load_synth("late", CueDef::default(), &[spec])
+            .expect("renders");
+        let early = bank.play("early").expect("registered");
+        let late = bank.play("late").expect("registered");
+        assert_ne!(early, late);
+        let mut played = Vec::new();
+        while let Ok(cmd) = thread.rx.try_recv() {
+            if let RealtimeCommand::Play(p) = cmd {
+                played.push((p.sound.sample_rate, p.sound.channels, p.sound.len_frames()));
+            }
+        }
+        // 0.05 s at 32 kHz = 1600 frames, converted on attach; 48 kHz holds
+        // 2400 and is rendered directly.
+        assert_eq!(played, vec![(48000, 1, 2400), (48000, 1, 2400)]);
+        // A table that cannot render fails loudly instead of registering
+        // silence, and an empty table is a caller bug.
+        let bad = CueSpec::new(Waveform::Sine, 440.0, 0.0);
+        assert!(bank.load_synth("bad", CueDef::default(), &[bad]).is_err());
+        assert!(bank.load_synth("none", CueDef::default(), &[]).is_err());
+        assert_eq!(bank.play("bad"), None);
+    }
+
+    #[test]
+    fn request_synth_renders_inline_without_a_link() {
+        let mut bank = SoundBank::new();
+        let specs = [CueSpec::new(Waveform::Noise, 0.0, 0.02)];
+        assert_eq!(
+            bank.request_synth("noise", CueDef::default(), &specs),
+            CueRequest::Ready
+        );
+        // Silent without a link, but registered: asking again is already Ready
+        // and does not re-render.
+        assert_eq!(
+            bank.request_synth("noise", CueDef::default(), &specs),
+            CueRequest::Ready
+        );
+        assert_eq!(bank.live_count("noise"), 0);
+        // An invalid spec reports the reason, and stays refused.
+        let bad = [CueSpec::new(Waveform::Sine, 440.0, -1.0)];
+        let failed = bank.request_synth("bad", CueDef::default(), &bad);
+        assert!(
+            matches!(&failed, CueRequest::Failed(reason) if reason.contains("duration")),
+            "{failed:?}"
+        );
+        assert!(matches!(
+            bank.request_synth("bad", CueDef::default(), &bad),
+            CueRequest::Failed(_)
+        ));
+        assert!(matches!(
+            bank.request_synth("none", CueDef::default(), &[]),
+            CueRequest::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn request_synth_renders_on_the_loader_worker() {
+        let (mut bank, _game, thread) = banked();
+        let specs = [
+            CueSpec::new(Waveform::Triangle, 550.0, 0.05),
+            CueSpec::new(Waveform::Saw, 275.0, 0.05).with_gain(0.5),
+        ];
+        assert_eq!(
+            bank.request_synth("queued", CueDef::default(), &specs),
+            CueRequest::Queued
+        );
+        // A second ask while the render is in flight is still queued.
+        assert_eq!(
+            bank.request_synth("queued", CueDef::default(), &specs),
+            CueRequest::Queued
+        );
+        settle(&mut bank, "queued");
+        let mut frames = Vec::new();
+        while let Ok(cmd) = thread.rx.try_recv() {
+            if let RealtimeCommand::Play(p) = cmd {
+                frames.push(p.sound.len_frames());
+            }
+        }
+        assert_eq!(frames, vec![(44100.0 * 0.05) as usize]);
     }
 }

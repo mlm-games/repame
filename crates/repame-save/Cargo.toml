@@ -1,0 +1,16 @@
+[package]
+name = "repame-save"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "one app identity, one versioned save envelope, settings, keybinds, and the repame-reflect sim bridge over game-utils' crash-safe store"
+
+[dependencies]
+game-utils.workspace = true
+repame-input.workspace = true
+repame-reflect = { path = "../repame-reflect", version = "0.3.24" }
+repame-sim.workspace = true
+ron.workspace = true
+serde.workspace = true

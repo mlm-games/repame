@@ -94,9 +94,20 @@ pub fn parse_header(bytes: &[u8], path: &Path) -> Result<Ktx2Header, ContentErro
     })
 }
 
-/// Parse the header and its level index into a [`TextureInfo`].
-pub fn parse(bytes: &[u8], path: &Path) -> Result<TextureInfo, ContentError> {
-    let header = parse_header(bytes, path)?;
+/// Build the level table from the header and its level index.
+///
+/// KTX 2 stores each level's byte offset, byte length and uncompressed length
+/// explicitly, so this is a copy plus a range check against `container_len`
+/// (the whole container, not just the bytes read so far). `index` must hold at
+/// least `24 * mip levels` bytes. A level that runs past the container is a
+/// typed [`ContentErrorKind::Format`](crate::ContentErrorKind) error, never a
+/// panic or a silently short read.
+pub fn parse_levels(
+    header: &Ktx2Header,
+    index: &[u8],
+    container_len: u64,
+    path: &Path,
+) -> Result<Vec<TextureLevel>, ContentError> {
     if header.pixel_width == 0 || header.pixel_height == 0 {
         return Err(ContentError::format(path, "KTX 2 dimensions must be non-zero"));
     }
@@ -107,37 +118,29 @@ pub fn parse(bytes: &[u8], path: &Path) -> Result<TextureInfo, ContentError> {
         ));
     }
     let mip_levels = header.mip_levels();
-    let index_end = HEADER_BYTES + mip_levels as usize * LEVEL_INDEX_ENTRY_BYTES;
-    if bytes.len() < index_end {
+    let index_end = mip_levels as usize * LEVEL_INDEX_ENTRY_BYTES;
+    if index.len() < index_end {
         return Err(ContentError::format(path, "KTX 2 level index is truncated"));
     }
-
+    let index_read = |base: usize| -> Result<u64, ContentError> {
+        index
+            .get(base..base + 8)
+            .and_then(|slice| <[u8; 8]>::try_from(slice).ok())
+            .map(u64::from_le_bytes)
+            .ok_or_else(|| ContentError::format(path, "KTX 2 level index is truncated"))
+    };
     let depth = header.pixel_depth.max(1);
     let layers = header.layer_count.max(1) * header.face_count;
-    let kind = if header.face_count == 6 {
-        if header.layer_count > 1 {
-            TextureKind::CubeArray
-        } else {
-            TextureKind::Cube
-        }
-    } else if header.pixel_depth > 0 {
-        TextureKind::D3
-    } else if header.layer_count > 1 {
-        TextureKind::D2Array
-    } else {
-        TextureKind::D2
-    };
-
     let mut levels = Vec::with_capacity(mip_levels as usize);
     for level in 0..mip_levels {
-        let base = HEADER_BYTES + level as usize * LEVEL_INDEX_ENTRY_BYTES;
-        let offset = read_u64_le(bytes, base, path)?;
-        let size = read_u64_le(bytes, base + 8, path)?;
-        let uncompressed_size = read_u64_le(bytes, base + 16, path)?;
+        let base = level as usize * LEVEL_INDEX_ENTRY_BYTES;
+        let offset = index_read(base)?;
+        let size = index_read(base + 8)?;
+        let uncompressed_size = index_read(base + 16)?;
         let end = offset
             .checked_add(size)
             .ok_or_else(|| ContentError::format(path, "KTX 2 level range overflows"))?;
-        if end > bytes.len() as u64 {
+        if end > container_len {
             return Err(ContentError::format(
                 path,
                 format!("KTX 2 level {level} extends past the end of the container"),
@@ -153,21 +156,55 @@ pub fn parse(bytes: &[u8], path: &Path) -> Result<TextureInfo, ContentError> {
             uncompressed_size,
         });
     }
+    Ok(levels)
+}
 
-    let data_offset = levels.first().map(|level| level.offset).unwrap_or(0);
-    Ok(TextureInfo {
+/// Assemble a [`TextureInfo`] from a parsed header and its level table.
+pub(crate) fn info(header: &Ktx2Header, levels: Vec<TextureLevel>) -> TextureInfo {
+    let depth = header.pixel_depth.max(1);
+    let layers = header.layer_count.max(1) * header.face_count;
+    let kind = if header.face_count == 6 {
+        if header.layer_count > 1 {
+            TextureKind::CubeArray
+        } else {
+            TextureKind::Cube
+        }
+    } else if header.pixel_depth > 0 {
+        TextureKind::D3
+    } else if header.layer_count > 1 {
+        TextureKind::D2Array
+    } else {
+        TextureKind::D2
+    };
+    TextureInfo {
         format: header.format,
         kind,
         width: header.pixel_width,
         height: header.pixel_height,
         depth,
         layers,
-        mip_levels,
+        mip_levels: header.mip_levels(),
+        data_offset: levels.first().map(|level| level.offset).unwrap_or(0),
         levels,
         srgb: header.srgb,
         supercompression: header.supercompression_scheme,
-        data_offset,
-    })
+    }
+}
+
+/// Parse the header and its level index into a [`TextureInfo`].
+pub fn parse(bytes: &[u8], path: &Path) -> Result<TextureInfo, ContentError> {
+    let header = parse_header(bytes, path)?;
+    let index_end = HEADER_BYTES + header.mip_levels() as usize * LEVEL_INDEX_ENTRY_BYTES;
+    if bytes.len() < index_end {
+        return Err(ContentError::format(path, "KTX 2 level index is truncated"));
+    }
+    let levels = parse_levels(
+        &header,
+        &bytes[HEADER_BYTES..index_end],
+        bytes.len() as u64,
+        path,
+    )?;
+    Ok(info(&header, levels))
 }
 
 /// Map a Vulkan format to a texture format and whether it is sRGB.

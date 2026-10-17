@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
+use std::sync::Mutex;
 
 use flate2::Compression as FlateCompression;
 use flate2::read::DeflateDecoder;
@@ -257,6 +258,25 @@ impl Package {
         self.entries.get(name)
     }
 
+    /// Open one entry as a random-access byte source, so a caller can read a
+    /// single mip level without extracting the whole entry. `source` only
+    /// names the container in errors.
+    pub fn range_source<'a>(
+        &'a self,
+        name: &str,
+        source: &Path,
+    ) -> Result<PackageRangeSource<'a>, ContentError> {
+        let entry = self.entries.get(name).ok_or_else(|| {
+            ContentError::new(source, format!("package has no entry `{name}`"))
+        })?;
+        Ok(PackageRangeSource {
+            package: self,
+            entry,
+            source: source.to_path_buf(),
+            decoded: Mutex::new(None),
+        })
+    }
+
     /// Extract one entry, verifying its size and CRC-32.
     pub fn read_file(&self, name: &str, source: &Path) -> Result<Vec<u8>, ContentError> {
         let entry = self
@@ -308,6 +328,99 @@ impl Package {
             ));
         }
         Ok(data)
+    }
+}
+
+/// A [`ByteRangeSource`](crate::codec::stream::ByteRangeSource) over one
+/// package entry, for per-mip reads that extract exactly one level.
+///
+/// Stored entries are random-access into the archive bytes the [`Package`]
+/// already holds: a read touches exactly the requested range (a ZIP range read
+/// can check the entry's size, not its CRC-32). Deflated entries cannot be
+/// seeked (a deflate stream has no index), so the first read inflates the whole
+/// entry once through [`Package::read_entry`] — which verifies its size and
+/// CRC-32 before any byte reaches a decoder — and later ranges come from that
+/// cache. Either way a read returns the requested range or a typed error.
+pub struct PackageRangeSource<'a> {
+    package: &'a Package,
+    entry: &'a PackageEntry,
+    source: std::path::PathBuf,
+    decoded: Mutex<Option<Vec<u8>>>,
+}
+
+impl<'a> PackageRangeSource<'a> {
+    pub fn entry_name(&self) -> &str {
+        &self.entry.name
+    }
+
+    fn bytes(&self, offset: u64, length: usize) -> Result<Vec<u8>, ContentError> {
+        let name = &self.entry.name;
+        let overflow = || {
+            ContentError::format(
+                &self.source,
+                format!("package entry `{name}` range overflows"),
+            )
+        };
+        let end = offset.checked_add(length as u64).ok_or_else(overflow)?;
+        if end > self.entry.size {
+            return Err(ContentError::format(
+                &self.source,
+                format!(
+                    "package entry `{name}` range {offset}..{end} is past its {} bytes",
+                    self.entry.size
+                ),
+            ));
+        }
+        let start = usize::try_from(offset).map_err(|_| overflow())?;
+        let end = usize::try_from(end).map_err(|_| overflow())?;
+        match self.entry.compression {
+            Compression::Stored => {
+                let base = usize::try_from(self.entry.data_offset).map_err(|_| {
+                    ContentError::format(
+                        &self.source,
+                        format!("package entry `{}` offset overflows", self.entry.name),
+                    )
+                })?;
+                let compressed = self.entry.compressed_size as usize;
+                let bytes = self.package.bytes.get(base..base + compressed);
+                let bytes = bytes.and_then(|bytes| bytes.get(start..end)).ok_or_else(|| {
+                    ContentError::format(
+                        &self.source,
+                        format!("package entry `{}` is truncated", self.entry.name),
+                    )
+                })?;
+                Ok(bytes.to_vec())
+            }
+            Compression::Deflated => {
+                let mut cache = self
+                    .decoded
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if cache.is_none() {
+                    *cache = Some(self.package.read_entry(self.entry, &self.source)?);
+                }
+                let data = cache
+                    .as_ref()
+                    .expect("the decoded entry was just inflated");
+                let bytes = data.get(start..end).ok_or_else(|| {
+                    ContentError::format(
+                        &self.source,
+                        format!("package entry `{}` is shorter than declared", self.entry.name),
+                    )
+                })?;
+                Ok(bytes.to_vec())
+            }
+        }
+    }
+}
+
+impl crate::codec::stream::ByteRangeSource for PackageRangeSource<'_> {
+    fn byte_len(&self) -> Result<u64, ContentError> {
+        Ok(self.entry.size)
+    }
+
+    fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, ContentError> {
+        self.bytes(offset, length)
     }
 }
 

@@ -19,6 +19,10 @@
 //!   volumetric fog ([`postfx`]).
 //! * [`LodGroup`] - distance/hysteresis mesh LOD ([`lod`]), with coarse voxel
 //!   chunks from [`build_chunk_mesh_lod`].
+//! * [`TextureResidency`] - streamed texture mip residency ([`texture_stream`]):
+//!   a byte budget, desired levels from the projected on-screen size, level
+//!   hysteresis, and background level loads whose stale arrivals drop exactly
+//!   like stale chunk builds.
 //!
 //! ```ignore
 //! let mut frame = Frame3d::default();
@@ -51,6 +55,7 @@ pub mod stats;
 pub mod stream;
 pub mod tev;
 pub mod texfmt;
+pub mod texture_stream;
 pub mod textures;
 pub mod vertex;
 pub mod viewport;
@@ -100,7 +105,7 @@ pub use reflection::{
     MAX_PROBES, MAX_PROBE_RESOLUTION, MIN_PROBE_RESOLUTION, ProbeError, ProbeSettings,
     probe_weight,
 };
-pub use render::{BatchDesc, LightRig, SceneBatch, SceneFilter, SceneLight, SceneUpload};
+pub use render::{BatchDesc, LightRig, MipUpload, SceneBatch, SceneFilter, SceneLight, SceneUpload};
 pub use render::{paint_scene_with_id, prepare_scene_with_id};
 pub use shading::{ShadedBatch, ShadedGroup, ShaderCache, ShadingUniform, kcolor_view};
 pub use shadow::{
@@ -114,6 +119,11 @@ pub use skin::{
 };
 pub use stats::{FrameStats, LatestFrame, RollingAverage, StatsSink};
 pub use stream::{ChunkBuild, ChunkPriority, ChunkStreamer, StreamPlan, plan_stream};
+pub use texture_stream::{
+    MAX_MIP_LEVELS, MipArrival, MipEviction, MipLevelDesc, MipPayload, MipPriority, MipRequest,
+    MipStreamer, ProjectedSize, StreamError, StreamTuning, TextureChain, TextureResidency,
+    TextureStreamPlan, TextureStreamStats, desired_level, project_bounds, select_mip_level,
+};
 pub use tev::{TexInput, evaluate, evaluate_lights, evaluate_stages, fog_factor, wgsl_program};
 pub use texfmt::{
     Palette, PaletteBits, TexError, TexFormat, TextureOverrides, TextureSource, decode_palette,

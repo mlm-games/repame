@@ -19,8 +19,9 @@ use symphonia::default::register_enabled_codecs;
 use crate::command::SharedFrames;
 use crate::state::AudioState;
 
-/// Decoded-output cap in frames. Music tracks pass; accidents do not.
-const MAX_FRAMES: usize = 32_000_000;
+/// Decoded or synthesised output cap in frames. Music tracks and cue tables
+/// pass; accidents do not.
+pub(crate) const MAX_FRAMES: usize = 32_000_000;
 
 fn codecs() -> &'static CodecRegistry {
     static REGISTRY: OnceLock<CodecRegistry> = OnceLock::new();

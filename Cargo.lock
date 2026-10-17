@@ -4538,6 +4538,7 @@ dependencies = [
  "cpal",
  "log",
  "renamite-player",
+ "serde",
  "symphonia",
  "symphonia-adapter-oporus",
  "web-time",
@@ -4659,6 +4660,18 @@ dependencies = [
  "ron",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "repame-save"
+version = "0.3.24"
+dependencies = [
+ "game-utils",
+ "repame-input",
+ "repame-reflect",
+ "repame-sim",
+ "ron",
+ "serde",
 ]
 
 [[package]]

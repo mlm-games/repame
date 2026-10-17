@@ -7,7 +7,9 @@
 //! * [`HotReloader`] watches the content root in development, re-imports only
 //!   what changed and publishes [`ArtifactSwap`]s to apply at a boundary.
 //! * [`codec`] parses DDS and KTX 2 containers and decodes BC1, BC3 and BC4
-//!   blocks; [`package`] reads and writes ZIP archives and PCK-like indexes.
+//!   blocks; [`codec::stream`] opens a header and reads one mip level at a time
+//!   from a file, a slice or a package entry; [`package`] reads and writes ZIP
+//!   archives and PCK-like indexes.
 //!
 //! [`World`]: bevy_ecs::prelude::World
 
@@ -28,6 +30,7 @@ pub use codec::{
     BlockCodec, BlockCodecRegistry, DecodedImage, TextureFormat, TextureInfo, TextureKind,
     TextureLevel, parse_container,
 };
+pub use codec::stream::{ByteRangeSource, FileRangeSource, MipReader};
 pub use error::{ContentError, ContentErrorKind};
 pub use import::{
     AssetKind, AudioImporter, BinaryImporter, GltfImporter, IMPORT_FORMAT, IMPORTER_VERSION,
@@ -39,7 +42,8 @@ pub use model::{
     SceneEntry, SceneInstance, TypeRegistry,
 };
 pub use package::{
-    Compression, Package, PackageEntry, PackageWriter, PckDirectory, PckEntry, crc32,
+    Compression, Package, PackageEntry, PackageRangeSource, PackageWriter, PckDirectory, PckEntry,
+    crc32,
 };
 pub use project::{AssetSource, Project, ResourceSource, content_hash};
 pub use reload::{ArtifactSwap, HotReloader, ReloadOutcome};

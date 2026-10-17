@@ -180,48 +180,33 @@ pub fn parse_header(bytes: &[u8], path: &Path) -> Result<DdsHeader, ContentError
     })
 }
 
-/// Parse the header and build the level table, checking the payload is present.
-pub fn parse(bytes: &[u8], path: &Path) -> Result<TextureInfo, ContentError> {
-    let header = parse_header(bytes, path)?;
+/// Byte offset of the first level's payload.
+pub fn data_offset(header: &DdsHeader) -> u64 {
+    if header.dx10.is_some() {
+        DX10_HEADER_BYTES as u64
+    } else {
+        HEADER_BYTES as u64
+    }
+}
+
+/// Build the level table from the header and the available payload length.
+///
+/// DDS has no level index: each level's offset and size are computed from the
+/// mip chain dimensions and the format's block size, layer-major (one image's
+/// whole chain, then the next). This is the exact arithmetic the streamed path
+/// and [`parse`] share. A declared chain that does not fit in `payload_len`
+/// bytes is a typed [`ContentErrorKind::Format`](crate::ContentErrorKind)
+/// error, never a panic or a silently short read.
+pub fn parse_levels(
+    header: &DdsHeader,
+    payload_len: u64,
+    path: &Path,
+) -> Result<Vec<TextureLevel>, ContentError> {
     if header.width == 0 || header.height == 0 {
         return Err(ContentError::format(path, "DDS dimensions must be non-zero"));
     }
-    let data_offset = if header.dx10.is_some() {
-        DX10_HEADER_BYTES
-    } else {
-        HEADER_BYTES
-    };
-
-    let array_size = header
-        .dx10
-        .map(|extension| extension.array_size.max(1))
-        .unwrap_or(1);
-    let is_cubemap = header.caps2 & DDSC2_CUBEMAP != 0
-        || header
-            .dx10
-            .is_some_and(|extension| extension.misc_flags & 0x4 != 0);
-    let is_volume = header.caps2 & DDSC2_VOLUME != 0
-        || header
-            .dx10
-            .is_some_and(|extension| extension.dimension == 4);
-
-    // Godot's loader reads one image's whole mip chain at a time, so cube
-    // faces and array slices are laid out layer-major.
-    let (kind, images, layers) = if is_volume {
-        (TextureKind::D3, 1u32, 1u32)
-    } else if is_cubemap && array_size > 1 {
-        (TextureKind::CubeArray, 6 * array_size, 6 * array_size)
-    } else if is_cubemap {
-        (TextureKind::Cube, 6, 6)
-    } else if array_size > 1 {
-        (TextureKind::D2Array, array_size, array_size)
-    } else {
-        (TextureKind::D2, 1, 1)
-    };
-    let depth = if is_volume { header.depth.max(1) } else { 1 };
-
-    let mip_levels = header.levels_declared();
     let max_levels = max_mip_levels(header.width, header.height);
+    let mip_levels = header.levels_declared();
     if mip_levels > max_levels {
         return Err(ContentError::format(
             path,
@@ -231,9 +216,15 @@ pub fn parse(bytes: &[u8], path: &Path) -> Result<TextureInfo, ContentError> {
             ),
         ));
     }
+    let is_volume = header.caps2 & DDSC2_VOLUME != 0
+        || header
+            .dx10
+            .is_some_and(|extension| extension.dimension == 4);
+    let depth = if is_volume { header.depth.max(1) } else { 1 };
+    let images = dds_images(header);
 
     let mut levels = Vec::with_capacity((images * mip_levels) as usize);
-    let mut offset = data_offset as u64;
+    let mut offset = data_offset(header);
     for _image in 0..images {
         for level in 0..mip_levels {
             let width = (header.width >> level).max(1);
@@ -252,27 +243,85 @@ pub fn parse(bytes: &[u8], path: &Path) -> Result<TextureInfo, ContentError> {
             offset += size;
         }
     }
-
-    if (bytes.len() as u64) < offset {
+    let needed = offset - data_offset(header);
+    if needed > payload_len {
         return Err(ContentError::format(
             path,
-            format!("DDS payload needs {offset} bytes, got {}", bytes.len()),
+            format!(
+                "DDS declares {mip_levels} mip levels needing {needed} payload bytes, got {payload_len}"
+            ),
         ));
     }
+    Ok(levels)
+}
 
-    Ok(TextureInfo {
+/// Assemble a [`TextureInfo`] from a parsed header and its level table.
+pub(crate) fn info(header: &DdsHeader, levels: Vec<TextureLevel>) -> TextureInfo {
+    let array_size = header
+        .dx10
+        .map(|extension| extension.array_size.max(1))
+        .unwrap_or(1);
+    let is_cubemap = header.caps2 & DDSC2_CUBEMAP != 0
+        || header
+            .dx10
+            .is_some_and(|extension| extension.misc_flags & 0x4 != 0);
+    let is_volume = header.caps2 & DDSC2_VOLUME != 0
+        || header
+            .dx10
+            .is_some_and(|extension| extension.dimension == 4);
+    let (kind, layers) = if is_volume {
+        (TextureKind::D3, 1u32)
+    } else if is_cubemap && array_size > 1 {
+        (TextureKind::CubeArray, 6 * array_size)
+    } else if is_cubemap {
+        (TextureKind::Cube, 6)
+    } else if array_size > 1 {
+        (TextureKind::D2Array, array_size)
+    } else {
+        (TextureKind::D2, 1)
+    };
+    TextureInfo {
         format: header.format,
         kind,
         width: header.width,
         height: header.height,
-        depth,
+        depth: if is_volume { header.depth.max(1) } else { 1 },
         layers,
-        mip_levels,
+        mip_levels: header.levels_declared(),
         levels,
         srgb: header.srgb,
         supercompression: 0,
-        data_offset: data_offset as u64,
-    })
+        data_offset: data_offset(header),
+    }
+}
+
+/// Images stored in the container: cube faces or array slices, one mip chain
+/// each.
+fn dds_images(header: &DdsHeader) -> u32 {
+    let array_size = header
+        .dx10
+        .map(|extension| extension.array_size.max(1))
+        .unwrap_or(1);
+    let is_cubemap = header.caps2 & DDSC2_CUBEMAP != 0
+        || header
+            .dx10
+            .is_some_and(|extension| extension.misc_flags & 0x4 != 0);
+    if is_cubemap {
+        6 * array_size
+    } else {
+        array_size.max(1)
+    }
+}
+
+/// Parse the header and build the level table, checking the payload is present.
+pub fn parse(bytes: &[u8], path: &Path) -> Result<TextureInfo, ContentError> {
+    let header = parse_header(bytes, path)?;
+    if header.width == 0 || header.height == 0 {
+        return Err(ContentError::format(path, "DDS dimensions must be non-zero"));
+    }
+    let payload_len = (bytes.len() as u64).saturating_sub(data_offset(&header));
+    let levels = parse_levels(&header, payload_len, path)?;
+    Ok(info(&header, levels))
 }
 
 /// Map a DXGI format to a texture format and whether it is sRGB.
@@ -458,6 +507,57 @@ mod tests {
         assert_eq!(bytes.len(), 128);
         bytes.resize(128 + 8 * 8 * 4, 0x7f);
         bytes
+    }
+
+    #[test]
+    fn bc1_mip_chain_offsets_are_exact() {
+        // Four-level 8x8 BC1: 32 + 8 + 8 + 8 bytes from offset 128.
+        let mut bytes = Vec::new();
+        push_u32(&mut bytes, DDS_MAGIC);
+        push_u32(&mut bytes, 124);
+        push_u32(&mut bytes, 0x0002_1007); // CAPS|HEIGHT|WIDTH|PIXELFORMAT|MIPMAPCOUNT
+        push_u32(&mut bytes, 8);
+        push_u32(&mut bytes, 8);
+        push_u32(&mut bytes, 32);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 4);
+        for _ in 0..11 {
+            push_u32(&mut bytes, 0);
+        }
+        push_u32(&mut bytes, 32);
+        push_u32(&mut bytes, 0x0000_0004); // FOURCC
+        push_u32(&mut bytes, u32::from_le_bytes(*b"DXT1"));
+        push_u32(&mut bytes, 0);
+        for _ in 0..4 {
+            push_u32(&mut bytes, 0);
+        }
+        push_u32(&mut bytes, 0x4010_0008);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        assert_eq!(bytes.len(), 128);
+
+        let path = Path::new("mips.dds");
+        let header = parse_header(&bytes, path).expect("header");
+        let levels = parse_levels(&header, 56, path).expect("levels");
+        let ranges: Vec<(u32, u32, u64, u64)> = levels
+            .iter()
+            .map(|level| (level.width, level.height, level.offset, level.size))
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![
+                (8, 8, 128, 32),
+                (4, 4, 160, 8),
+                (2, 2, 168, 8),
+                (1, 1, 176, 8),
+            ]
+        );
+
+        // One byte short of the chain: typed format error, not a panic.
+        let error = parse_levels(&header, 55, path).expect_err("overruns the payload");
+        assert_eq!(error.kind(), crate::error::ContentErrorKind::Format);
+        assert!(error.message().contains("56 payload bytes"), "{}", error.message());
     }
 
     #[test]

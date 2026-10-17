@@ -1,5 +1,10 @@
 //! [`AudioSource`]: encoded sound bytes plus format sniffing.
 //! Sources stay encoded until decode; Ogg Vorbis needs no conversion.
+//! [`synth_sine_wav`] is the oldest synth helper here; new cue tables should
+//! use [`crate::CueSpec`] and [`crate::wav_pcm16`] instead.
+
+use crate::command::SharedFrames;
+use crate::synth::{AmplitudeEnvelope, CueSpec, Waveform, wav_pcm16};
 
 /// Container/codec of encoded sound bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -60,28 +65,40 @@ impl AudioSource {
 }
 
 /// Minimal mono 16-bit WAV writer: sine burst with decay.
+///
+/// The first synth helper the games shipped with; it is now a thin
+/// [`CueSpec`] preset (sine, a `1/30` s exponential decay, gain `0.5`), so
+/// tuning and rendering live in [`crate::synth`]. Arguments that cannot render
+/// (a zero rate, a non-positive length) yield a valid but empty WAV after a
+/// warning, because the signature has no way to report the failure.
 pub fn synth_sine_wav(freq_hz: f32, secs: f32, sample_rate: u32) -> Vec<u8> {
-    let n = (sample_rate as f32 * secs) as usize;
-    let mut out = Vec::with_capacity(44 + n * 2);
-    let data_len = (n * 2) as u32;
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data_len).to_le_bytes());
-    out.extend_from_slice(b"WAVEfmt ");
-    out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&1u16.to_le_bytes()); // mono
-    out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
-    out.extend_from_slice(&2u16.to_le_bytes()); // block align
-    out.extend_from_slice(&16u16.to_le_bytes()); // bits
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_len.to_le_bytes());
-    for i in 0..n {
-        let t = i as f32 / sample_rate as f32;
-        let v = (2.0 * std::f32::consts::PI * freq_hz * t).sin() * (-t * 30.0).exp() * 0.5;
-        out.extend_from_slice(&((v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes());
+    let spec = CueSpec {
+        waveform: Waveform::Sine,
+        from_hz: freq_hz,
+        to_hz: freq_hz,
+        amplitude: AmplitudeEnvelope::Adsr {
+            attack_s: 0.0,
+            decay_s: 1.0 / 30.0,
+            sustain: 0.0,
+            release_s: 0.0,
+        },
+        gain: 0.5,
+        secs,
+        sample_rate,
+        ..CueSpec::default()
+    };
+    match spec.render_wav() {
+        Ok(wav) => wav,
+        Err(error) => {
+            log::warn!("synth_sine_wav({freq_hz}, {secs}, {sample_rate}): {error}");
+            let empty = SharedFrames {
+                sample_rate,
+                channels: 1,
+                frames: Vec::new(),
+            };
+            wav_pcm16(&empty).unwrap_or_default()
+        }
     }
-    out
 }
 
 #[cfg(test)]

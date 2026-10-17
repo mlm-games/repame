@@ -9,8 +9,8 @@ use anyhow::Result;
 
 use crate::{
     AudioChannel, AudioChannels, AudioListener3D, AudioSource, BusError, BusId, BusTree, CueDef,
-    CueRequest, Engine, GameAudioLink, Music, RealtimeCommand, RigAudio, SoundBank, SpatialParams,
-    SpatialVoice3D, StemDef, SyncPoint, audio_link, spatial_3d,
+    CueRequest, CueSpec, Engine, GameAudioLink, Music, RealtimeCommand, RigAudio, SoundBank,
+    SpatialParams, SpatialVoice3D, StemDef, SyncPoint, audio_link, spatial_3d,
 };
 
 /// Re-target threshold before a spatial voice sends a fade command.
@@ -165,11 +165,25 @@ impl Audio {
         self.bank.load(name, def, files)
     }
 
+    /// Register a cue rendered from a [`CueSpec`] table: one spec per
+    /// variation. The game keeps the tuning table and produces no bytes (see
+    /// [`SoundBank::load_synth`]).
+    pub fn load_synth(&mut self, name: &str, def: CueDef, specs: &[CueSpec]) -> Result<()> {
+        self.bank.load_synth(name, def, specs)
+    }
+
     /// Ask for a cue, decoding on the loader worker instead of the game
     /// thread (see [`SoundBank::request`]). `Ready` means play it now,
     /// `Queued` means audible on a later frame, `Failed` means stop asking.
     pub fn request_cue(&mut self, name: &str, def: CueDef, files: &[&[u8]]) -> CueRequest {
         self.bank.request(name, def, files)
+    }
+
+    /// Ask for a synth cue, rendering on the loader worker (see
+    /// [`SoundBank::request_synth`]). Same three outcomes as
+    /// [`Audio::request_cue`].
+    pub fn request_synth(&mut self, name: &str, def: CueDef, specs: &[CueSpec]) -> CueRequest {
+        self.bank.request_synth(name, def, specs)
     }
 
     /// Cues that failed to decode since the last call, for logging.
@@ -465,7 +479,7 @@ fn channel_of(bus: BusId) -> Option<AudioChannel> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EffectSpec, synth_sine_wav};
+    use crate::{EffectSpec, Waveform, synth_sine_wav};
 
     #[test]
     fn stub_never_blocks_game_code() {
@@ -528,5 +542,27 @@ mod tests {
     fn init_fails_soft_without_device() {
         // Headless CI may lack a device: open must bail, not panic.
         let _ = Audio::try_init();
+    }
+
+    #[test]
+    fn synth_cues_register_on_the_noop_service() {
+        let mut audio = Audio::noop();
+        let spec = CueSpec::new(Waveform::Square, 220.0, 0.1);
+        audio
+            .load_synth("blip", CueDef::default(), &[spec.clone()])
+            .expect("renders");
+        // Registered but silent without a link; asking again is `Ready`
+        // because the cue is already in the bank.
+        assert_eq!(
+            audio.request_synth("blip", CueDef::default(), &[spec]),
+            CueRequest::Ready
+        );
+        assert!(audio.play("blip").is_none());
+        // A table the renderer refuses reports through the same channel as a
+        // failed decode.
+        assert!(audio.load_synth("none", CueDef::default(), &[]).is_err());
+        let bad = CueSpec::new(Waveform::Sine, 440.0, 0.0);
+        assert!(audio.load_synth("bad", CueDef::default(), &[bad]).is_err());
+        audio.update(0.016);
     }
 }

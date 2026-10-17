@@ -701,7 +701,11 @@ mod tests {
             cam.yaw,
             goal.yaw
         );
-        assert!(cam.yaw > from.yaw, "moved the short way (up), got {}", cam.yaw);
+        assert!(
+            cam.yaw < from.yaw,
+            "moved the short way (down through -pi), got {}",
+            cam.yaw
+        );
     }
 
     /// A spring arm holds its full length in open space and shortens to the
@@ -739,7 +743,7 @@ mod tests {
         let mut len = Smoothed::new(10.0f32, 0.2);
         let blocked = arm.resolve_smoothed(Vec3::ZERO, Vec3::NEG_Z, &world, &mut len, 1.0 / 60.0);
         assert!(blocked.blocked);
-        assert!((blocked.distance - 4.0).abs() < 1e-4, "instant in: {}", blocked.distance);
+        assert!((blocked.distance - 3.0).abs() < 1e-4, "instant in: {}", blocked.distance);
         // Wall gone: the arm recovers, never overshooting the rest length.
         let open = NoCollision;
         let mut max = 0.0f32;

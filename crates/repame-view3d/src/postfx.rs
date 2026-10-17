@@ -421,6 +421,7 @@ impl PostProcess {
                 overlay: [1.0; 4],
                 post: None,
                 aux: None,
+                load: false,
             });
             depth_pass = Some(passes.len() as u32);
         }
@@ -992,6 +993,40 @@ struct VsOut {
     @location(1) velocity: vec2<f32>,
 };
 
+/// Skins a bind-pose position by the palette slots its weights name: the
+/// shared body of both depth vertex stages.
+fn skin(
+    pos: vec3<f32>,
+    joints: vec4<u32>,
+    weights: vec4<f32>,
+    skin_mix: f32,
+    skin_base: f32,
+) -> vec3<f32> {
+    if (skin_mix <= 0.5) {
+        return pos;
+    }
+    let wsum = weights.x + weights.y + weights.z + weights.w;
+    if (wsum <= 1e-8) {
+        return pos;
+    }
+    let base = i32(skin_base + 0.5);
+    var acc = vec3<f32>(0.0);
+    for (var k: i32 = 0; k < 4; k = k + 1) {
+        var w: f32 = 0.0;
+        var slot: i32 = 0;
+        if (k == 0) { w = weights.x; slot = i32(joints.x); }
+        else if (k == 1) { w = weights.y; slot = i32(joints.y); }
+        else if (k == 2) { w = weights.z; slot = i32(joints.z); }
+        else { w = weights.w; slot = i32(joints.w); }
+        w = w / wsum;
+        if (w > 0.0) {
+            let m = skin_palette.joints[base + slot];
+            acc = acc + (m * vec4<f32>(pos, 1.0)).xyz * w;
+        }
+    }
+    return acc;
+}
+
 @vertex
 fn vs_main(
     @location(0) pos: vec3<f32>,
@@ -1000,28 +1035,7 @@ fn vs_main(
     @location(3) skin_mix: f32,
     @location(4) skin_base: f32,
 ) -> VsOut {
-    var p = pos;
-    if (skin_mix > 0.5) {
-        let wsum = weights.x + weights.y + weights.z + weights.w;
-        if (wsum > 1e-8) {
-            let base = i32(skin_base + 0.5);
-            var acc = vec3<f32>(0.0);
-            for (var k: i32 = 0; k < 4; k = k + 1) {
-                var w: f32 = 0.0;
-                var slot: i32 = 0;
-                if (k == 0) { w = weights.x; slot = i32(joints.x); }
-                else if (k == 1) { w = weights.y; slot = i32(joints.y); }
-                else if (k == 2) { w = weights.z; slot = i32(joints.z); }
-                else { w = weights.w; slot = i32(joints.w); }
-                w = w / wsum;
-                if (w > 0.0) {
-                    let m = skin_palette.joints[base + slot];
-                    acc = acc + (m * vec4<f32>(pos, 1.0)).xyz * w;
-                }
-            }
-            p = acc;
-        }
-    }
+    let p = skin(pos, joints, weights, skin_mix, skin_base);
     let clip = camera.view_proj * vec4<f32>(p, 1.0);
     let prev_clip = prev.prev_view_proj * vec4<f32>(p, 1.0);
     let ndc = clip.xy / max(clip.w, 1e-6);
@@ -1036,6 +1050,33 @@ fn vs_main(
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(in.view_depth, in.velocity.x, in.velocity.y, 1.0);
+}
+
+struct VsDepthOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) view_depth: f32,
+}
+
+// The occlusion pass's variant: view depth alone, with no previous-frame
+// matrix or velocity outputs.
+@vertex
+fn vs_depth(
+    @location(0) pos: vec3<f32>,
+    @location(1) joints: vec4<u32>,
+    @location(2) weights: vec4<f32>,
+    @location(3) skin_mix: f32,
+    @location(4) skin_base: f32,
+) -> VsDepthOut {
+    let p = skin(pos, joints, weights, skin_mix, skin_base);
+    var out: VsDepthOut;
+    out.pos = camera.view_proj * vec4<f32>(p, 1.0);
+    out.view_depth = dot(p - camera.cam_pos, camera.cam_forward);
+    return out;
+}
+
+@fragment
+fn fs_depth(in: VsDepthOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.view_depth, 0.0, 0.0, 1.0);
 }
 "#;
 
@@ -1250,15 +1291,19 @@ mod tests {
         assert!(fxaa_edge_applies(0.0, 1.0, &fxaa));
         // Flat region with a tiny local luma: below the absolute floor.
         assert!(!fxaa_edge_applies(0.10, 0.12, &fxaa));
-        // Silent drift check: 0.5 * 0.125 + 0.0312 = 0.0937.
-        assert!(fxaa_edge_applies(0.5, 0.5 + 0.0937, &fxaa));
-        assert!(!fxaa_edge_applies(0.5, 0.5 + 0.0936, &fxaa));
-        // A vertical edge (bright right, dark left) points along -x.
+        // Silent drift check: the gate is lumaMax*rel + abs, as the shader
+        // computes it. 0.62 clears 0.62*0.125+0.0312; 0.60 does not
+        // (0.60*0.125+0.0312 = 0.1062 > 0.10), which the lumaMin form would
+        // wrongly pass.
+        assert!(fxaa_edge_applies(0.5, 0.62, &fxaa));
+        assert!(!fxaa_edge_applies(0.5, 0.60, &fxaa));
+        // The direction runs *along* the edge, as the shader samples it: a
+        // vertical edge (bright right, dark left) points along -y.
         let dir = fxaa_direction(0.0, 1.0, 0.0, 1.0);
-        assert_eq!(dir, [-2.0, 0.0]);
-        // A horizontal edge (bright below, dark above) points along +y.
+        assert_eq!(dir, [-0.0, -2.0]);
+        // A horizontal edge (bright below, dark above) points along +x.
         let dir = fxaa_direction(0.0, 0.0, 1.0, 1.0);
-        assert_eq!(dir, [0.0, 2.0]);
+        assert_eq!(dir, [2.0, 0.0]);
     }
 
     #[test]

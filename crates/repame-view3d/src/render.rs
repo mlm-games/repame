@@ -458,7 +458,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 use repose_render_wgpu::{
-    BlitRenderPass, CallbackRenderPass, CallbackResources, DepthComposite, ScreenDescriptor,
+    BlitRenderPass, CallbackRenderPass, CallbackResources, DepthComposite, ScenePassOps,
+    ScreenDescriptor,
 };
 
 use super::mesh::MeshGroup;
@@ -1741,6 +1742,8 @@ pub struct PassSpec {
     pub post: Option<PostStage>,
     /// Second target a post stage samples.
     pub aux: Option<String>,
+    /// Draws over the target's contents instead of clearing them.
+    pub load: bool,
 }
 
 /// Uniform a post-process pass binds: the stage parameters, the source
@@ -2398,34 +2401,48 @@ fn particle_dispatch_order(frame: &ParticleFrame) -> Vec<u32> {
             _ => None,
         })
         .collect();
+    let mut parented = vec![false; count];
+    for target in targets.iter().flatten() {
+        let index = *target as usize;
+        if index < count {
+            parented[index] = true;
+        }
+    }
     let mut state = vec![0u8; count];
     let mut order = Vec::with_capacity(count);
-    for root in 0..count {
-        if state[root] != 0 {
-            continue;
-        }
-        let mut stack: Vec<(u32, bool)> = vec![(root as u32, false)];
-        while let Some((node, expanded)) = stack.pop() {
-            let node_index = node as usize;
-            if expanded {
-                state[node_index] = 2;
+    // Sub-emitter roots first: a target declared *before* its parent would
+    // otherwise dispatch first and only see the spawn requests a frame late.
+    for sweep_parented in [false, true] {
+        for root in 0..count {
+            if parented[root] != sweep_parented || state[root] != 0 {
                 continue;
             }
-            if state[node_index] != 0 {
-                if state[node_index] == 1 {
-                    log::warn!(
-                        "scene_batch: particle sub-emitter cycle at system {node}; link dropped"
-                    );
+            let mut stack: Vec<(u32, bool)> = vec![(root as u32, false)];
+            while let Some((node, expanded)) = stack.pop() {
+                let node_index = node as usize;
+                if expanded {
+                    state[node_index] = 2;
+                    continue;
                 }
-                continue;
-            }
-            state[node_index] = 1;
-            order.push(node);
-            stack.push((node, true));
-            if let Some(target) = targets[node_index] {
-                let target_index = target as usize;
-                if target_index < count && state[target_index] != 1 {
-                    stack.push((target, false));
+                if state[node_index] != 0 {
+                    if state[node_index] == 1 {
+                        log::warn!(
+                            "scene_batch: particle sub-emitter cycle at system {node}; link dropped"
+                        );
+                    }
+                    continue;
+                }
+                state[node_index] = 1;
+                order.push(node);
+                stack.push((node, true));
+                if let Some(target) = targets[node_index] {
+                    let target_index = target as usize;
+                    if target_index < count
+                        && target_index != node_index
+                        && state[target_index] != 1
+                    {
+                        stack.push((target, false));
+                    }
                 }
             }
         }
@@ -3733,12 +3750,20 @@ impl SceneBatch {
     /// resolve passes may use any format (the post pipelines are built per
     /// format), and a [`Depth`](super::pass::PassKind::Depth) or
     /// [`Occlusion`](super::pass::PassKind::Occlusion) pass must be
-    /// `Rgba16Float` (view depth needs the range). A mismatched pass is
-    /// reported and skipped.
+    /// `Rgba16Float`, or `R32Float` where the device renders to it (view
+    /// depth needs the range). A mismatched pass is reported and skipped.
     fn sync_pass_targets(&self, device: &wgpu::Device, res: &mut SceneEntry) {
         let supported = |spec: &PassSpec| match spec.kind {
             super::pass::PassKind::Depth | super::pass::PassKind::Occlusion => {
-                spec.target.format == super::pass::RenderTargetFormat::Rgba16Float
+                // View depth needs the range. Both formats are guaranteed
+                // render attachments (wgpu's core format table), and the
+                // chain reads either with `textureLoad`; R32Float is not
+                // filterable, so post stages cannot sample it.
+                matches!(
+                    spec.target.format,
+                    super::pass::RenderTargetFormat::Rgba16Float
+                        | super::pass::RenderTargetFormat::R32Float
+                )
             }
             super::pass::PassKind::Render => pass_format(spec.target.format) == res.key.0,
             super::pass::PassKind::Resolve | super::pass::PassKind::Fullscreen => true,
@@ -3831,18 +3856,24 @@ impl SceneBatch {
         passes: &[super::pass::RenderPass],
     ) -> Result<(), super::pass::PassError> {
         super::pass::validate_passes(passes)?;
-        self.passes = passes
+        let order = super::pass::pass_order(passes);
+        self.passes = order
             .iter()
-            .enumerate()
-            .map(|(index, pass)| PassSpec {
-                target: pass.target.clone(),
-                kind: pass.kind,
-                source: pass.source.clone(),
-                index: index as u32 + 1,
-                presents: pass.presents,
-                overlay: pass.overlay,
-                post: pass.post,
-                aux: pass.aux.clone(),
+            .map(|&position| {
+                let pass = &passes[position];
+                PassSpec {
+                    target: pass.target.clone(),
+                    kind: pass.kind,
+                    source: pass.source.clone(),
+                    // The declared position, which pass groups and the post
+                    // chain key on; the store order is the schedule.
+                    index: position as u32 + 1,
+                    presents: pass.presents,
+                    overlay: pass.overlay,
+                    post: pass.post,
+                    aux: pass.aux.clone(),
+                    load: pass.load,
+                }
             })
             .collect();
         Ok(())
@@ -3972,7 +4003,8 @@ impl SceneBatch {
     /// Requests this frame's occlusion feed: a compute pass chain reduces the
     /// declared [`Depth`](super::pass::PassKind::Depth) or
     /// [`Occlusion`](super::pass::PassKind::Occlusion) pass's `Rgba16Float`
-    /// target into the packed level chain in `encoder` (which the caller
+    /// or `R32Float` target into the packed level chain in `encoder` (which
+    /// the caller
     /// submits with the frame, so the chain runs after the pass drew), with
     /// the chain's host map scheduled for that same submission.
     ///
@@ -4026,10 +4058,16 @@ impl SceneBatch {
             res.occlusion_feed.retire(device);
             return false;
         };
-        if target.format != super::pass::RenderTargetFormat::Rgba16Float || target.samples != 1 {
-            // `sync_pass_targets` only allocates `Rgba16Float` depth
-            // targets; anything else is a pass that cannot hold view depth,
-            // and a multisampled target cannot be reduced as a texture.
+        if !matches!(
+            target.format,
+            super::pass::RenderTargetFormat::Rgba16Float
+                | super::pass::RenderTargetFormat::R32Float
+        ) || target.samples != 1
+        {
+            // `sync_pass_targets` only allocates `Rgba16Float` and `R32Float`
+            // depth targets; anything else is a pass that cannot hold view
+            // depth, and a multisampled target cannot be reduced as a
+            // texture.
             res.occlusion_feed.retire(device);
             return false;
         }
@@ -4870,7 +4908,9 @@ impl SceneBatch {
         // Same-frame phase two keeps phase-one rejects instead of dropping
         // them, so the encode can re-test them on the GPU against this
         // frame's chain; it needs the depth pass that chain reads, and only
-        // the shared scene pass's groups become candidates.
+        // the scene's groups become candidates (the shared scene target or a
+        // declared scene-color pass, the same notion the scheduler and the
+        // phase-two draw use).
         let phase_two = self.occlusion_feed.is_some_and(|feed| feed.phase_two)
             && self.occlusion.is_some()
             && culling
@@ -4878,6 +4918,12 @@ impl SceneBatch {
                 .passes
                 .iter()
                 .any(|spec| matches!(spec.kind, super::pass::PassKind::Depth | super::pass::PassKind::Occlusion));
+        let scene_passes: Vec<u32> = self
+            .passes
+            .iter()
+            .filter(|spec| spec.target.semantics == super::pass::TargetSemantics::SceneColor)
+            .map(|spec| spec.index)
+            .collect();
         self.occlusion_phase_two = phase_two;
         let eye = glam::Vec3::from(self.camera_pos);
         // Stable partition: opaque keep submission order; transparent sort
@@ -4900,7 +4946,7 @@ impl SceneBatch {
                     && occlusion.occluded(min, max)
                 {
                     self.occluded += 1;
-                    if phase_two && g.pass == 0 {
+                    if phase_two && (g.pass == 0 || scene_passes.contains(&g.pass)) {
                         g.hz_culled = true;
                     } else {
                         continue;
@@ -5011,7 +5057,7 @@ impl SceneBatch {
                 && Self::occlusion_rejects(self.occlusion.as_ref(), &s)
             {
                 self.occluded += 1;
-                if phase_two && s.pass == 0 {
+                if phase_two && (s.pass == 0 || scene_passes.contains(&s.pass)) {
                     s.hz_culled = true;
                 } else {
                     continue;
@@ -5045,7 +5091,7 @@ impl SceneBatch {
                 && Self::occlusion_rejects(self.occlusion.as_ref(), &s)
             {
                 self.occluded += 1;
-                if phase_two && s.pass == 0 {
+                if phase_two && (s.pass == 0 || scene_passes.contains(&s.pass)) {
                     s.hz_culled = true;
                 } else {
                     continue;
@@ -5950,16 +5996,21 @@ fn vs_main(
                 resource: depth_velocity_buffer.as_entire_binding(),
             }],
         });
-        // The depth/velocity pass writes Rgba16Float, so its pipeline is built
-        // for that format rather than the batch's, and uses the same remapped
-        // five-attribute layout the shadow depth pass uses.
-        let depth_velocity_pipeline =
+        // The depth-kind passes write Rgba16Float, so their pipelines are
+        // built for that format rather than the batch's, and use the same
+        // remapped five-attribute layout the shadow depth pass uses. The
+        // occlusion pass runs depth alone (`vs_depth`/`fs_depth`), without the
+        // previous-frame matrix or velocity outputs.
+        let mk_depth_pipeline = |label: &'static str,
+                                 vs_entry: &'static str,
+                                 fs_entry: &'static str,
+                                 format: wgpu::TextureFormat| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("repame_view3d_depth_velocity"),
+                label: Some(label),
                 layout: Some(&dv_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &dv_module,
-                    entry_point: Some("vs_main"),
+                    entry_point: Some(vs_entry),
                     buffers: &[Some(wgpu::VertexBufferLayout {
                         array_stride: size_of::<Vert>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
@@ -5995,9 +6046,9 @@ fn vs_main(
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &dv_module,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(fs_entry),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
+                        format,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -6023,7 +6074,34 @@ fn vs_main(
                 },
                 multiview_mask: None,
                 cache: None,
-            });
+            })
+        };
+        // A variant per accepted depth format: the target's format and the
+        // pipeline's attachment format must match at draw time.
+        let depth_velocity_pipeline = mk_depth_pipeline(
+            "repame_view3d_depth_velocity",
+            "vs_main",
+            "fs_main",
+            wgpu::TextureFormat::Rgba16Float,
+        );
+        let depth_only_pipeline = mk_depth_pipeline(
+            "repame_view3d_depth_only",
+            "vs_depth",
+            "fs_depth",
+            wgpu::TextureFormat::Rgba16Float,
+        );
+        let depth_velocity_pipeline_r32f = mk_depth_pipeline(
+            "repame_view3d_depth_velocity_r32f",
+            "vs_main",
+            "fs_main",
+            wgpu::TextureFormat::R32Float,
+        );
+        let depth_only_pipeline_r32f = mk_depth_pipeline(
+            "repame_view3d_depth_only_r32f",
+            "vs_depth",
+            "fs_depth",
+            wgpu::TextureFormat::R32Float,
+        );
         let entry = SceneEntry {
             key,
             pipeline_depth: mk("repame_view3d_depth", true, false),
@@ -6032,6 +6110,9 @@ fn vs_main(
             pipeline_transparent_flat: mk("repame_view3d_transparent_flat", false, true),
             shadow_depth_pipeline,
             depth_velocity_pipeline,
+            depth_only_pipeline,
+            depth_velocity_pipeline_r32f,
+            depth_only_pipeline_r32f,
             depth_velocity_buffer,
             depth_velocity_bind,
             occlusion_feed: OcclusionFeed::default(),
@@ -6339,6 +6420,12 @@ struct SceneEntry {
     /// [`PassKind::Depth`](super::pass::PassKind::Depth) target: the scene
     /// geometry replayed as `(view_depth, velocity.x, velocity.y, 1)`.
     depth_velocity_pipeline: wgpu::RenderPipeline,
+    /// Depth alone, for a [`PassKind::Occlusion`](super::pass::PassKind::Occlusion)
+    /// target: the scene geometry replayed as `(view_depth, 0, 0, 1)`.
+    depth_only_pipeline: wgpu::RenderPipeline,
+    /// The `R32Float` target variants of both depth-kind pipelines.
+    depth_velocity_pipeline_r32f: wgpu::RenderPipeline,
+    depth_only_pipeline_r32f: wgpu::RenderPipeline,
     /// Previous-frame view-projection the velocity pass reads.
     depth_velocity_buffer: wgpu::Buffer,
     depth_velocity_bind: wgpu::BindGroup,
@@ -6491,6 +6578,9 @@ pub fn prepare_scene_with_id(
         pipeline_transparent: wgpu::RenderPipeline,
         pipeline_transparent_flat: wgpu::RenderPipeline,
         depth_velocity_pipeline: wgpu::RenderPipeline,
+        depth_only_pipeline: wgpu::RenderPipeline,
+        depth_velocity_pipeline_r32f: wgpu::RenderPipeline,
+        depth_only_pipeline_r32f: wgpu::RenderPipeline,
         depth_velocity_bind: wgpu::BindGroup,
         post_pipeline: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
         post_binds: HashMap<u32, wgpu::BindGroup>,
@@ -6636,6 +6726,9 @@ pub fn prepare_scene_with_id(
             pipeline_transparent: res.pipeline_transparent.clone(),
             pipeline_transparent_flat: res.pipeline_transparent_flat.clone(),
             depth_velocity_pipeline: res.depth_velocity_pipeline.clone(),
+            depth_only_pipeline: res.depth_only_pipeline.clone(),
+            depth_velocity_pipeline_r32f: res.depth_velocity_pipeline_r32f.clone(),
+            depth_only_pipeline_r32f: res.depth_only_pipeline_r32f.clone(),
             depth_velocity_bind: res.depth_velocity_bind.clone(),
             post_pipeline: res
                 .post
@@ -6961,8 +7054,9 @@ pub fn prepare_scene_with_id(
     // One declared pass's depth/velocity replay, shared by the phase-two
     // ordering (ahead of the scene pass) and the declaration-order loop.
     let encode_depth_pass = |encoder: &mut wgpu::CommandEncoder, entry: &PassEntry| {
-        // Replay the frame's opaque geometry as view depth + camera
-        // velocity into an Rgba16Float target.
+        // Replay the frame's opaque geometry into an Rgba16Float target:
+        // view depth, plus camera velocity for a declared Depth pass (the
+        // engine's Occlusion kind runs the depth-only pipeline).
         let view = &entry.view;
         let depth_view = &entry.depth_view;
         let spec = &entry.spec;
@@ -6973,14 +7067,22 @@ pub fn prepare_scene_with_id(
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: if spec.load {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: if spec.load {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(1.0)
+                    },
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -6997,7 +7099,14 @@ pub fn prepare_scene_with_id(
             0.0,
             1.0,
         );
-        dv.set_pipeline(&snap.depth_velocity_pipeline);
+        let depth_only = entry.spec.kind == super::pass::PassKind::Occlusion;
+        let r32f = entry.spec.target.format == super::pass::RenderTargetFormat::R32Float;
+        dv.set_pipeline(match (depth_only, r32f) {
+            (true, true) => &snap.depth_only_pipeline_r32f,
+            (true, false) => &snap.depth_only_pipeline,
+            (false, true) => &snap.depth_velocity_pipeline_r32f,
+            (false, false) => &snap.depth_velocity_pipeline,
+        });
         dv.set_bind_group(0, &snap.cam_bind, &[]);
         dv.set_bind_group(1, &snap.depth_velocity_bind, &[]);
         dv.set_vertex_buffer(0, snap.verts.slice(..));
@@ -7010,64 +7119,66 @@ pub fn prepare_scene_with_id(
     // Phase two: the depth pass runs before the scene pass, so this frame's
     // chain is available to re-test the phase-one rejects; the test compute
     // writes their indirect args before the scene pass draws them.
-    let phase_two_depths = snap.occlusion_indirect;
     let mut occlusion_indirect = snap.occlusion_indirect;
-    if phase_two_depths {
-        for entry in snap.passes.iter().filter(|entry| {
-            matches!(
-                entry.spec.kind,
-                super::pass::PassKind::Depth | super::pass::PassKind::Occlusion
-            )
-        }) {
-            encode_depth_pass(encoder, entry);
-        }
-        if let Some(all) = resources.get_mut::<SceneResources>()
-            && let Some(res) = all.batches.get_mut(id)
-            && let Some(entry) = snap.passes.iter().find(|entry| {
-                matches!(
-                    entry.spec.kind,
-                    super::pass::PassKind::Depth | super::pass::PassKind::Occlusion
-                )
-            })
-            && let Some(desc) = res.occlusion_feed_desc
-        {
-            let width = entry.spec.target.width.max(1);
-            let height = entry.spec.target.height.max(1);
-            if res.occlusion_feed.encode_chain(
-                device,
-                queue,
-                encoder,
-                &entry.view,
-                width,
-                height,
-                desc.clamped_tile(),
-            ) {
-                res.occlusion_feed.encode_test(
-                    device,
-                    queue,
-                    encoder,
-                    &res.camera_mat,
-                    desc.clamped_tile(),
-                    desc.clamped_bias(),
-                    width,
-                    height,
-                    &res.occlusion_candidates,
-                    snap.occlusion_candidates,
-                    &snap.occlusion_args,
-                );
-            } else {
-                // No chain to test against: the rejects stay culled, as
-                // before phase two (their args are never read).
-                occlusion_indirect = false;
+    // Phase two runs once per frame: right after the depth pass the chain
+    // reads.
+    let mut phase_two_done = false;
+    // Draws the re-tested rejects into a pass that loaded the scene color and
+    // depth; the test zeroed the still-occluded ones' index counts.
+    let draw_phase_two = |pass: &mut wgpu::RenderPass<'_>, snap: &Snapshot| {
+        pass.set_bind_group(0, &snap.cam_bind, &[]);
+        pass.set_bind_group(1, &snap.tex_bind, &[]);
+        pass.set_bind_group(2, &snap.shadow_bind, &[]);
+        pass.set_bind_group(3, &snap.material_bind, &[]);
+        pass.set_vertex_buffer(0, snap.verts.slice(..));
+        pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+        let mut bound_material: Option<u32> = None;
+        for r in snap.ranges.iter().filter(|r| r.hz_culled.is_some()) {
+            let program = snap
+                .material_pipelines
+                .get(r.material.saturating_sub(1) as usize)
+                .filter(|_| r.material > 0);
+            if bound_material != Some(r.material) {
+                match program {
+                    Some(pipes) => pass.set_bind_group(3, &pipes.bind, &[]),
+                    None => pass.set_bind_group(3, &snap.material_bind, &[]),
+                }
+                bound_material = Some(r.material);
             }
-        } else {
-            occlusion_indirect = false;
+            pass.set_pipeline(match (r.transparent, r.depth_test) {
+                (true, true) => match program {
+                    Some(pipes) => &pipes.transparent,
+                    None => &snap.pipeline_transparent,
+                },
+                (true, false) => match program {
+                    Some(pipes) => &pipes.transparent_flat,
+                    None => &snap.pipeline_transparent_flat,
+                },
+                (false, true) => match program {
+                    Some(pipes) => &pipes.depth,
+                    None => &snap.pipeline_depth,
+                },
+                (false, false) => match program {
+                    Some(pipes) => &pipes.flat,
+                    None => &snap.pipeline_flat,
+                },
+            });
+            if let Some(index) = r.hz_culled {
+                pass.draw_indexed_indirect(&snap.occlusion_args, index as u64 * 20);
+            }
         }
-    }
+    };
 
     let composite = DepthComposite::get(resources);
     {
-        let Some(mut pass) = composite.begin_scene(id, encoder, clear) else {
+        let ops = ScenePassOps {
+            clear: Some(clear),
+            load_depth: false,
+            // The phase-two pass loads the scene depth to z-test against
+            // what this pass leaves.
+            store_depth: occlusion_indirect,
+        };
+        let Some(mut pass) = composite.begin_scene_ops(id, encoder, ops) else {
             return;
         };
         pass.set_bind_group(0, &snap.cam_bind, &[]);
@@ -7111,15 +7222,12 @@ pub fn prepare_scene_with_id(
                     None => &snap.pipeline_flat,
                 },
             });
-            match r.hz_culled {
-                Some(index) if occlusion_indirect => {
-                    pass.draw_indexed_indirect(&snap.occlusion_args, index as u64 * 20);
-                }
-                // A phase-one reject the test did not run for (no chain this
-                // frame): stays culled, as before phase two.
-                Some(_) => {}
-                None => pass.draw_indexed(r.index_start..r.index_end, 0, 0..1),
+            if r.hz_culled.is_some() {
+                // A phase-one reject: stays culled unless the phase-two
+                // pass draws it after the depth pass.
+                continue;
             }
+            pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
         }
         if let Some(particles) = snap.particles.as_ref() {
             draw_particle_billboards(&mut pass, particles, 0, &snap.cam_bind, &snap.tex_bind);
@@ -7133,12 +7241,100 @@ pub fn prepare_scene_with_id(
         let pass_index = spec.index;
         let target = spec.target.clear;
         if matches!(spec.kind, super::pass::PassKind::Depth | super::pass::PassKind::Occlusion) {
-            // Phase two encoded it ahead of the scene pass; the declaration
-            // order keeps it in place otherwise.
-            if phase_two_depths {
-                continue;
-            }
             encode_depth_pass(encoder, entry);
+            // Phase two: the chain reads this pass's target, so the GPU test
+            // and the second scene pass follow it here.
+            if occlusion_indirect && !phase_two_done {
+                phase_two_done = true;
+                if let Some(all) = resources.get_mut::<SceneResources>()
+                    && let Some(res) = all.batches.get_mut(id)
+                    && let Some(desc) = res.occlusion_feed_desc
+                {
+                    let width = spec.target.width.max(1);
+                    let height = spec.target.height.max(1);
+                    if res.occlusion_feed.encode_chain(
+                        device,
+                        queue,
+                        encoder,
+                        view,
+                        width,
+                        height,
+                        desc.clamped_tile(),
+                    ) {
+                        res.occlusion_feed.encode_test(
+                            device,
+                            queue,
+                            encoder,
+                            &res.camera_mat,
+                            desc.clamped_tile(),
+                            desc.clamped_bias(),
+                            width,
+                            height,
+                            &res.occlusion_candidates,
+                            snap.occlusion_candidates,
+                            &snap.occlusion_args,
+                        );
+                    } else {
+                        // No chain to test against: the rejects stay culled.
+                        occlusion_indirect = false;
+                    }
+                } else {
+                    occlusion_indirect = false;
+                }
+                if occlusion_indirect {
+                    let scene = snap.passes.iter().find(|entry| {
+                        entry.spec.kind == super::pass::PassKind::Render
+                            && entry.spec.target.semantics
+                                == super::pass::TargetSemantics::SceneColor
+                    });
+                    // Chained frames draw over the declared scene pass's
+                    // target, a frame without one over the composite scene.
+                    if let Some(scene) = scene {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("repame_view3d_phase_two"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &scene.view,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                                view: &scene.depth_view,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                }),
+                                stencil_ops: None,
+                            }),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        pass.set_viewport(
+                            0.0,
+                            0.0,
+                            scene.spec.target.width as f32,
+                            scene.spec.target.height as f32,
+                            0.0,
+                            1.0,
+                        );
+                        draw_phase_two(&mut pass, &snap);
+                    } else if let Some(mut pass) = DepthComposite::get(resources).begin_scene_ops(
+                        id,
+                        encoder,
+                        ScenePassOps {
+                            clear: None,
+                            load_depth: true,
+                            store_depth: false,
+                        },
+                    ) {
+                        draw_phase_two(&mut pass, &snap);
+                    }
+                }
+            }
             continue;
         }
         if spec.kind == super::pass::PassKind::Fullscreen {
@@ -7222,12 +7418,16 @@ pub fn prepare_scene_with_id(
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: target[0] as f64,
-                        g: target[1] as f64,
-                        b: target[2] as f64,
-                        a: target[3] as f64,
-                    }),
+                    load: if spec.load {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(wgpu::Color {
+                            r: target[0] as f64,
+                            g: target[1] as f64,
+                            b: target[2] as f64,
+                            a: target[3] as f64,
+                        })
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -7258,6 +7458,11 @@ pub fn prepare_scene_with_id(
             1.0,
         );
         for r in snap.ranges.iter().filter(|r| r.pass == pass_index) {
+            if r.hz_culled.is_some() {
+                // A phase-one reject: stays culled, or the phase-two pass
+                // draws it after the depth pass.
+                continue;
+            }
             let program = snap
                 .material_pipelines
                 .get(r.material.saturating_sub(1) as usize)
@@ -8105,6 +8310,7 @@ mod tests {
             overlay: [1.0; 4],
             post: None,
             aux: None,
+            load: false,
         }
     }
 
@@ -8115,6 +8321,194 @@ mod tests {
         pass.target.name = "test.occlusion".to_string();
         pass.kind = super::super::pass::PassKind::Occlusion;
         pass
+    }
+
+    /// A headless device for the GPU-path tests: `None` (and the test returns
+    /// quietly) when this machine has no adapter.
+    fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            ..Default::default()
+        }))
+        .ok()?;
+        block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("repame-view3d occlusion test"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            trace: wgpu::Trace::Off,
+        }))
+        .ok()
+    }
+
+    fn headless_screen() -> ScreenDescriptor {
+        ScreenDescriptor {
+            size_in_pixels: [64, 64],
+            pixels_per_point: 1.0,
+            target_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            sample_count: 1,
+        }
+    }
+
+    /// Minimal executor for wgpu's device-request futures.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::{Context, Poll};
+        struct ThreadWaker(std::thread::Thread);
+        impl std::task::Wake for ThreadWaker {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.unpark();
+            }
+            fn wake_by_ref(self: &std::sync::Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker =
+            std::task::Waker::from(std::sync::Arc::new(ThreadWaker(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::park(),
+            }
+        }
+    }
+
+    /// The occlusion feed and phase two drive on a real adapter when one is
+    /// present (headless; quietly returns without one). Any wgpu validation
+    /// error panics through the default uncaptured-error handler, so this
+    /// exercises the chain compute, its dynamic-offset level dispatches, the
+    /// phase-two test, the indirect draws and the composite load path.
+    #[test]
+    fn occlusion_phase_two_runs_on_a_device() {
+        use super::super::camera::OrbitCamera;
+        use super::super::occlusion::{DepthPyramid, OcclusionCulling};
+        use glam::Vec3;
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let screen = headless_screen();
+        let mut resources = CallbackResources::default();
+        let cam = OrbitCamera {
+            target: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.9,
+            dist: 30.0,
+            fov_y_deg: 30.0,
+        };
+        let state = OcclusionCulling {
+            pyramid: DepthPyramid::build(64, 64, 8, &[20.0f32; 64 * 64]).expect("valid"),
+            view_proj: cam.view_proj(1.0),
+            cam_pos: cam.eye().into(),
+            cam_forward: cam.forward().into(),
+            bias: 0.1,
+        };
+        let mut batch = SceneBatch::with_id("test.occlusion.gpu");
+        batch.set_camera(cam.view_proj(1.0));
+        batch.set_camera_pos(cam.eye().into());
+        batch.set_passes(&[depth_pass()]).expect("a lone depth pass validates");
+        batch.set_occlusion(Some(state));
+        batch.set_occlusion_feed(Some(crate::OcclusionFeedDesc {
+            phase_two: true,
+            ..Default::default()
+        }));
+        batch.push_group(&big_far_box(&cam));
+        batch.finish();
+        assert_eq!(batch.occluded(), 1);
+        assert_eq!(batch.occlusion_candidates.len(), 1);
+        batch.ensure_resources(&device, &screen, &mut resources);
+        batch.upload_all(&device, &queue, &mut resources);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("test.occlusion.gpu"),
+        });
+        prepare_scene_with_id(
+            batch.id(),
+            &device,
+            &queue,
+            &mut encoder,
+            &screen,
+            &mut resources,
+            64,
+            64,
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device polled clean");
+    }
+
+    /// Phase two over a declared scene pass: the engine's `Occlusion` kind
+    /// with an `R32Float` target and the depth-only pipeline, with the load
+    /// pass drawing over the scene pass's own target.
+    #[test]
+    fn occlusion_phase_two_loads_a_declared_scene_pass() {
+        use super::super::camera::OrbitCamera;
+        use super::super::occlusion::{DepthPyramid, OcclusionCulling};
+        use glam::Vec3;
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let screen = headless_screen();
+        let mut resources = CallbackResources::default();
+        let cam = OrbitCamera {
+            target: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.9,
+            dist: 30.0,
+            fov_y_deg: 30.0,
+        };
+        let state = OcclusionCulling {
+            pyramid: DepthPyramid::build(64, 64, 8, &[20.0f32; 64 * 64]).expect("valid"),
+            view_proj: cam.view_proj(1.0),
+            cam_pos: cam.eye().into(),
+            cam_forward: cam.forward().into(),
+            bias: 0.1,
+        };
+        let scene = crate::pass::RenderPass::render(
+            crate::pass::RenderTarget::color("test.scene.gpu", 64, 64),
+            Vec::new(),
+        );
+        let mut occlusion = depth_pass();
+        occlusion.target.name = "test.occlusion.gpu".to_string();
+        occlusion.target.format = crate::pass::RenderTargetFormat::R32Float;
+        occlusion.kind = crate::PassKind::Occlusion;
+        let mut batch = SceneBatch::with_id("test.occlusion.gpu.chained");
+        batch.set_camera(cam.view_proj(1.0));
+        batch.set_camera_pos(cam.eye().into());
+        batch.set_passes(&[scene, occlusion]).expect("scene + occlusion validate");
+        batch.set_occlusion(Some(state));
+        batch.set_occlusion_feed(Some(crate::OcclusionFeedDesc {
+            phase_two: true,
+            ..Default::default()
+        }));
+        batch.push_group_for_pass(&big_far_box(&cam), 1);
+        batch.finish();
+        assert_eq!(batch.occluded(), 1);
+        assert_eq!(batch.occlusion_candidates.len(), 1);
+        batch.ensure_resources(&device, &screen, &mut resources);
+        batch.upload_all(&device, &queue, &mut resources);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("test.occlusion.gpu.chained"),
+        });
+        prepare_scene_with_id(
+            batch.id(),
+            &device,
+            &queue,
+            &mut encoder,
+            &screen,
+            &mut resources,
+            64,
+            64,
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device polled clean");
     }
 
     #[test]
@@ -8179,9 +8573,9 @@ mod tests {
     }
 
     /// Phase two's contract: it needs a declared depth pass (inert without
-    /// one), it only keeps the shared scene pass's opaque depth-tested
-    /// groups, and the default descriptor leaves phase one's drop behavior
-    /// exactly as it was.
+    /// one), it only keeps the scene's opaque depth-tested groups (the
+    /// shared scene target or a declared scene-color pass), and the default
+    /// descriptor leaves phase one's drop behavior exactly as it was.
     #[test]
     fn phase_two_needs_a_depth_pass_and_the_scene_pass() {
         use super::super::camera::OrbitCamera;
@@ -8246,6 +8640,25 @@ mod tests {
         assert!(batch.occlusion_candidates.is_empty());
         assert!(batch.is_empty());
 
+        // A declared scene-color pass is the scene in a chained frame: its
+        // rejects are candidates too (the shape post chains use).
+        let scene = depth_pass();
+        let mut scene = scene;
+        scene.target = super::super::pass::RenderTarget::color("test.scene", 64, 64);
+        scene.kind = super::super::pass::PassKind::Render;
+        let mut batch = SceneBatch::with_id("test.phase_two.scene_pass");
+        batch.set_camera(view_proj);
+        batch.set_camera_pos(cam.eye().into());
+        batch.set_passes(&[scene, depth_pass()]).expect("scene + depth validate");
+        batch.set_occlusion(Some(state.clone()));
+        batch.set_occlusion_feed(Some(armed));
+        batch.push_group_for_pass(&big_far_box(&cam), 1);
+        batch.finish();
+        assert_eq!(batch.occluded(), 1);
+        assert_eq!(batch.occlusion_candidates.len(), 1);
+        assert!(!batch.is_empty(), "the scene pass's reject is retained");
+        assert!(batch.ranges.iter().any(|r| r.hz_culled == Some(0)));
+
         // Armed with a depth pass: the scene pass's reject is kept, with one
         // candidate and a flagged range the encode draws indirectly.
         let mut batch = SceneBatch::with_id("test.phase_two.armed");
@@ -8301,7 +8714,7 @@ mod tests {
         assert_eq!(staged, 3, "systems stay index-aligned");
         assert_eq!(
             batch.particle_order,
-            vec![parent as u32, child as u32],
+            vec![parent as u32, child as u32, 2],
             "the parent dispatches before its target"
         );
 

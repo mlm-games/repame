@@ -12,6 +12,10 @@
 //! (see [`crate::render::prepare_scene_with_id`]), and the viewport appends a
 //! [`PassKind::Occlusion`] pass of its own when a frame arms
 //! [`crate::Frame3d::occlusion_feed`] and declares no depth pass.
+//!
+//! [`pass_order`] resolves the list into the order the batch executes: a pass
+//! that samples a named target runs after the pass that writes it, and the
+//! depth replays run after every scene-color pass they replay.
 
 /// Pixel format of a render target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -21,8 +25,14 @@ pub enum RenderTargetFormat {
     /// sampled and drawn with the batch's own pipelines.
     Rgba8UnormSrgb,
     Bgra8Unorm,
+    /// Half-float RGBA: the depth-kind replay format (view depth in `.r`),
+    /// filterable.
     Rgba16Float,
+    /// Single-lane float: a depth-kind target that feeds the occlusion
+    /// chain (`textureLoad` only). Not filterable, so post stages cannot
+    /// sample it.
     R32Float,
+    /// Depth attachment format, for pipelines that render their own depth.
     Depth32Float,
 }
 
@@ -76,12 +86,14 @@ pub enum PassKind {
     /// Draw groups into the target.
     Render,
     /// Fill the target by replaying the frame's scene geometry as view-depth
-    /// and camera velocity (`RGBA16F`: depth, velocity x, velocity y, 1). The
-    /// batch owns the geometry, so this pass takes no `groups`.
+    /// and camera velocity (`Rgba16Float`: depth, velocity x, velocity y, 1;
+    /// `R32Float` when only the chain reads it). The batch owns the geometry,
+    /// so this pass takes no `groups`.
     Depth,
-    /// The engine's own view-depth replay for the occlusion feed, identical
-    /// in target requirements and content to [`PassKind::Depth`]. The
-    /// viewport appends one when a frame arms
+    /// The engine's own view-depth replay for the occlusion feed, with the
+    /// same target requirements as [`PassKind::Depth`] but writing view depth
+    /// alone (the `Depth` kind also writes camera velocity for the post
+    /// chain). The viewport appends one when a frame arms
     /// [`crate::Frame3d::occlusion_feed`] and declares no depth pass, so
     /// occlusion culling never depends on the post chain; games do not
     /// declare it themselves.
@@ -177,6 +189,12 @@ pub struct RenderPass {
     pub post: Option<crate::postfx::PostStage>,
     /// Second target a post stage samples (`None` binds a dummy).
     pub aux: Option<String>,
+    /// Draws over the target's contents instead of clearing them. A
+    /// declared target is written by its own pass only, so this keeps the
+    /// *previous frame's* contents (an accumulation pass); attachment ops
+    /// over an earlier pass's target are the engine's, not a declaration's.
+    /// Defaults to `false`, the clearing pass.
+    pub load: bool,
 }
 
 impl RenderPass {
@@ -190,6 +208,7 @@ impl RenderPass {
             overlay: [1.0, 1.0, 1.0, 1.0],
             post: None,
             aux: None,
+            load: false,
         }
     }
 
@@ -204,7 +223,15 @@ impl RenderPass {
             overlay: [1.0, 1.0, 1.0, 1.0],
             post: None,
             aux: None,
+            load: false,
         }
+    }
+
+    /// Draws over the target's previous contents instead of clearing them
+    /// (an accumulation pass; see [`RenderPass::load`]).
+    pub fn loading(mut self) -> Self {
+        self.load = true;
+        self
     }
 
     /// Marks this pass as the one composited to the screen.
@@ -234,6 +261,9 @@ pub enum PassError {
     /// More than one pass claims the screen. Only the first is composited,
     /// so the rest render every frame and are never seen.
     MultiplePresenting,
+    /// A dependency cycle: the `source`/`aux` names and the depth-after-
+    /// scene rules walk back to a pass that depends on itself.
+    Circular,
 }
 
 /// Ceiling on the length of one frame's pass list. A bloom pyramid plus DOF,
@@ -246,6 +276,9 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
     if passes.len() > MAX_PASS_TARGETS {
         return Err(PassError::TooManyTargets);
     }
+    // Phase one: everything that does not depend on another pass, and the
+    // complete target list (the scheduler, not the declaration order, decides
+    // what runs first, so a source may be declared later).
     let mut names: Vec<(&str, &RenderTarget)> = Vec::with_capacity(passes.len());
     let mut presenting = 0usize;
     for pass in passes {
@@ -267,20 +300,25 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
         {
             return Err(PassError::DuplicateTarget);
         }
-        match pass.kind {
-            PassKind::Render | PassKind::Depth | PassKind::Occlusion => {}
-            PassKind::Resolve | PassKind::Fullscreen => {
-                let source = pass.source.as_deref().ok_or(PassError::MissingSource)?;
-                let (_, source_target) = names
-                    .iter()
-                    .find(|(name, _)| *name == source)
-                    .ok_or(PassError::UnknownSource)?;
-                if pass.kind == PassKind::Resolve
-                    && (source_target.width != pass.target.width
-                        || source_target.height != pass.target.height)
-                {
-                    return Err(PassError::SizeMismatch);
-                }
+        if matches!(pass.kind, PassKind::Resolve | PassKind::Fullscreen)
+            && pass.source.is_none()
+        {
+            return Err(PassError::MissingSource);
+        }
+        names.push((&pass.target.name, &pass.target));
+    }
+    // Phase two: the sampled targets exist, and a resolve matches its source.
+    for pass in passes {
+        if let Some(source) = pass.source.as_deref() {
+            let (_, source_target) = names
+                .iter()
+                .find(|(name, _)| *name == source)
+                .ok_or(PassError::UnknownSource)?;
+            if pass.kind == PassKind::Resolve
+                && (source_target.width != pass.target.width
+                    || source_target.height != pass.target.height)
+            {
+                return Err(PassError::SizeMismatch);
             }
         }
         if let Some(aux) = pass.aux.as_deref()
@@ -288,12 +326,172 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
         {
             return Err(PassError::UnknownSource);
         }
-        names.push((&pass.target.name, &pass.target));
+    }
+    // A dependency cycle would leave passes unordered: reject the list
+    // instead of scheduling what can be scheduled and guessing the rest.
+    let mut placed = vec![false; passes.len()];
+    let mut remaining = passes.len();
+    while remaining > 0 {
+        let mut progressed = false;
+        for index in 0..passes.len() {
+            if placed[index]
+                || dependencies(passes, index)
+                    .iter()
+                    .any(|dep| !placed[*dep])
+            {
+                continue;
+            }
+            placed[index] = true;
+            remaining -= 1;
+            progressed = true;
+        }
+        if !progressed {
+            return Err(PassError::Circular);
+        }
     }
     Ok(())
 }
 
 /// Resolves the pass list into the order the batch will execute.
+///
+/// Stable: ties keep declaration order. The rules are:
+///
+/// - a pass that samples a named target (`source`, `aux`) runs after the
+///   pass that writes it;
+/// - a [`PassKind::Depth`] or [`PassKind::Occlusion`] pass runs after every
+///   [`TargetSemantics::SceneColor`] pass, because it replays that scene's
+///   geometry (and the engine's same-frame occlusion phase draws after it).
+///
+/// [`validate_passes`] rejects a list whose dependencies cannot be
+/// satisfied, so a validated list always has a full order.
 pub fn pass_order(passes: &[RenderPass]) -> Vec<usize> {
-    (0..passes.len()).collect()
+    let mut order = Vec::with_capacity(passes.len());
+    let mut placed = vec![false; passes.len()];
+    while order.len() < passes.len() {
+        let mut progressed = false;
+        for index in 0..passes.len() {
+            if placed[index]
+                || dependencies(passes, index)
+                    .iter()
+                    .any(|dep| !placed[*dep])
+            {
+                continue;
+            }
+            placed[index] = true;
+            order.push(index);
+            progressed = true;
+        }
+        if !progressed {
+            // Unreachable for a validated list: keep the remainder in
+            // declaration order rather than looping.
+            order.extend((0..passes.len()).filter(|index| !placed[*index]));
+            break;
+        }
+    }
+    order
+}
+
+/// Indices `index` must run after: the writers of the targets it samples,
+/// plus, for the depth replays, every scene-color render pass.
+fn dependencies(passes: &[RenderPass], index: usize) -> Vec<usize> {
+    let pass = &passes[index];
+    let mut deps = Vec::new();
+    for name in [pass.source.as_deref(), pass.aux.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(from) = passes.iter().position(|other| other.target.name == name)
+            && !deps.contains(&from)
+        {
+            deps.push(from);
+        }
+    }
+    if matches!(pass.kind, PassKind::Depth | PassKind::Occlusion) {
+        for (scene, other) in passes.iter().enumerate() {
+            if other.kind == PassKind::Render
+                && other.target.semantics == TargetSemantics::SceneColor
+                && scene != index
+                && !deps.contains(&scene)
+            {
+                deps.push(scene);
+            }
+        }
+    }
+    deps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scene() -> RenderPass {
+        RenderPass::render(RenderTarget::color("scene", 64, 64), Vec::new())
+    }
+
+    fn blit(source: &str, name: &str) -> RenderPass {
+        RenderPass::fullscreen(
+            source,
+            RenderTarget::new(
+                name,
+                64,
+                64,
+                RenderTargetFormat::Rgba8UnormSrgb,
+                TargetSemantics::Auxiliary,
+            ),
+        )
+    }
+
+    fn depth(name: &str) -> RenderPass {
+        RenderPass {
+            target: RenderTarget::new(
+                name,
+                64,
+                64,
+                RenderTargetFormat::Rgba16Float,
+                TargetSemantics::LinearDepth,
+            ),
+            kind: PassKind::Depth,
+            source: None,
+            groups: Vec::new(),
+            presents: false,
+            overlay: [1.0; 4],
+            post: None,
+            aux: None,
+            load: false,
+        }
+    }
+
+    /// A pass sampling a later-declared target is scheduled after it, and a
+    /// list without dependencies keeps declaration order.
+    #[test]
+    fn order_follows_sources_and_keeps_ties() {
+        let passes = [blit("scene", "blit"), scene()];
+        assert_eq!(pass_order(&passes), vec![1, 0]);
+        assert!(validate_passes(&passes).is_ok());
+        let passes = [scene(), blit("scene", "blit")];
+        assert_eq!(pass_order(&passes), vec![0, 1]);
+        // No dependencies: declaration order.
+        let passes = [blit("a", "b"), blit("b", "c"), scene()];
+        assert_eq!(pass_order(&passes), vec![0, 1, 2]);
+    }
+
+    /// A depth replay runs after every scene-color render pass, whatever the
+    /// declaration says: it replays their geometry.
+    #[test]
+    fn depth_replays_follow_scene_renders() {
+        let passes = [depth("depth"), scene()];
+        assert_eq!(pass_order(&passes), vec![1, 0]);
+        let passes = [scene(), depth("depth")];
+        assert_eq!(pass_order(&passes), vec![0, 1]);
+    }
+
+    /// A dependency cycle is rejected rather than scheduled by guesswork.
+    #[test]
+    fn cycles_are_rejected() {
+        let passes = [blit("b", "a"), blit("a", "b")];
+        assert_eq!(validate_passes(&passes), Err(PassError::Circular));
+        // Self-sampling is the shortest cycle.
+        let passes = [blit("a", "a")];
+        assert_eq!(validate_passes(&passes), Err(PassError::Circular));
+    }
 }

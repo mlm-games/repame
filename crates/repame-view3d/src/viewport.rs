@@ -121,12 +121,12 @@ pub struct Frame3d {
     /// frame. A frame that declares no depth pass gets the engine's own
     /// [`PassKind::Occlusion`](crate::PassKind::Occlusion) pass, sized to
     /// the viewport, so the feed works without a post chain. With
-    /// [`OcclusionFeedDesc::phase_two`] armed the same frame's
-    /// chain is also used before the scene pass draws: the depth pass runs
-    /// first, a compute pass re-tests the phase-one rejects and the scene
-    /// pass draws them through indirect args, so no false negative survives
-    /// a frame. `None` disables the feed (no dispatch, no map) and leaves
-    /// [`occlusion`](Frame3d::occlusion) as the only source.
+    /// [`OcclusionFeedDesc::phase_two`] armed a compute pass re-tests the
+    /// phase-one rejects right after the depth pass and the survivors are
+    /// drawn over the scene pass's target with its color and depth loaded,
+    /// so no false negative survives a frame. `None` disables the feed (no
+    /// dispatch, no map) and leaves [`occlusion`](Frame3d::occlusion) as the
+    /// only source.
     pub occlusion_feed: Option<crate::OcclusionFeedDesc>,
     /// Cold-start viewport size in physical px, used for the GPU camera
     /// until the first painted size arrives (same role as `repame-sprite`
@@ -784,6 +784,7 @@ impl WgpuCallback for GpuViewport3d {
                 overlay: [0.0; 4],
                 post: None,
                 aux: None,
+                load: false,
             });
         }
         if !passes.is_empty()

@@ -2158,7 +2158,8 @@ mod tests {
         assert!((curve.sample(0.75) - 2.0).abs() < 1e-6);
         assert_eq!(curve.sample(2.0), 4.0);
         // Insertion order does not matter; duplicate times are rejected.
-        let sorted = ParticleCurve::new([(1.0, 4.0), (0.0, 2.0)]).expect("valid");
+        let sorted =
+            ParticleCurve::new([(0.5, 0.0), (1.0, 4.0), (0.0, 2.0)]).expect("valid");
         assert_eq!(sorted.sample(0.25), curve.sample(0.25));
         assert!(ParticleCurve::new([(0.2, 1.0), (0.2, 2.0)]).is_err());
         let gradient = ParticleGradient::new([(0.0, [1.0, 1.0, 1.0, 1.0]), (1.0, [0.0, 0.0, 0.0, 0.0])])

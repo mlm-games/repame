@@ -48,11 +48,12 @@
 //! the frame around the GPU.
 //!
 //! With [`OcclusionFeedDesc::phase_two`] armed the same chain is tested
-//! against in the *same* frame: the depth pass runs before the scene pass, a
-//! compute pass re-tests every phase-one reject against that chain and writes
-//! its indirect draw args (zeroed for the still-hidden), and the scene pass
-//! draws the survivors - the one-frame latency is then only a phase-one
-//! filter, not a visible delay.
+//! against in the *same* frame: a compute pass re-tests every phase-one
+//! reject right after the depth pass that produced the chain and writes its
+//! indirect draw args (zeroed for the still-hidden); the survivors are then
+//! drawn over the scene pass's target, loaded with the depth that pass left.
+//! The one-frame latency is then only a phase-one filter, not a visible
+//! delay.
 
 use glam::Mat4;
 
@@ -90,17 +91,17 @@ pub struct OcclusionFeedDesc {
     /// that is only just behind its occluder.
     pub bias: f32,
     /// Same-frame second phase (default `false`). When armed, a frame that
-    /// declares a depth pass runs that pass before the scene pass, tests the
-    /// phase-1 rejects against the *same frame's* chain on the GPU (a compute
-    /// pass writes each reject's indirect draw args, zeroing the still-hidden
-    /// ones) and draws them in the scene pass through
-    /// `draw_indexed_indirect`: no false negative survives a frame, at the
-    /// cost of a chain build and a per-candidate test dispatch per frame.
-    /// The depth pass also replays the rejects, so their shadows stay
-    /// correct. Only the shared scene pass's opaque depth-tested groups are
-    /// candidates (a group a declared pass owns keeps phase one's drop);
-    /// `false` keeps the one-frame-latency contract of the feed alone. The
-    /// viewport appends the engine's own
+    /// declares a depth pass tests the phase-1 rejects against the *same
+    /// frame's* chain on the GPU right after that pass (a compute pass
+    /// writes each reject's indirect draw args, zeroing the still-hidden
+    /// ones) and draws the survivors over the scene pass's target through
+    /// `draw_indexed_indirect`, loading the color and depth that pass left:
+    /// no false negative survives a frame, at the cost of a chain build and
+    /// a per-candidate test dispatch per frame. The depth pass also replays
+    /// the rejects, so their shadows stay correct. Only the shared scene
+    /// pass's opaque depth-tested groups are candidates (a group a declared
+    /// pass owns keeps phase one's drop); `false` keeps the one-frame-latency
+    /// contract of the feed alone. The viewport appends the engine's own
     /// [`Occlusion`](crate::PassKind::Occlusion) depth pass when a frame
     /// declares none, so the feed never depends on the post chain.
     pub phase_two: bool,
@@ -795,12 +796,19 @@ mod tests {
             (front - Vec3::splat(0.5)).into(),
             (front + Vec3::splat(0.5)).into()
         ));
-        // An all-near pyramid never culls.
+        // An all-near surface (a wall a unit out) still culls the far box;
+        // a box in front of it is left alone. The test is about depth, not
+        // about how near the occluder is.
         depths.fill(1.0);
         let near = OcclusionCulling {
             pyramid: DepthPyramid::build(64, 64, 8, &depths).expect("valid"),
             ..state.clone()
         };
-        assert!(!near.occluded([-3.0, -3.0, -3.0], [3.0, 3.0, 3.0]));
+        assert!(near.occluded([-3.0, -3.0, -3.0], [3.0, 3.0, 3.0]));
+        let front = cam.eye() + cam.forward() * 0.5;
+        assert!(!near.occluded(
+            (front - Vec3::splat(0.1)).into(),
+            (front + Vec3::splat(0.1)).into()
+        ));
     }
 }

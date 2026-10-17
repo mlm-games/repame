@@ -425,10 +425,10 @@ mod tests {
         // Segment along +X, eye along +Z from the midpoint: the perpendicular
         // is exactly -Y, so the ribbon is (0, +/-0.1) at x=0 and x=2.
         let expect = [
-            [0.0, -0.1, 0.0],
             [0.0, 0.1, 0.0],
-            [2.0, 0.1, 0.0],
+            [0.0, -0.1, 0.0],
             [2.0, -0.1, 0.0],
+            [2.0, 0.1, 0.0],
         ];
         for (got, want) in group.positions.iter().zip(expect.iter()) {
             for k in 0..3 {

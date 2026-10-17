@@ -407,6 +407,86 @@ impl SoundBank {
         }
     }
 
+    /// Start a cue as a sustained looping voice. Unlike [`Self::play`] the
+    /// voice never ends by itself: retune it with [`Self::set_voice_rate`],
+    /// move it with [`Self::fade_voice`] and end it with
+    /// [`Self::stop_voice`]. The cue's cooldown does not apply (loops are not
+    /// retriggered) but its voice cap does.
+    pub fn play_loop(
+        &mut self,
+        name: &str,
+        gain_scale: f32,
+        rate_scale: f32,
+        pan: f32,
+    ) -> Option<u64> {
+        let (tx, state) = match (&self.tx, &self.state) {
+            (Some(tx), Some(state)) => (tx, state),
+            _ => return None,
+        };
+        let cue = self.cues.get_mut(name)?;
+        if cue.sounds.is_empty() || cue.def.max_voices == 0 {
+            return None;
+        }
+        // Steal the oldest voice past the cap.
+        if cue.live.len() >= cue.def.max_voices.max(1)
+            && let Some(oldest) = cue.live.first().copied()
+        {
+            let _ = tx.send_spin(RealtimeCommand::Stop(oldest));
+            cue.live.remove(0);
+        }
+        let sound = cue.pick();
+        let rate = cue.rate() * rate_scale.max(0.01);
+        let id = state.alloc_voice();
+        let cmd = PlayCmd {
+            voice: id,
+            sound,
+            gain: cue.def.gain.max(0.0) * gain_scale.max(0.0),
+            rate,
+            pan: pan.clamp(-1.0, 1.0),
+            bus: cue.def.bus,
+            looping: true,
+        };
+        if tx.send_spin(RealtimeCommand::Play(cmd)).is_err() {
+            return None;
+        }
+        cue.live.push(id);
+        Some(id)
+    }
+
+    /// Retune a live voice (`1.0` is the recorded pitch). Ignored when no
+    /// audio thread is attached.
+    pub fn set_voice_rate(&mut self, voice: u64, rate: f32) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send_spin(RealtimeCommand::SetRate {
+                voice,
+                rate: rate.max(0.01),
+            });
+        }
+    }
+
+    /// Ramp a live voice to `gain` over `secs` (0 applies immediately).
+    pub fn fade_voice(&mut self, voice: u64, gain: f32, secs: f32) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send_spin(RealtimeCommand::Fade {
+                voice,
+                target: gain.max(0.0),
+                secs: secs.max(0.0),
+            });
+        }
+    }
+
+    /// Stop a live voice and release its cue slot.
+    pub fn stop_voice(&mut self, voice: u64) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send_spin(RealtimeCommand::Stop(voice));
+        }
+        for cue in self.cues.values_mut() {
+            if let Some(pos) = cue.live.iter().position(|id| *id == voice) {
+                cue.live.remove(pos);
+            }
+        }
+    }
+
     /// Scene listener in 2D world units.
     pub fn set_listener(&mut self, x: f32, y: f32) {
         self.listener = [x, y];
@@ -485,6 +565,69 @@ mod tests {
         assert!(bank.play_at_ms("tick", 1.0, 1.0, 0.0, 1050).is_none());
         assert!(bank.play_at_ms("tick", 1.0, 1.0, 0.0, 1100).is_some());
         assert_eq!(bank.live_count("tick"), 2);
+    }
+
+    #[test]
+    fn loop_voices_take_live_control() {
+        let (mut bank, _game, thread) = banked();
+        let a = wav(440.0);
+        bank.load(
+            "engine",
+            CueDef {
+                cooldown_ms: 10_000,
+                max_voices: 4,
+                ..Default::default()
+            },
+            &[&a],
+        )
+        .unwrap();
+        // Loops ignore the one-shot cooldown.
+        let voice = bank.play_loop("engine", 0.5, 0.25, 0.0).unwrap();
+        use crate::RealtimeCommand::*;
+        match thread.rx.try_recv().unwrap() {
+            Play(p) => {
+                assert!(p.looping, "loop voice must loop");
+                assert_eq!(p.voice, voice);
+                assert!((p.rate - 0.25).abs() < 1e-4, "rate {}", p.rate);
+            }
+            other => panic!("expected Play, got {other:?}"),
+        }
+        assert_eq!(bank.live_count("engine"), 1);
+        bank.set_voice_rate(voice, 1.5);
+        assert!(matches!(
+            thread.rx.try_recv(),
+            Ok(SetRate { voice: v, rate }) if v == voice && (rate - 1.5).abs() < 1e-4
+        ));
+        bank.fade_voice(voice, 0.0, 0.2);
+        assert!(matches!(
+            thread.rx.try_recv(),
+            Ok(Fade { voice: v, target, secs }) if v == voice && target == 0.0 && secs == 0.2
+        ));
+        bank.stop_voice(voice);
+        assert!(matches!(thread.rx.try_recv(), Ok(Stop(v)) if v == voice));
+        assert_eq!(bank.live_count("engine"), 0);
+    }
+
+    #[test]
+    fn loop_cap_steals_oldest_like_one_shots() {
+        let (mut bank, _game, thread) = banked();
+        let a = wav(440.0);
+        bank.load(
+            "skid",
+            CueDef {
+                max_voices: 1,
+                ..Default::default()
+            },
+            &[&a],
+        )
+        .unwrap();
+        let v1 = bank.play_loop("skid", 1.0, 1.0, 0.0).unwrap();
+        let _v2 = bank.play_loop("skid", 1.0, 1.0, 0.0).unwrap();
+        assert_eq!(bank.live_count("skid"), 1);
+        use crate::RealtimeCommand::*;
+        assert!(matches!(thread.rx.try_recv(), Ok(Play(_))));
+        assert!(matches!(thread.rx.try_recv(), Ok(Stop(id)) if id == v1));
+        assert!(matches!(thread.rx.try_recv(), Ok(Play(_))));
     }
 
     #[test]

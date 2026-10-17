@@ -194,6 +194,28 @@ impl Audio {
         self.bank.stop_cue(cue);
     }
 
+    /// Start a cue as a sustained looping voice (engine and skid beds).
+    /// Returns the voice id; drive it with [`Self::set_voice_rate`],
+    /// [`Self::fade_voice`] and [`Self::stop_voice`].
+    pub fn play_loop(&mut self, cue: &str, gain: f32, rate: f32) -> Option<u64> {
+        self.bank.play_loop(cue, gain, rate, 0.0)
+    }
+
+    /// Retune a loop started with [`Self::play_loop`].
+    pub fn set_voice_rate(&mut self, voice: u64, rate: f32) {
+        self.bank.set_voice_rate(voice, rate);
+    }
+
+    /// Ramp a loop's gain to `gain` over `secs` (0 applies immediately).
+    pub fn fade_voice(&mut self, voice: u64, gain: f32, secs: f32) {
+        self.bank.fade_voice(voice, gain, secs);
+    }
+
+    /// End a loop started with [`Self::play_loop`].
+    pub fn stop_voice(&mut self, voice: u64) {
+        self.bank.stop_voice(voice);
+    }
+
     /// Direct bank access (listener, scale, counts).
     pub fn bank(&mut self) -> &mut SoundBank {
         &mut self.bank

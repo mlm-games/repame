@@ -770,6 +770,7 @@ fn sprite_instance(
             BlendMode::Multiply => crate::SpriteBlend::Multiply,
             _ => crate::SpriteBlend::Alpha,
         },
+        light_mask: 1,
     }
 }
 

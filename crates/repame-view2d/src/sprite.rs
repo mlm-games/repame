@@ -44,6 +44,11 @@ pub struct SpriteInstance {
     /// [`SpriteBlend`]).
     pub z: f32,
     pub blend: SpriteBlend,
+    /// Light layer bits, `1` (layer 0) by default. The sprite is lit by every
+    /// light whose `light_mask` shares the sprite's lowest set bit, and reads
+    /// the layer that bit names (see [`light`](crate::light)); `0` renders it
+    /// unlit, ignoring ambient and modulate alike.
+    pub light_mask: u32,
 }
 
 impl Default for SpriteInstance {
@@ -61,6 +66,7 @@ impl Default for SpriteInstance {
             page: 0,
             z: 0.0,
             blend: SpriteBlend::Alpha,
+            light_mask: 1,
         }
     }
 }

@@ -6,7 +6,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.3.27"
+version = "0.3.28"
 edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/mlm-games/repame"
@@ -56,19 +56,19 @@ renamite-animation = { version = "0.3" }
 kurbo = "0.13"
 flate2 = "1"
 
-repame-sim = { path = "crates/repame-sim", version = "0.3.27" }
-repame-view2d = { path = "crates/repame-view2d", version = "0.3.27" }
-repame-view3d = { path = "crates/repame-view3d", version = "0.3.27" }
-repame-atlas = { path = "crates/repame-atlas", version = "0.3.27" }
-repame-anim = { path = "crates/repame-anim", version = "0.3.27" }
-repame-audio = { path = "crates/repame-audio", version = "0.3.27" }
-repame-shell = { path = "crates/repame-shell", version = "0.3.27" }
-repame-fx = { path = "crates/repame-fx", version = "0.3.27" }
-repame-input = { path = "crates/repame-input", version = "0.3.27" }
-repame-physics = { path = "crates/repame-physics", version = "0.3.27" }
-repame-rapier2d = { path = "crates/repame-rapier2d", version = "0.3.27" }
-repame-rapier3d = { path = "crates/repame-rapier3d", version = "0.3.27" }
-repame-content = { path = "crates/repame-content", version = "0.3.27" }
+repame-sim = { path = "crates/repame-sim", version = "0.3.28" }
+repame-view2d = { path = "crates/repame-view2d", version = "0.3.28" }
+repame-view3d = { path = "crates/repame-view3d", version = "0.3.28" }
+repame-atlas = { path = "crates/repame-atlas", version = "0.3.28" }
+repame-anim = { path = "crates/repame-anim", version = "0.3.28" }
+repame-audio = { path = "crates/repame-audio", version = "0.3.28" }
+repame-shell = { path = "crates/repame-shell", version = "0.3.28" }
+repame-fx = { path = "crates/repame-fx", version = "0.3.28" }
+repame-input = { path = "crates/repame-input", version = "0.3.28" }
+repame-physics = { path = "crates/repame-physics", version = "0.3.28" }
+repame-rapier2d = { path = "crates/repame-rapier2d", version = "0.3.28" }
+repame-rapier3d = { path = "crates/repame-rapier3d", version = "0.3.28" }
+repame-content = { path = "crates/repame-content", version = "0.3.28" }
 
 
 [patch.crates-io]

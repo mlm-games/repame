@@ -12,6 +12,10 @@
 //! * [`RasterAtlas`] - raster sheets drawn through the same batch, and the
 //!   world-anchored [`ActorDrawList`] that puts them, `.ren` vector rigs and
 //!   solid rects in one z order.
+//! * [`light`] / [`lightpass`] - 2D lighting: point lights with ramped or
+//!   textured falloff, Godot's add/sub/mix blend modes, `light_mask` layers,
+//!   and polygon occluders casting filtered shadows into a light map that
+//!   [`SpriteBatch::set_light_source`] consumes.
 //! * [`WorldText`] - world-anchored text floaters, and [`design`] - the design
 //!   box onto dp canvas mapping games would otherwise hand-roll.
 //! * [`PickEvent`] - presses, hovers and the slop rule behind a click, plus
@@ -60,6 +64,20 @@ pub mod fullscreen;
 pub use fullscreen::{
     FullscreenDesc, FullscreenPass, FullscreenTexture, FullscreenTextureRef,
     FullscreenTextureUpload,
+};
+
+pub mod light;
+pub use light::{
+    AMBIENT_SOURCE, AmbientLight, Light2d, LightBlend, LightBudget, LightFalloff, LightIssue,
+    LightIssueKind, LightStop, LightingPlan, MAX_FALLOFF_STOPS, MAX_LIGHT_LAYERS, MAX_MASK_TAPS,
+    MAX_OCCLUDER_POINTS, Occluder2d, OccluderReject, OccluderRejectReason, PlannedLight,
+    ShadowCasters, ShadowFilter, ShadowWedge, ValidatedOccluder, item_layer, plan_lighting,
+    shadow_wedges, stops_at, texture_uv, visible_world_rect,
+};
+
+pub mod lightpass;
+pub use lightpass::{
+    Light2dDesc, Light2dPass, LightTextureUpload, LightmapInfo, lookup_lightmap,
 };
 
 pub mod pick;

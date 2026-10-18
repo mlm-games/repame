@@ -26,3 +26,4 @@ log.workspace = true
 [dev-dependencies]
 renamite-animation.workspace = true
 kurbo.workspace = true
+image.workspace = true

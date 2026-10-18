@@ -21,6 +21,13 @@
 //! order across the blend boundary. Each batch id owns its pipelines in
 //! `CallbackResources` (like `FullscreenPass`'s id map), so viewports +
 //! minimaps coexist.
+//!
+//! Lighting: group(2) carries a light map, always bound (the identity map when
+//! a batch names none), and the fragment shader consumes it as
+//! `color * modulate * map.a + map.rgb`. Name one with
+//! [`SpriteBatch::set_light_source`] and put a [`Light2dPass`] with the same id
+//! and camera in the same scene and target; the light pass publishes its map
+//! before any batch paints, whatever the node order.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -252,14 +259,36 @@ struct BatchInstance {
     /// Half a texel in normalized UV, used to inset the UV rect to texel
     /// centres in the vertex shader. Zero disables the inset.
     texel: f32,
+    /// Light layer bits; the vertex shader resolves the low bit to a layer.
+    light_mask: u32,
 }
 
 // Locked to `shaders/sprite.wgsl::Instance` (row0@0, row1@16,
-// uv_min@32, uv_max@40, tint@48, page@64, z@68, flags@72, texel@76;
-// stride 80).
+// uv_min@32, uv_max@40, tint@48, page@64, z@68, flags@72, texel@76,
+// light_mask@80; stride 84).
 // If this fires, update the WGSL offsets and the vertex buffer layout
 // below together.
-const _: () = assert!(size_of::<BatchInstance>() == 80);
+const _: () = assert!(size_of::<BatchInstance>() == 84);
+
+/// Group 2 of the sprite shaders: the light map an instance's layer reads.
+/// Matches the WGSL `Lightmap` struct (48 bytes).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LightmapUniform {
+    /// `world * xform.xy + xform.zw` is the light map uv.
+    xform: [f32; 4],
+    /// rgb modulates the item colour before light; a is unused.
+    modulate: [f32; 4],
+    /// x: highest layer an instance may sample (the identity layer).
+    layer: [u32; 4],
+}
+
+const _: () = assert!(size_of::<LightmapUniform>() == 48);
+
+/// Identity light map: `(rgb = 0, a = 1)` on every texel, so an unlit batch
+/// multiplies by one and adds nothing. Two layers because a one-layer array
+/// texture is unsafe to sample on GL/ANGLE (see [`atlas_shape`]).
+const IDENTITY_LIGHTMAP_LAYERS: u32 = 2;
 
 /// Per-frame snapshot batch. `Send + Sync` so it can cross into the
 /// compositor thread via [`repose_render_wgpu::Callback`].
@@ -274,6 +303,8 @@ pub struct SpriteBatch {
     camera: [[f32; 4]; 4],
     instances: Vec<BatchInstance>,
     uploads: Vec<AtlasUpload>,
+    light_source: Option<String>,
+    light_modulate: [f32; 3],
 }
 
 impl SpriteBatch {
@@ -288,6 +319,8 @@ impl SpriteBatch {
             camera: Mat4::IDENTITY.to_cols_array_2d(),
             instances: Vec::new(),
             uploads: Vec::new(),
+            light_source: None,
+            light_modulate: [1.0, 1.0, 1.0],
         }
     }
 
@@ -324,6 +357,33 @@ impl SpriteBatch {
         self.uploads.extend(uploads);
     }
 
+    /// Light every sprite in this batch from the light map of the
+    /// [`Light2dPass`](crate::Light2dPass) with this id.
+    ///
+    /// The pass and the batch must share one camera
+    /// ([`set_camera`](Self::set_camera) on both); the light map is published
+    /// as a world-space rect, so a batch drawn into any rectangle of the same
+    /// target lines up without further setup. A batch whose pass has not
+    /// prepared yet draws unlit for that frame.
+    pub fn set_light_source(&mut self, id: impl Into<String>) {
+        self.light_source = Some(id.into());
+    }
+
+    /// Draw unlit: the identity light map, modulation ignored.
+    pub fn clear_light_source(&mut self) {
+        self.light_source = None;
+    }
+
+    /// Scene darkness for this batch: multiplies every sprite's colour before
+    /// the light map adds light. `[1.0; 3]` (default) is neutral and `[0.0; 3]`
+    /// is black; a batch with no light source ignores it. Values are clamped to
+    /// `0..` and a non-finite channel falls back to `1.0`, so one bad frame
+    /// cannot blacken or NaN the whole batch.
+    pub fn set_light_modulate(&mut self, rgb: [f32; 3]) {
+        self.light_modulate =
+            rgb.map(|c| if c.is_finite() { c.max(0.0) } else { 1.0 });
+    }
+
     /// Push one textured quad.
     #[allow(clippy::too_many_arguments)]
     pub fn push(
@@ -355,7 +415,41 @@ impl SpriteBatch {
         );
     }
 
-    /// Push with explicit `z` + blend.
+    /// Push one textured quad on an explicit light layer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_masked(
+        &mut self,
+        center: [f32; 2],
+        size: [f32; 2],
+        rotation: f32,
+        anchor: [f32; 2],
+        flip_x: bool,
+        flip_y: bool,
+        uv_min: [f32; 2],
+        uv_max: [f32; 2],
+        tint: [f32; 4],
+        page: u32,
+        light_mask: u32,
+    ) {
+        self.push_blended_masked(
+            center,
+            size,
+            rotation,
+            anchor,
+            flip_x,
+            flip_y,
+            uv_min,
+            uv_max,
+            tint,
+            page,
+            0.0,
+            SpriteBlend::Alpha,
+            light_mask,
+        );
+    }
+
+    /// Push with explicit `z` + blend; lit by layer 0 (light mask `1`). Use
+    /// [`Self::push_blended_masked`] to put the sprite on another layer.
     #[allow(clippy::too_many_arguments)]
     pub fn push_blended(
         &mut self,
@@ -371,6 +465,30 @@ impl SpriteBatch {
         page: u32,
         z: f32,
         blend: SpriteBlend,
+    ) {
+        self.push_blended_masked(
+            center, size, rotation, anchor, flip_x, flip_y, uv_min, uv_max, tint, page, z, blend,
+            1,
+        );
+    }
+
+    /// Push with explicit `z`, blend, and light layer bits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_blended_masked(
+        &mut self,
+        center: [f32; 2],
+        size: [f32; 2],
+        rotation: f32,
+        anchor: [f32; 2],
+        flip_x: bool,
+        flip_y: bool,
+        uv_min: [f32; 2],
+        uv_max: [f32; 2],
+        tint: [f32; 4],
+        page: u32,
+        z: f32,
+        blend: SpriteBlend,
+        light_mask: u32,
     ) {
         let (row0, row1) = instance_rows(center, size, rotation, anchor, flip_x, flip_y);
         let flags = match blend {
@@ -388,6 +506,7 @@ impl SpriteBatch {
             z,
             flags,
             texel: 0.5 / self.desc.layer_size.max(1) as f32,
+            light_mask,
         });
     }
 
@@ -398,7 +517,7 @@ impl SpriteBatch {
     /// the tint has to be linearized here; [`Self::push`] takes one
     /// directly.
     pub fn push_sprite(&mut self, s: &SpriteInstance) {
-        self.push_blended(
+        self.push_blended_masked(
             [s.center.x, s.center.y],
             [s.size.x, s.size.y],
             s.rotation,
@@ -411,6 +530,7 @@ impl SpriteBatch {
             s.page,
             s.z,
             s.blend,
+            s.light_mask,
         );
     }
 }
@@ -459,12 +579,29 @@ struct BatchEntry {
     cam_bind: wgpu::BindGroup,
     atlas: Arc<AtlasResources>,
     atlas_key: AtlasKey,
+    /// Per-batch light uniforms (world -> uv, modulate, layer clamp).
+    light_uniform: wgpu::Buffer,
+    /// Group 2 for the sprite pipelines: the light map this batch reads, or
+    /// the shared identity map when it has no light source.
+    light_bind: Arc<wgpu::BindGroup>,
+    /// What `light_bind` was built from, so it is rebuilt only when the light
+    /// map's texture changes (the rect rides in the uniform instead).
+    light_key: Option<(String, u64)>,
+    /// Whether the missing-light-map warning was already logged, so a broken
+    /// setup is loud once instead of every frame.
+    light_starved: bool,
 }
 
 struct BatchResources {
     batches: HashMap<String, BatchEntry>,
     atlases: HashMap<AtlasKey, Arc<AtlasResources>>,
     layouts: HashMap<AtlasDescriptor, Arc<AtlasLayout>>,
+    light_layout: wgpu::BindGroupLayout,
+    light_sampler: wgpu::Sampler,
+    /// Kept alive for `identity_bind`, which holds only the view.
+    #[allow(dead_code)]
+    identity_lightmap: wgpu::Texture,
+    identity_bind: Arc<wgpu::BindGroup>,
 }
 
 impl BatchResources {
@@ -531,8 +668,119 @@ pub(crate) fn sprite_shader(layers: u32) -> &'static str {
     }
 }
 
-fn create_atlas_layout(device: &wgpu::Device, filter: TextureFilter, layers: u32) -> AtlasLayout {
-    let (dimension, _) = atlas_shape(layers);
+/// Group 2 layout shared by every batch: the light map array, its sampler, and
+/// the per-batch light uniform.
+fn create_light_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sprite_batch_light_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// The identity light map every batch binds until it names a real one: a
+/// `1x1` texel of `(rgb = 0, a = 1)`, which the sprite shader's
+/// `color * modulate * a + rgb` turns into plain `color`.
+fn create_identity_lightmap(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+) -> (wgpu::Texture, Arc<wgpu::BindGroup>) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("sprite_batch_identity_lightmap"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: IDENTITY_LIGHTMAP_LAYERS,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[0, 0, 0, 255, 0, 0, 0, 255],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: IDENTITY_LIGHTMAP_LAYERS,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("sprite_batch_identity_light"),
+        contents: bytemuck::bytes_of(&LightmapUniform {
+            xform: [0.0; 4],
+            modulate: [1.0, 1.0, 1.0, 0.0],
+            layer: [0; 4],
+        }),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let sampler = device.create_sampler(&sampler_desc(TextureFilter::Nearest));
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("sprite_batch_identity_light_bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: uniform.as_entire_binding(),
+            },
+        ],
+    });
+    (texture, Arc::new(bind))
+}
+
+fn create_atlas_layout(device: &wgpu::Device, filter: TextureFilter, layers: u32) -> AtlasLayout {    let (dimension, _) = atlas_shape(layers);
     let sampler = device.create_sampler(&sampler_desc(filter));
     let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("sprite_batch_tex_bgl"),
@@ -608,6 +856,7 @@ impl SpriteBatch {
     fn ensure_resources(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         screen: &ScreenDescriptor,
         resources: &mut CallbackResources,
     ) {
@@ -628,10 +877,17 @@ impl SpriteBatch {
             self.desc.filter,
         );
         if resources.get::<BatchResources>().is_none() {
+            let light_layout = create_light_layout(device);
+            let (identity_lightmap, identity_bind) =
+                create_identity_lightmap(device, queue, &light_layout);
             resources.insert(BatchResources {
                 batches: HashMap::new(),
                 atlases: HashMap::new(),
                 layouts: HashMap::new(),
+                light_layout,
+                light_sampler: device.create_sampler(&sampler_desc(TextureFilter::Linear)),
+                identity_lightmap,
+                identity_bind,
             });
         }
         let layout = resources
@@ -679,6 +935,25 @@ impl SpriteBatch {
                 self.id
             );
         }
+        let light_layout = resources
+            .get::<BatchResources>()
+            .expect("batch resources initialized")
+            .light_layout
+            .clone();
+        let light_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sprite_batch_light_uniforms"),
+            contents: bytemuck::bytes_of(&LightmapUniform {
+                xform: [0.0; 4],
+                modulate: [1.0, 1.0, 1.0, 0.0],
+                layer: [0; 4],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let light_bind = resources
+            .get::<BatchResources>()
+            .expect("batch resources initialized")
+            .identity_bind
+            .clone();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sprite_batch"),
             source: wgpu::ShaderSource::Wgsl(sprite_shader(self.desc.layers).into()),
@@ -723,7 +998,11 @@ impl SpriteBatch {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sprite_batch_pl"),
-            bind_group_layouts: &[Some(&cam_layout), Some(&layout.tex_layout)],
+            bind_group_layouts: &[
+                Some(&cam_layout),
+                Some(&layout.tex_layout),
+                Some(&light_layout),
+            ],
             immediate_size: 0,
         });
         let vertex_buffers = [
@@ -784,6 +1063,11 @@ impl SpriteBatch {
                         format: wgpu::VertexFormat::Float32,
                         offset: 76,
                         shader_location: 10,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Uint32,
+                        offset: 80,
+                        shader_location: 11,
                     },
                 ],
             }),
@@ -880,6 +1164,10 @@ impl SpriteBatch {
             cam_bind,
             atlas,
             atlas_key,
+            light_uniform,
+            light_bind,
+            light_key: None,
+            light_starved: false,
         };
         resources
             .get_mut::<BatchResources>()
@@ -909,6 +1197,94 @@ impl SpriteBatch {
             res.last_multiply_end = multiply_end;
             res.last_total = total;
         }
+    }
+
+    /// Point this batch at the light map the renderer's `finish_prepare` hook
+    /// makes visible after every `prepare` has run, so scene order between a
+    /// light pass and its consumers does not matter.
+    ///
+    /// Runs on the renderer's `finish_prepare`; also safe to call directly.
+    pub fn resolve_lightmap(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resources: &mut CallbackResources,
+    ) {
+        let source = self.light_source.as_deref();
+        let info = source.and_then(|id| super::lightpass::lookup_lightmap(resources, id));
+        let Some(all) = resources.get_mut::<BatchResources>() else {
+            return;
+        };
+        let Some(res) = all.batches.get_mut(self.id.as_str()) else {
+            return;
+        };
+        if let Some(id) = source
+            && info.is_none()
+            && !res.light_starved
+        {
+            res.light_starved = true;
+            log::warn!(
+                "sprite_batch[{}]: no light map published by pass '{id}'; drawing unlit. \
+                 The pass must be in the same scene and render into the same target as this batch.",
+                self.id
+            );
+        }
+        if info.is_some() {
+            res.light_starved = false;
+        }
+        let key = match (&info, source) {
+            (Some(info), Some(id)) => Some((id.to_string(), info.generation)),
+            _ => None,
+        };
+        if res.light_key != key {
+            res.light_key = key;
+            res.light_bind = match &info {
+                Some(info) => Arc::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sprite_batch_light_bg"),
+                    layout: &all.light_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&info.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&all.light_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: res.light_uniform.as_entire_binding(),
+                        },
+                    ],
+                })),
+                None => all.identity_bind.clone(),
+            };
+        }
+        // The world rect moves with the camera, so the uv transform is written
+        // every frame; the bind group only changes when the map is recreated.
+        let uniform = match &info {
+            Some(info) => LightmapUniform {
+                xform: [
+                    1.0 / info.world_rect[2],
+                    1.0 / info.world_rect[3],
+                    -info.world_rect[0] / info.world_rect[2],
+                    -info.world_rect[1] / info.world_rect[3],
+                ],
+                modulate: [
+                    self.light_modulate[0],
+                    self.light_modulate[1],
+                    self.light_modulate[2],
+                    0.0,
+                ],
+                layer: [info.layer_clamp, 0, 0, 0],
+            },
+            None => LightmapUniform {
+                xform: [0.0; 4],
+                modulate: [1.0, 1.0, 1.0, 0.0],
+                layer: [0; 4],
+            },
+        };
+        queue.write_buffer(&res.light_uniform, 0, bytemuck::bytes_of(&uniform));
     }
 
     fn blend_group(flags: u32) -> u32 {
@@ -959,7 +1335,7 @@ impl SpriteBatch {
         resources: &mut CallbackResources,
         uploads: &[AtlasUpload],
     ) -> Vec<wgpu::CommandBuffer> {
-        self.ensure_resources(device, screen, resources);
+        self.ensure_resources(device, queue, screen, resources);
         let (sorted, alpha, multiply_end) = self.sorted_instances();
         let total = sorted.len() as u32;
         let Some(all) = resources.get_mut::<BatchResources>() else {
@@ -1139,6 +1515,7 @@ fn draw_batch_with_pass<P: BatchRenderPass>(
     }
     rpass.set_bind_group(0, &res.cam_bind, &[]);
     rpass.set_bind_group(1, &res.atlas.tex_bind, &[]);
+    rpass.set_bind_group(2, res.light_bind.as_ref(), &[]);
     rpass.set_vertex_buffer(0, res.corners.slice(..));
     rpass.set_vertex_buffer(1, res.instances.slice(..));
     if res.last_alpha > 0 {
@@ -1180,8 +1557,13 @@ pub fn draw_batch(rpass: &mut wgpu::RenderPass<'_>, resources: &CallbackResource
 
 impl WgpuCallback for SpriteBatch {
     fn resource_key(&self) -> Option<&str> {
-        Some("repame.sprite_batch.resources")
+        Some(super::lightpass::SHARED_CALLBACK_KEY)
     }
+
+    fn resource_type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<super::lightpass::LightScope>()
+    }
+
     fn prepare(
         &self,
         device: &wgpu::Device,
@@ -1191,6 +1573,18 @@ impl WgpuCallback for SpriteBatch {
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         self.prepare_with_uploads(device, queue, encoder, screen, resources, &self.uploads)
+    }
+
+    fn finish_prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _encoder: &mut wgpu::CommandEncoder,
+        _screen: &ScreenDescriptor,
+        resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        self.resolve_lightmap(device, queue, resources);
+        Vec::new()
     }
 
     fn paint(
@@ -1227,7 +1621,11 @@ impl BatchFrame {
 
 impl WgpuCallback for BatchFrame {
     fn resource_key(&self) -> Option<&str> {
-        Some("repame.sprite_batch.resources")
+        Some(super::lightpass::SHARED_CALLBACK_KEY)
+    }
+
+    fn resource_type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<super::lightpass::LightScope>()
     }
 
     fn prepare(
@@ -1240,6 +1638,18 @@ impl WgpuCallback for BatchFrame {
     ) -> Vec<wgpu::CommandBuffer> {
         self.batch
             .prepare_with_uploads(device, queue, encoder, screen, resources, &self.uploads)
+    }
+
+    fn finish_prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _encoder: &mut wgpu::CommandEncoder,
+        _screen: &ScreenDescriptor,
+        resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        self.batch.resolve_lightmap(device, queue, resources);
+        Vec::new()
     }
 
     fn paint(
@@ -1376,6 +1786,7 @@ mod tests {
         // Default anchor centers: top-left at (8, 17).
         let p = apply((inst.row0, inst.row1), [-0.5, -0.5]);
         assert_eq!(p, [8.0, 17.0]);
+        assert_eq!(inst.light_mask, 1, "sprites default to light layer 0");
     }
 
     #[test]
@@ -1447,13 +1858,23 @@ mod tests {
             (wgpu::TextureViewDimension::D2Array, true)
         );
         assert!(
-            crate::batch::sprite_shader(1).contains("texture_2d<")
-                && !crate::batch::sprite_shader(1).contains("texture_2d_array"),
+            crate::batch::sprite_shader(1)
+                .contains("@group(1) @binding(0) var atlas: texture_2d<f32>")
+                && !crate::batch::sprite_shader(1)
+                    .contains("@group(1) @binding(0) var atlas: texture_2d_array"),
             "single-layer shader samples a 2d atlas"
         );
         assert!(
-            crate::batch::sprite_shader(4).contains("texture_2d_array"),
+            crate::batch::sprite_shader(4)
+                .contains("@group(1) @binding(0) var atlas: texture_2d_array"),
             "multi-layer shader samples an array atlas"
+        );
+        // The light map is an array in both variants; a one-layer light map
+        // would hit the same GL/ANGLE trap, so batches always allocate two.
+        assert!(
+            crate::batch::sprite_shader(1)
+                .contains("@group(2) @binding(0) var lightmap: texture_2d_array<f32>"),
+            "the light map is sampled as an array regardless of atlas shape"
         );
     }
 

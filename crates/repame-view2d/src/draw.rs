@@ -27,7 +27,9 @@ use renamite_model::{Scene, ScenePaint};
 use renamite_render_bridge::{PreparedDraw, PreparedScene};
 use repose_core::input::{PointerButton, PointerEvent, PointerEventKind, PointerKind};
 use repose_core::locals::effective_density_scale;
-use repose_core::{BlendMode, Modifier, Rect, RenderContext, SceneNode, View};
+use repose_core::{
+    BlendMode, ClipOp, Modifier, Px, Rect, RenderContext, SceneNode, View,
+};
 use repose_ui::{Box as UiBox, ViewExt, ZStack};
 
 use crate::actors::{PlayerHost, PlayerHostRef, ViewTransform};
@@ -546,14 +548,20 @@ fn emit_run(
                 batch.push_sprite(&sprite_instance(draw, page, uv_min, uv_max, size));
             }
             let fit = crate::effective_fit(canvas_dp, world_size, camera);
-            scene.nodes.push(
-                crate::BatchFrame::new(batch, atlas.uploads.clone()).node(Rect {
-                    x: rect.x + fit.1 * density,
-                    y: rect.y + fit.2 * density,
-                    w: world_size[0] * fit.0 * density,
-                    h: world_size[1] * fit.0 * density,
-                }),
-            );
+            // A callback's rect is the viewport its camera matrix maps into, so
+            // the batch fills the surface and the fitted box rides a clip node:
+            // the deleted viewport scissored the surface camera to the box, and
+            // that lands on the same pixels. Mounting the batch on the box
+            // instead squeezes the full-canvas matrix into it.
+            scene.nodes.push(SceneNode::PushClip {
+                rect: fitted_box(rect, world_size, fit, camera.roll, density),
+                radius: [Px(0.0); 4],
+                op: ClipOp::Intersect,
+            });
+            scene
+                .nodes
+                .push(crate::BatchFrame::new(batch, atlas.uploads.clone()).node(rect));
+            scene.nodes.push(SceneNode::PopClip);
         }
 
         Medium::Rig => {
@@ -637,6 +645,54 @@ fn emit_run(
                 }
             }
         }
+    }
+}
+
+/// The contain-fitted world box inside `rect`, in physical px: the region the
+/// deleted viewport kept by scissoring its surface camera to it. Roll rotates
+/// the box about the look point, so the clip is the axis-aligned bounds of the
+/// rotated box; the box is then held inside `rect`, because a callback may only
+/// paint inside its own rect. The renderer rounds a clip inward to whole pixels
+/// and a clip that rounds away blocks every draw inside it, so a box that is
+/// sub-pixel, zero-sized or lands between whole pixels falls back to `rect`,
+/// the deleted unclipped path: a degenerate box never clips the run away.
+fn fitted_box(
+    rect: Rect,
+    world_size: [f32; 2],
+    fit: (f32, f32, f32),
+    roll: f32,
+    density: f32,
+) -> Rect {
+    let (s, ox, oy) = fit;
+    let (bw, bh) = (world_size[0] * s * density, world_size[1] * s * density);
+    let cx = rect.x + ox * density + bw * 0.5;
+    let cy = rect.y + oy * density + bh * 0.5;
+    let (hw, hh) = (bw * 0.5, bh * 0.5);
+    let (c, sn) = (roll.cos().abs(), roll.sin().abs());
+    let (ex, ey) = (hw * c + hh * sn, hw * sn + hh * c);
+    let aabb = Rect {
+        x: cx - ex,
+        y: cy - ey,
+        w: 2.0 * ex,
+        h: 2.0 * ey,
+    };
+    if !aabb.x.is_finite() || !aabb.y.is_finite() || !aabb.w.is_finite() || !aabb.h.is_finite() {
+        return rect;
+    }
+    let x = aabb.x.max(rect.x);
+    let y = aabb.y.max(rect.y);
+    let clip = Rect {
+        x,
+        y,
+        w: ((aabb.x + aabb.w).min(rect.x + rect.w) - x).max(0.0),
+        h: ((aabb.y + aabb.h).min(rect.y + rect.h) - y).max(0.0),
+    };
+    let x0 = clip.x.ceil();
+    let y0 = clip.y.ceil();
+    if (clip.x + clip.w).floor() - x0 >= 1.0 && (clip.y + clip.h).floor() - y0 >= 1.0 {
+        clip
+    } else {
+        rect
     }
 }
 

@@ -13,7 +13,8 @@
 //! [`WorldHasher::hash`] folds, in this order, and never in the order `bevy_ecs`
 //! hands things back:
 //!
-//! 1. A world tag, then the sorted ids of every live entity.
+//! 1. A world tag, then the sorted ids of every live entity that is not a
+//!    resource entity.
 //! 2. Each registered component, in registration order: how many entities match,
 //!    then one `(entity id, value hash)` pair per match, sorted ascending by
 //!    entity id.
@@ -29,6 +30,13 @@
 //! spawn histories produce identical ids, so a run that spawned one entity too
 //! many changes the digest the moment it does.
 //!
+//! Resource entities are excluded: `bevy_ecs` stores each resource on an entity
+//! of its own and `iter_entities` yields those too, but one is bookkeeping, not
+//! gameplay state. The harness itself inserts [`Intent`] on the replay side, and
+//! a recording world that never had it (a game with its own action resources)
+//! would fold one entity fewer, so a tape could not reproduce its own recording.
+//! A registered resource is still folded, by its entry in step 3.
+//!
 //! What the digest does not cover: state nobody registered, and anything the
 //! process gives one run and not the other (wall-clock time, thread-scheduled
 //! work). The registered set is part of the replay contract, so register the
@@ -39,6 +47,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
+use bevy_ecs::resource::IsResource;
 use serde::{Deserialize, Serialize};
 
 use crate::Sim;
@@ -412,12 +421,15 @@ impl WorldHasher {
     ///
     /// Folds in the order the module docs pin, which is not `bevy_ecs`'s
     /// iteration order, so a run that reaches the same state through a different
-    /// spawn/despawn history digests the same.
+    /// spawn/despawn history digests the same. Resource entities are left out of
+    /// the entity list for the reason the module docs give; registered resources
+    /// are folded by their entries instead.
     pub fn hash(&self, world: &World) -> u64 {
         let mut hash = Hash64::new();
         hash.str(WORLD_TAG);
         let mut entities: Vec<u64> = world
             .iter_entities()
+            .filter(|entity| !entity.contains::<IsResource>())
             .map(|entity| entity.id().to_bits())
             .collect();
         entities.sort_unstable();

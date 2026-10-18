@@ -729,9 +729,25 @@ mod tests {
             SimRng::seeded(SEED).unit_f32()
         );
         let mut rng = SimRng::seeded(SEED);
+        // The suffix matters: a bare `-1.0..1.0` infers `f64` and samples
+        // `unit_f64`, whose result is not these bits. These are the f32 path:
+        // `-1.0 + 2.0 * unit_f32`, every operator f32.
         assert_eq!(
-            [rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0)],
+            [
+                rng.random_range(-1.0_f32..1.0_f32),
+                rng.random_range(-1.0_f32..1.0_f32)
+            ],
             [0.27156496047973633, -0.9532426595687866]
+        );
+        // The same range in `f64` is its own pin, not the f32 values widened:
+        // `unit_f64` reads the top 53 bits of each draw, `unit_f32` the top 24.
+        let mut rng = SimRng::seeded(SEED);
+        assert_eq!(
+            [
+                rng.random_range(-1.0_f64..1.0_f64),
+                rng.random_range(-1.0_f64..1.0_f64)
+            ],
+            [0.2715649754842737, -0.9532425625010428]
         );
 
         // The widest ranges are the ones where a naive span computation

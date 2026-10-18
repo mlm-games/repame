@@ -158,7 +158,7 @@ pub fn instance_rows(
 ///   texture, matching a single-frame sprite.
 ///
 /// ```rust
-/// use repame_sprite::{frame_uv, sprite_aabb};
+/// use repame_view2d::{frame_uv, sprite_aabb};
 ///
 /// // 4x2 sheet: frame 5 is column 1, row 1.
 /// let (mn, mx) = frame_uv(4, 2, 5);
@@ -188,7 +188,7 @@ pub fn frame_uv(hframes: u32, vframes: u32, frame: u32) -> ([f32; 2], [f32; 2]) 
 /// hits the sprite when `min <= p <= max`.
 ///
 /// ```rust
-/// use repame_sprite::{frame_uv, sprite_aabb};
+/// use repame_view2d::{frame_uv, sprite_aabb};
 ///
 /// let (mn, mx) = sprite_aabb([400.0, 300.0], [64.0, 80.0], 0.0, [0.5, 0.5], false, false);
 /// assert_eq!(mn, [368.0, 260.0]);
@@ -1431,6 +1431,32 @@ mod tests {
         assert_eq!(up.rgba, vec![255, 255, 255, 255]);
     }
 
+    #[test]
+    fn single_layer_atlas_draws_tinted_sprites() {
+        // A one-layer atlas must be a plain D2 texture, not a one-element
+        // D2Array: GL/ANGLE assumes D2 for it and then samples the array view
+        // as black, which silently erases every sprite with no validation
+        // error. Guards the shape choice for the layout, the view and the
+        // shader together, since they only agree as a set.
+        assert_eq!(
+            crate::batch::atlas_shape(1),
+            (wgpu::TextureViewDimension::D2, false)
+        );
+        assert_eq!(
+            crate::batch::atlas_shape(4),
+            (wgpu::TextureViewDimension::D2Array, true)
+        );
+        assert!(
+            crate::batch::sprite_shader(1).contains("texture_2d<")
+                && !crate::batch::sprite_shader(1).contains("texture_2d_array"),
+            "single-layer shader samples a 2d atlas"
+        );
+        assert!(
+            crate::batch::sprite_shader(4).contains("texture_2d_array"),
+            "multi-layer shader samples an array atlas"
+        );
+    }
+
     /// End-to-end GPU proof: upload atlas pages, draw textured quads
     /// offscreen, and assert exact pixels (positions, colors, page,
     /// mirror). sRGB primaries are transfer-function fixed points, so
@@ -1581,8 +1607,8 @@ mod tests {
     /// producer gives every run its own id for exactly this reason.
     #[test]
     fn distinct_batch_ids_compose_in_one_scene() {
-        use repose_core::{Color, Rect, Scene, SceneNode};
-        use repose_render_wgpu::{Callback, offscreen::OffscreenRenderer};
+        use repose_core::{Color, Rect, Scene};
+        use repose_render_wgpu::offscreen::OffscreenRenderer;
         use std::sync::Arc;
 
         let mut renderer = match OffscreenRenderer::new_blocking(256, 256, 1) {

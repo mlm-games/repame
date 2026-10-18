@@ -6,7 +6,7 @@ use web_time::Duration;
 
 use anyhow::Result;
 pub use repame_sim::{Sim, SimTime};
-pub use repame_sprite::{Camera2d, PickEvent, SpriteInstance};
+pub use repame_view2d::{Camera2d, PickEvent, SpriteInstance};
 use repose_core::View;
 pub use repose_core::input::{GamepadEvent, GamepadId};
 use repose_platform::gamepad::{GamepadBackend, create_backend};

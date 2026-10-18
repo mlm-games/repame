@@ -8,7 +8,7 @@ use glam::Vec2;
 use rand::{Rng, RngExt};
 use repame_sim::bevy_ecs::component::{Mutable, StorageType};
 use repame_sim::bevy_ecs::prelude::*;
-use repame_sprite::SpriteInstance;
+use repame_view2d::SpriteInstance;
 
 use super::effect::EffectDef;
 

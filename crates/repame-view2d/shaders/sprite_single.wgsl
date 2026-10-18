@@ -1,4 +1,4 @@
-// Instanced textured quads for the repame-sprite batch.
+// Instanced textured quads for the repame-view2d batch.
 //! Consumed by `batch.rs`: per-vertex corner + per-instance transform
 //! rows, uv rect, tint, page. The camera uniform maps y-down world
 //! space to clip, `page` selects the atlas array layer per instance.
@@ -29,7 +29,7 @@ struct Camera {
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
-@group(1) @binding(0) var atlas: texture_2d_array<f32>;
+@group(1) @binding(0) var atlas: texture_2d<f32>;
 @group(1) @binding(1) var atlas_sampler: sampler;
 
 @vertex
@@ -57,7 +57,7 @@ fn vs_main(@location(0) corner: vec2<f32>, inst: Instance) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let tex = textureSample(atlas, atlas_sampler, in.uv, i32(in.page + 0.5));
+    let tex = textureSample(atlas, atlas_sampler, in.uv);
     var color = tex * in.tint;
     if (color.a < 0.001) {
         discard;

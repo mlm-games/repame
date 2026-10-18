@@ -3,6 +3,12 @@
 //! Default decay 1.5 drains full trauma in about 0.67 s.
 //!
 //! Timebase is seconds: [`Trauma::decay_secs`]. `decay` is the 100 Hz shim.
+//!
+//! This is the one shake: a game that hand-rolls a `shake_offset` sinusoid
+//! for its rig or camera uses [`Trauma::offset`] instead, the same decaying
+//! 2D translation in dp with a Perlin waveform and a squared response, and
+//! [`Trauma::camera_offset`] when the offset has to be in `Camera2d` world
+//! units.
 
 use bevy_ecs::prelude::*;
 use noise::{NoiseFn, Perlin};

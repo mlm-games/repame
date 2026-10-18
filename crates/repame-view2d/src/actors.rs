@@ -1,12 +1,14 @@
 //! Live vector actors: `.ren` rigs played through `renamite-player`.
 //! Timelines and state machines drive playback; the Canvas bridge paints.
 //! [`actors_view`] is presentational, [`actors_view_with`] takes opts.
+//! Rigs drawn many times under one world camera are the [`draw`](crate::draw)
+//! module instead.
 //!
 //! ```no_run
-//! use repame_actors::{actors_view, host_from_str};
+//! use repame_view2d::{actors_view, host_from_str};
 //! use repose_core::RenderContext;
 //!
-//! let host = host_from_str(repame_actors::MINIMAL_REN).unwrap();
+//! let host = host_from_str(repame_view2d::MINIMAL_REN).unwrap();
 //! let ctx = RenderContext::new();
 //! let _view = actors_view(host, ctx);
 //! ```
@@ -19,13 +21,6 @@ use renamite_render_bridge::SceneRenderer;
 use repose_canvas::{Canvas, DrawScope};
 use repose_core::input::PointerEvent;
 use repose_core::{Modifier, RenderContext, Vec2, View, request_frame, theme};
-
-pub mod draw;
-
-pub use draw::{
-    ActorDraw, ActorDrawList, ActorId, ActorItem, ActorLibrary, RasterAtlas, actors_view_mixed,
-    actors_view_mixed_with_events, actors_view_world, actors_view_world_with_events,
-};
 
 pub use renamite_player::{Player, PlayerError};
 pub use renamite_player_ui::{PlayerHost, PlayerHostRef, ViewTransform};

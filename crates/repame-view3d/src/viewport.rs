@@ -1,6 +1,6 @@
 //! 3D viewport view: orbit gestures in, mesh snapshot out to the GPU.
 //!
-//! Same split as `repame-sprite` `Viewport2d` and resims `Viewport3d`:
+//! Same split as `repame-view2d` `Viewport2d` and resims `Viewport3d`:
 //! camera state lives in game signals, never in the renderer. The UI builds
 //! a [`Frame3d`] per frame (plain data, rebuilt during composition) and
 //! mounts [`Viewport3d`], which draws the snapshot through
@@ -151,7 +151,7 @@ pub struct Frame3d {
     /// only source.
     pub occlusion_feed: Option<crate::OcclusionFeedDesc>,
     /// Cold-start viewport size in physical px, used for the GPU camera
-    /// until the first painted size arrives (same role as `repame-sprite`
+    /// until the first painted size arrives (same role as `repame-view2d`
     /// `FrameInput::viewport_dp`). Falls back to 16:9.
     pub viewport_px: [f32; 2],
 }
@@ -610,7 +610,7 @@ impl Default for ViewportGeom {
 }
 
 /// Shared paint-time geometry. GPU callbacks need `Send + Sync`, so the
-/// inner cell is mutex-backed (same pattern as `repame-sprite`
+/// inner cell is mutex-backed (same pattern as `repame-view2d`
 /// `GeomHandle`).
 ///
 /// It also owns the view's cross-frame camera history (the previous frame's

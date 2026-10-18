@@ -13,7 +13,7 @@
 //! (`renamite_render_bridge::SceneRenderer`), so hundreds of instances of one
 //! rig cost one tessellation.
 //!
-//! Camera [`roll`](repame_sprite::Camera2d::roll) is not supported: renamite
+//! Camera [`roll`](crate::Camera2d::roll) is not supported: renamite
 //! composes a view as scale plus offset, so a rotation has nowhere to enter.
 
 use std::cell::RefCell;
@@ -21,16 +21,16 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::{Camera2d, PickEvent, click_within_slop_dp, dp_to_world, effective_fit};
 use glam::{DVec2, DVec4};
 use renamite_model::{Scene, ScenePaint};
 use renamite_render_bridge::{PreparedDraw, PreparedScene};
-use repame_sprite::{Camera2d, PickEvent, click_within_slop_dp, dp_to_world, effective_fit};
 use repose_core::input::{PointerButton, PointerEvent, PointerEventKind, PointerKind};
 use repose_core::locals::effective_density_scale;
 use repose_core::{BlendMode, Modifier, Rect, RenderContext, SceneNode, View};
 use repose_ui::{Box as UiBox, ViewExt, ZStack};
 
-use crate::{PlayerHost, PlayerHostRef, ViewTransform};
+use crate::actors::{PlayerHost, PlayerHostRef, ViewTransform};
 
 /// Index into an [`ActorLibrary`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -314,7 +314,7 @@ fn has_images(scene: &Scene) -> bool {
         .any(|item| matches!(item.paint, ScenePaint::Image { .. }))
 }
 
-/// Camera as renamite's scale-plus-offset view, matching `repame_sprite`'s
+/// Camera as renamite's scale-plus-offset view, matching `repame_view2d`'s
 /// `world_to_dp` exactly. That law is in dp; a `DrawScope` addresses physical
 /// px, so the caller scales by the density to land in the space the draws are
 /// emitted in.
@@ -394,8 +394,8 @@ struct PrepKey {
 /// rides an `Arc`; every view batches its own rows per frame from it.
 #[derive(Clone)]
 pub struct RasterAtlas {
-    pub desc: repame_sprite::BatchDesc,
-    pub uploads: std::sync::Arc<[repame_sprite::AtlasUpload]>,
+    pub desc: crate::BatchDesc,
+    pub uploads: std::sync::Arc<[crate::AtlasUpload]>,
     pub batch_id: String,
 }
 
@@ -527,7 +527,7 @@ fn emit_run(
             let Some(atlas) = atlas else {
                 return;
             };
-            let mut batch = repame_sprite::SpriteBatch::with_id(
+            let mut batch = crate::SpriteBatch::with_id(
                 format!("{}.r{}", atlas.batch_id, run_id),
                 atlas.desc.clone(),
             );
@@ -545,9 +545,9 @@ fn emit_run(
                 };
                 batch.push_sprite(&sprite_instance(draw, page, uv_min, uv_max, size));
             }
-            let fit = repame_sprite::effective_fit(canvas_dp, world_size, camera);
+            let fit = crate::effective_fit(canvas_dp, world_size, camera);
             scene.nodes.push(
-                repame_sprite::BatchFrame::new(batch, atlas.uploads.clone()).node(Rect {
+                crate::BatchFrame::new(batch, atlas.uploads.clone()).node(Rect {
                     x: rect.x + fit.1 * density,
                     y: rect.y + fit.2 * density,
                     w: world_size[0] * fit.0 * density,
@@ -746,9 +746,9 @@ fn sprite_instance(
     uv_min: [f32; 2],
     uv_max: [f32; 2],
     size: [f32; 2],
-) -> repame_sprite::SpriteInstance {
+) -> crate::SpriteInstance {
     let (sx, sy) = (draw.scale.x as f32, draw.scale.y as f32);
-    repame_sprite::SpriteInstance {
+    crate::SpriteInstance {
         center: glam::Vec2::new(draw.world.x as f32, draw.world.y as f32),
         rotation: draw.rotation as f32,
         size: glam::Vec2::new(size[0] * sx.abs(), size[1] * sy.abs()),
@@ -766,9 +766,9 @@ fn sprite_instance(
         page,
         z: draw.z,
         blend: match draw.blend {
-            BlendMode::Add => repame_sprite::SpriteBlend::Additive,
-            BlendMode::Multiply => repame_sprite::SpriteBlend::Multiply,
-            _ => repame_sprite::SpriteBlend::Alpha,
+            BlendMode::Add => crate::SpriteBlend::Additive,
+            BlendMode::Multiply => crate::SpriteBlend::Multiply,
+            _ => crate::SpriteBlend::Alpha,
         },
     }
 }
@@ -991,12 +991,12 @@ pub fn actors_view_mixed_with_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{effective_fit, world_to_dp};
     use renamite_animation::{Animated, Frame, FrameRate};
     use renamite_model::{
         Color, Document, FillRule, Node, NodeKind, Parent, ShapeKind, StyleKind, StylePaint,
     };
     use renamite_render_bridge::SceneRenderer;
-    use repame_sprite::{effective_fit, world_to_dp};
     use std::cell::RefCell;
     use std::rc::Rc;
 

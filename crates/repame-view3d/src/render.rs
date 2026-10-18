@@ -2273,7 +2273,7 @@ pub struct MaterialEntry {
     pub uniform: super::shading::ShadingUniform,
 }
 
-/// Texture sampling for batch layers (same shape as `repame-sprite`).
+/// Texture sampling for batch layers (same shape as `repame-view2d`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SceneFilter {
     /// Pixel-art crisp (nt default).
@@ -2492,7 +2492,7 @@ const _: () = assert!(std::mem::size_of::<HizCandidate>() == 48);
 /// compositor thread via [`repose_render_wgpu::Callback`].
 ///
 /// Each `id` owns its pipelines + texture in `CallbackResources` (the
-/// `repame-sprite` `SpriteBatch` pattern): viewports coexist. Rebuilding
+/// `repame-view2d` `SpriteBatch` pattern): viewports coexist. Rebuilding
 /// on format/sample/desc change drops texture contents (logged), the
 /// game re-uploads from its next frame's [`SceneUpload`]s, same as the
 /// sprite batch's atlas contract.

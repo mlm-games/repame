@@ -1,22 +1,25 @@
 [package]
-name = "repame-actors"
+name = "repame-view2d"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "live vector actors (.ren rigs played through renamite-player with Repose views)"
+description = "2D viewport: sprite batch and raster sheets, camera/fit and picking, text, fullscreen post, and .ren vector actors"
 
 [dependencies]
+wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+repame-atlas.workspace = true
 renamite-player.workspace = true
 renamite-player-ui = { workspace = true, features = ["binary"] }
 renamite-render-bridge.workspace = true
 renamite-model.workspace = true
-repame-sprite.workspace = true
 repose-core.workspace = true
 repose-canvas.workspace = true
 repose-ui.workspace = true
-glam.workspace = true
+repose-render-wgpu.workspace = true
 anyhow.workspace = true
 log.workspace = true
 

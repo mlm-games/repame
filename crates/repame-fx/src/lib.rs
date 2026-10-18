@@ -27,6 +27,7 @@
 pub mod chroma;
 pub mod decals;
 pub mod driver;
+pub mod ease;
 pub mod effect;
 pub mod flash;
 pub mod numbers;
@@ -43,6 +44,7 @@ pub use decals::{
     Decal, DecalDef, blob_shadow, decal_groups, spawn_blob_shadow, spawn_decal, step_decals,
     step_decals_secs,
 };
+pub use ease::EasedValue;
 pub use effect::{EaseKind, EffectDef, Gradient, Jittered, SpawnerDef};
 pub use flash::Flash;
 pub use numbers::{DamageNumber, spawn_number, spawn_number_secs, step_numbers, step_numbers_secs};

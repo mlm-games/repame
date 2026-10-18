@@ -5,16 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "instanced batch, Camera2d, CPU picking, and postfx hook"
+description = "deprecated shim: the 2D viewport is repame-view2d"
 
 [dependencies]
-wgpu.workspace = true
-glam.workspace = true
-bytemuck.workspace = true
-repame-atlas.workspace = true
-repose-core.workspace = true
-repose-ui.workspace = true
-repose-canvas.workspace = true
-repose-render-wgpu.workspace = true
-anyhow.workspace = true
-log.workspace = true
+repame-view2d.workspace = true

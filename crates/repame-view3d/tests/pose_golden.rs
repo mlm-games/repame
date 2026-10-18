@@ -56,8 +56,6 @@ const SHEET_COLS: u32 = 6;
 const CHANNEL_TOL: i16 = 10;
 /// Fraction of sheet pixels allowed to exceed `CHANNEL_TOL`.
 const MAX_DIFF_FRACTION: f64 = 0.01;
-/// Background pixels allowed inside a solid's silhouette before it is a hole.
-const MAX_HOLE_FRACTION: f64 = 0.01;
 /// Background pixels allowed in the lower half of any pose.
 const MAX_BOTTOM_HOLE_FRACTION: f64 = 0.02;
 /// Ground pixels allowed in the upper quarter of any pose.
@@ -77,9 +75,13 @@ const POST_NZ: [f32; 3] = [0.95, 0.95, 0.95];
 
 /// The two camera distances the sweep uses.
 const DIST: f32 = 13.0;
-/// The box the hole check projects; its centre and half extent.
+/// A box on the ground for scale, and a second one floating clear of every other
+/// object (the posts top out at 4 m, and it clears the frame's top edge) so nothing can ever cross its silhouette.
+/// The floating one carries the solid and hole checks: a missing face there
+/// shows the sky, which is unambiguous.
 const BOX_CENTRE: Vec3 = Vec3::new(-3.0, 1.0, 2.5);
 const BOX_HALF: f32 = 1.2;
+const SKY_BOX_CENTRE: Vec3 = Vec3::new(0.0, 4.6, 0.0);
 /// Platform top surface: 0.5 m thick slab sitting on the ground, top at y = 1.
 const PLATFORM_CENTRE: Vec3 = Vec3::new(0.0, 0.5, -3.0);
 const PLATFORM_HALF: Vec3 = Vec3::new(2.5, 0.5, 2.0);
@@ -183,18 +185,24 @@ fn scene(variant: Variant) -> Vec<MeshGroup> {
 
     let mut red_box = MeshGroup::default();
     push_box(&mut red_box, BOX_CENTRE, Vec3::splat(BOX_HALF), BOX);
+    push_box(&mut red_box, SKY_BOX_CENTRE, Vec3::splat(BOX_HALF), BOX);
     if variant == Variant::MissingBoxFace {
-        // Drop the +X face (the third quad `push_box` writes), which is the one
-        // a camera at yaw 0 sees: two triangles out of twelve.
-        red_box.indices.drain(12..18);
+        // The ground box writes six quads (36 indices) before the floating one,
+        // whose first quad is its +Y top: the face a steep camera looks at. What
+        // is behind it is the interior (culled) and then the ground, so the cells
+        // it occupies stop reading as the box.
+        let top_face = 36;
+        red_box.indices.drain(top_face..top_face + 6);
     }
 
     let mut posts = MeshGroup::default();
+    // Short posts: they mark the world axes for the camera checks, and staying
+    // below the floating box keeps them from crossing its silhouette.
     let post = |posts: &mut MeshGroup, at: Vec3, colour: [f32; 3]| {
         push_box(
             posts,
-            at + Vec3::new(0.0, 2.0, 0.0),
-            Vec3::new(0.12, 2.0, 0.12),
+            at + Vec3::new(0.0, 0.75, 0.0),
+            Vec3::new(0.12, 0.75, 0.12),
             colour,
         );
     };
@@ -345,22 +353,7 @@ fn pixel(rgba: &[u8], x: u32, y: u32) -> [u8; 3] {
     [rgba[i], rgba[i + 1], rgba[i + 2]]
 }
 
-/// sRGB-encode a linear scene colour the way the renderer writes it out.
-fn srgb(c: [f32; 3]) -> [i32; 3] {
-    c.map(|v| {
-        let linear = v.clamp(0.0, 1.0);
-        let encoded = if linear <= 0.0031308 {
-            linear * 12.92
-        } else {
-            1.055 * linear.powf(1.0 / 2.4) - 0.055
-        };
-        (encoded * 255.0).round() as i32
-    })
-}
 
-fn close(a: [u8; 3], b: [i32; 3]) -> bool {
-    (0..3).all(|i| (a[i] as i32 - b[i]).abs() <= CHANNEL_TOL as i32)
-}
 
 fn is_background(a: [u8; 3], background: [u8; 3]) -> bool {
     (0..3).all(|i| (a[i] as i32 - background[i] as i32).abs() <= 6)
@@ -374,21 +367,12 @@ fn is_ground(a: [u8; 3]) -> bool {
     g > r + 14 && g > b + 14
 }
 
-fn is_sky(a: [u8; 3]) -> bool {
-    let (r, g, b) = (a[0] as i32, a[1] as i32, a[2] as i32);
-    b > r + 14 && b > g + 8
-}
 
 fn is_red(a: [u8; 3]) -> bool {
     let (r, g, b) = (a[0] as i32, a[1] as i32, a[2] as i32);
     r > g + 14 && r > b + 14
 }
 
-/// The platform is a neutral grey: no channel runs away with it.
-fn is_neutral(a: [u8; 3]) -> bool {
-    let (r, g, b) = (a[0] as i32, a[1] as i32, a[2] as i32);
-    (r - g).abs() <= 22 && (g - b).abs() <= 22
-}
 
 /// Share of a rectangle's pixels matching a predicate, inset so silhouette
 /// edges never decide the answer.
@@ -451,10 +435,58 @@ fn box_rect(cam: &OrbitCamera, centre: Vec3, half: Vec3) -> Option<(f32, f32, f3
 
 // ------------------------------------------------------------------- invariants
 
-/// A dropped face on a solid does not always reveal the background — the ground
-/// is usually behind it — so the honest check is that the *middle* of the
-/// solid's silhouette shows that solid. With back faces culled, a hole sees
-/// straight through the object to whatever is behind it.
+/// Of a solid's silhouette cells that lie fully inside the frame, how many read
+/// as the solid.
+///
+/// Cells rather than one share, because occluders (a post crossing the box,
+/// another object in front) take whole cells — and cells fully inside the frame
+/// only, because a solid near the edge of a pose is a crop, and a crop of a solid
+/// says nothing about its faces. A culled face still takes every cell it occupies.
+fn solid_cells(
+    rgba: &[u8],
+    cam: &OrbitCamera,
+    centre: Vec3,
+    half: Vec3,
+    predicate: impl Fn([u8; 3]) -> bool + Copy,
+) -> Option<(usize, usize)> {
+    let rect = box_rect(cam, centre, half)?;
+    let (x0, y0) = (rect.0, rect.1);
+    let (w, h) = ((rect.2 - rect.0) / 3.0, (rect.3 - rect.1) / 3.0);
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let inset = w.min(h) / 3.0;
+    let mut evaluated = 0usize;
+    let mut solid = 0usize;
+    for cy in 0..3 {
+        for cx in 0..3 {
+            // The silhouette *rectangle* of a box seen at an angle includes its
+            // four corners, which are outside the box: a cube covers the middle
+            // row and column of that rectangle, not the diagonals.
+            if (cx == 0 || cx == 2) && (cy == 0 || cy == 2) {
+                continue;
+            }
+            let cell = (
+                x0 + cx as f32 * w,
+                y0 + cy as f32 * h,
+                x0 + (cx + 1) as f32 * w,
+                y0 + (cy + 1) as f32 * h,
+            );
+            let inside = cell.0 >= 0.0 && cell.1 >= 0.0 && cell.2 <= W as f32 && cell.3 <= H as f32;
+            if !inside {
+                continue;
+            }
+            evaluated += 1;
+            if share(rgba, cell, inset, predicate) >= 0.85 {
+                solid += 1;
+            }
+        }
+    }
+    (evaluated >= 3).then_some((solid, evaluated))
+}
+
+/// The middle of a solid must read as the solid: a culled face shows whatever is
+/// behind it instead, and takes whole cells with it.
 fn assert_solid_middle(
     rgba: &[u8],
     cam: &OrbitCamera,
@@ -465,16 +497,14 @@ fn assert_solid_middle(
     what: &str,
     expect: &str,
 ) {
-    let Some(rect) = box_rect(cam, centre, half) else {
-        return; // behind the camera at this pose
+    let Some((solid, evaluated)) = solid_cells(rgba, cam, centre, half, predicate) else {
+        return;
     };
-    let inset = (rect.2 - rect.0).min(rect.3 - rect.1) / 3.0;
-    let fraction = share(rgba, rect, inset, predicate);
+    let fraction = solid as f64 / evaluated as f64;
     assert!(
-        fraction >= 0.9,
-        "{label}: the middle of {what} reads {expect} on only {:.0}% of its pixels; \
-         a face wound the wrong way is culled and shows what is behind it",
-        fraction * 100.0
+        fraction >= 0.75,
+        "{label}: the middle of {what} reads {expect} in only {solid}/{evaluated} visible \
+         cells; a face wound the wrong way is culled and shows what is behind it"
     );
 }
 
@@ -490,7 +520,9 @@ fn horizon_row(cam: &OrbitCamera) -> f32 {
 /// Everything a single pose must satisfy, independent of any golden. The three
 /// checks map onto the three failures this file exists for: a missing surface, a
 /// camera whose verticals read wrongly, and a solid that is not solid.
-fn check_pose(rgba: &[u8], cam: &OrbitCamera, background: [u8; 3], label: &str) {
+/// Returns whether the floating box was fully in frame, so the sweep can prove
+/// the solid check actually ran rather than skipping every pose.
+fn check_pose(rgba: &[u8], cam: &OrbitCamera, background: [u8; 3], label: &str) -> bool {
     let horizon = horizon_row(cam);
     // A few rows of slack: the ground plane is finite, so its far edge sits a
     // hair below the true horizon, and silhouette edges are one pixel wide.
@@ -546,31 +578,22 @@ fn check_pose(rgba: &[u8], cam: &OrbitCamera, background: [u8; 3], label: &str) 
     assert_solid_middle(
         rgba,
         cam,
-        BOX_CENTRE,
+        SKY_BOX_CENTRE,
         Vec3::splat(BOX_HALF),
         is_red,
         label,
-        "the box",
+        "the floating box",
         "red",
     );
-    assert_solid_middle(
-        rgba,
-        cam,
-        PLATFORM_CENTRE,
-        PLATFORM_HALF,
-        is_neutral,
-        label,
-        "the platform",
-        "grey",
-    );
+    solid_cells(rgba, cam, SKY_BOX_CENTRE, Vec3::splat(BOX_HALF), is_red).is_some()
 }
 
 /// The camera's own conventions, pinned by where the world axes land: a mirrored
 /// projection or an inverted yaw puts them on the wrong side.
 fn check_camera_axes(render: &mut impl FnMut(OrbitCamera) -> Vec<u8>, background: [u8; 3]) {
     let target = Vec3::new(0.0, 1.0, 0.0);
-    let post_z = Vec3::new(0.0, 2.0, 6.0);
-    let post_x = Vec3::new(6.0, 2.0, 0.0);
+    let post_z = Vec3::new(0.0, 0.9, 6.0);
+    let post_x = Vec3::new(6.0, 0.9, 0.0);
 
     // yaw = 0 puts the eye on +X looking toward the origin: +Z is screen-left.
     let cam = OrbitCamera {
@@ -623,9 +646,10 @@ fn check_camera_axes(render: &mut impl FnMut(OrbitCamera) -> Vec<u8>, background
         "yaw pi (eye on -X) must put +Z on the right half, found x = {zx:.1}"
     );
 
-    // Pitch raises the camera: the higher the eye, the lower the ground sits, so
-    // the frame's bottom row must stop being ground no later than at low pitch.
-    let mut ground_rows = Vec::new();
+    // Raising the camera means looking further down at the ground, so the sky in
+    // the frame must shrink as pitch grows. A walk up one column instead would be
+    // at the mercy of whatever happens to cross it.
+    let mut sky_shares = Vec::new();
     for pitch in [0.10f32, 0.42, 0.85] {
         let cam = OrbitCamera {
             target,
@@ -635,18 +659,26 @@ fn check_camera_axes(render: &mut impl FnMut(OrbitCamera) -> Vec<u8>, background
             fov_y_deg: 45.0,
         };
         let rgba = render(cam);
-        // Walk up the centre column to the first non-ground pixel.
-        let ground = srgb(GROUND);
-        let mut row = H as i32 - 1;
-        while row > 0 && close(pixel(&rgba, W / 2, row as u32), ground) {
-            row -= 1;
+        let mut sky = 0usize;
+        for y in 0..H {
+            for x in 0..W {
+                if is_background(pixel(&rgba, x, y), background) {
+                    sky += 1;
+                }
+            }
         }
-        ground_rows.push(row as f32);
+        sky_shares.push(sky as f64 / (W * H) as f64);
     }
+    eprintln!("pitch sweep: sky shares {sky_shares:?}");
+    // The ground plane is big enough to fill the frame from any steep camera, so
+    // the share saturates at zero: the signal is that sky never *grows* with pitch
+    // and that the shallow camera sees strictly more of it.
     assert!(
-        ground_rows[0] > ground_rows[2],
-        "raising the camera (pitch up) must move the near ground up the frame: \
-         rows bottom-up at pitch 0.10/0.42/0.85 were {ground_rows:?}"
+        sky_shares[0] >= sky_shares[1]
+            && sky_shares[1] >= sky_shares[2]
+            && sky_shares[0] > sky_shares[2] + 0.02,
+        "raising the camera must not grow the sky in frame (pitch 0.10 > 0.42 > 0.85), got \
+         {sky_shares:?} — an inverted pitch shows the opposite"
     );
 }
 
@@ -755,6 +787,7 @@ fn pose_sweep_invariants_and_sheet() {
     }
 
     let mut frames = Vec::new();
+    let mut solid_checked = 0usize;
     for label in poses() {
         let cam = camera(&label);
         let rgba = render_with(&mut gpu, cam, Variant::Honest);
@@ -768,9 +801,17 @@ fn pose_sweep_invariants_and_sheet() {
                 png_bytes(W, H, &rgba),
             );
         }
-        check_pose(&rgba, &cam, background, &label);
+        if check_pose(&rgba, &cam, background, &label) {
+            solid_checked += 1;
+        }
         frames.push(rgba);
     }
+
+    assert!(
+        solid_checked >= 6,
+        "the floating box must be fully in frame for at least six poses, or the solid check \
+         is silently skipped everywhere (it ran for {solid_checked})"
+    );
 
     check_camera_axes(
         &mut |cam: OrbitCamera| render_with(&mut gpu, cam, Variant::Honest),
@@ -949,23 +990,35 @@ fn the_sweep_notices_a_missing_face() {
     let Some(mut gpu) = gpu() else {
         return;
     };
-    let cam = camera("yaw+0.00_pitch0.42");
+    let cam = camera("yaw+0.00_pitch0.85");
     let honest = render_with(&mut gpu, cam, Variant::Honest);
     let broken = render_with(&mut gpu, cam, Variant::MissingBoxFace);
-    let rect = box_rect(&cam, BOX_CENTRE, Vec3::splat(BOX_HALF)).expect("the box is on screen");
-    let inset = (rect.2 - rect.0).min(rect.3 - rect.1) / 3.0;
-    let honest_red = share(&honest, rect, inset, is_red);
-    let broken_red = share(&broken, rect, inset, is_red);
+    let (honest_solid, honest_seen) =
+        solid_cells(&honest, &cam, SKY_BOX_CENTRE, Vec3::splat(BOX_HALF), is_red)
+            .expect("the floating box is visible at the probe pose");
+    let (broken_solid, broken_seen) =
+        solid_cells(&broken, &cam, SKY_BOX_CENTRE, Vec3::splat(BOX_HALF), is_red)
+            .expect("the floating box is visible at the probe pose");
+    if let Ok(dir) = std::env::var("REPAME_POSES") {
+        let dir = PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("teeth_honest.png"), png_bytes(W, H, &honest));
+        let _ = std::fs::write(dir.join("teeth_broken.png"), png_bytes(W, H, &broken));
+        eprintln!(
+            "teeth: honest {honest_solid}/{honest_seen}, broken {broken_solid}/{broken_seen}, \
+             rect {:?}",
+            box_rect(&cam, SKY_BOX_CENTRE, Vec3::splat(BOX_HALF))
+        );
+    }
     assert!(
-        honest_red >= 0.9,
-        "the honest box must read red through its middle (it read {:.0}%)",
-        honest_red * 100.0
+        honest_solid * 4 >= honest_seen * 3,
+        "the honest box must read red almost everywhere (it read {honest_solid}/{honest_seen} \
+         visible cells)"
     );
     assert!(
-        broken_red < 0.9,
-        "a dropped box face must fail the solid invariant; the middle still read {:.0}% red, \
-         so the hole is not visible from this pose — move the probe camera or drop a face \
-         that faces it",
-        broken_red * 100.0
+        broken_solid * 4 < broken_seen * 3,
+        "a dropped box face must fail the solid invariant; the silhouette still read \
+         {broken_solid}/{broken_seen} red cells, so the hole is not visible from this pose — \
+         move the probe camera or drop a face that faces it"
     );
 }

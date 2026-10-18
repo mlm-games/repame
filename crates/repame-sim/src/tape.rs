@@ -344,9 +344,8 @@ impl WorldHasher {
     ) -> &mut Self {
         self.entries
             .push(Arc::new(move |world: &World, hash: &mut Hash64| {
-                // A component this world never registered matches no entity.
-                // Folding the zero count keeps that from hashing like an entry
-                // that is missing altogether.
+                // A component this world never registered matches no entity, so
+                // it folds the same zero count an empty query folds.
                 let Some(mut query) = world.try_query::<(Entity, &C)>() else {
                     hash.u64(0);
                     return;

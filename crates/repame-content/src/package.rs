@@ -127,25 +127,39 @@ impl Package {
     /// Index a ZIP archive. `source` only names the container in errors.
     pub fn read(bytes: Vec<u8>, source: &Path) -> Result<Self, ContentError> {
         let eocd = find_end_of_central_directory(&bytes, source)?;
-        let entries_on_disk = u32_at(&bytes, eocd + 8, source)?;
-        let entry_count = u32_at(&bytes, eocd + 10, source)?;
+        // End of central directory: this disk, the disk with the directory and
+        // both entry counts are u16; only the directory's size and offset are
+        // u32 (PKWARE APPNOTE 4.3.16).
+        let disk = u16_at(&bytes, eocd + 4, source)?;
+        let directory_disk = u16_at(&bytes, eocd + 6, source)?;
+        let entries_on_disk = u16_at(&bytes, eocd + 8, source)?;
+        let entry_count = u16_at(&bytes, eocd + 10, source)?;
         let directory_size = u32_at(&bytes, eocd + 12, source)?;
         let directory_offset = u32_at(&bytes, eocd + 16, source)?;
-        let disk = u32_at(&bytes, eocd + 4, source)?;
-        if disk != 0 || entries_on_disk != entry_count {
+        if disk != 0 || directory_disk != 0 {
             return Err(ContentError::unsupported(
                 source,
                 "multi-disk ZIP archives are not supported",
             ));
         }
-        if entry_count == u32::from(u16::MAX) || directory_offset == u32::MAX {
+        if entries_on_disk != entry_count {
+            return Err(ContentError::format(
+                source,
+                format!(
+                    "ZIP end-of-central-directory record declares {entries_on_disk} entries on disk but {entry_count} in the directory"
+                ),
+            ));
+        }
+        if entry_count == u16::MAX || directory_size == u32::MAX || directory_offset == u32::MAX {
             return Err(ContentError::unsupported(
                 source,
                 "ZIP64 archives are not supported",
             ));
         }
         let directory_end = directory_offset as u64 + u64::from(directory_size);
-        if directory_end > bytes.len() as u64 || eocd as u64 + 22 > bytes.len() as u64 {
+        if directory_end > bytes.len() as u64
+            || eocd as u64 + ZIP_END_OF_CENTRAL_DIRECTORY_BYTES as u64 > bytes.len() as u64
+        {
             return Err(ContentError::format(source, "ZIP central directory is out of range"));
         }
 
@@ -731,11 +745,13 @@ fn push_u32(out: &mut Vec<u8>, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::stream::ByteRangeSource;
 
     #[test]
     fn package_round_trips_stored_and_deflated_entries() {
         let path = Path::new("pack.repapck");
         let text = b"repame content pack".repeat(64);
+        let nested = b"(name: \"deep\")".to_vec();
         let mut writer = PackageWriter::new();
         writer
             .add("scenes/main.ron", b"(format: 1)".to_vec(), Compression::Stored)
@@ -743,12 +759,18 @@ mod tests {
         writer
             .add("assets/notes.txt", text.clone(), Compression::Deflated)
             .expect("add deflated");
+        writer
+            .add("assets/levels/deep/level.ron", nested.clone(), Compression::Stored)
+            .expect("add nested");
         let archive = writer.finish(path).expect("finish");
 
-        let package = Package::read(archive, path).expect("read");
-        assert_eq!(package.len(), 2);
+        let package = Package::read(archive.clone(), path).expect("read");
+        assert_eq!(package.len(), 3);
         let names: Vec<&str> = package.entries().map(|entry| entry.name.as_str()).collect();
-        assert_eq!(names, vec!["scenes/main.ron", "assets/notes.txt"]);
+        assert_eq!(
+            names,
+            vec!["scenes/main.ron", "assets/notes.txt", "assets/levels/deep/level.ron"]
+        );
         assert_eq!(
             package.entry("scenes/main.ron").map(|entry| entry.compression),
             Some(Compression::Stored)
@@ -765,14 +787,45 @@ mod tests {
             package.read_file("assets/notes.txt", path).expect("deflated"),
             text
         );
+        assert_eq!(
+            package
+                .read_file("assets/levels/deep/level.ron", path)
+                .expect("nested"),
+            nested
+        );
         assert!(package.entry("assets/notes.txt").expect("entry").compressed_size < text.len() as u64);
         assert_eq!(
             package.entry("assets/notes.txt").map(|entry| entry.crc32),
             Some(crc32(&text))
         );
 
+        // Byte ranges out of both kinds of entry: stored bytes are read
+        // straight out of the archive, deflated bytes come from the one
+        // verified inflate.
+        let stored = package.range_source("scenes/main.ron", path).expect("stored range");
+        assert_eq!(stored.byte_len().expect("len"), 11);
+        assert_eq!(stored.read_range(4, 5).expect("range"), b"mat: ");
+        let deflated = package.range_source("assets/notes.txt", path).expect("deflated range");
+        assert_eq!(deflated.byte_len().expect("len"), text.len() as u64);
+        assert_eq!(deflated.read_range(6, 14).expect("range"), &text[6..20]);
+        assert_eq!(deflated.read_range(0, text.len()).expect("whole"), text);
+        let error = deflated
+            .read_range(text.len() as u64 - 1, 2)
+            .expect_err("past the end");
+        assert_eq!(error.kind(), crate::error::ContentErrorKind::Format);
+
+        // The disk numbers are the EOCD's u16 fields at +4 and +6.
+        let eocd = archive.len() - ZIP_END_OF_CENTRAL_DIRECTORY_BYTES;
+        for field in [4usize, 6] {
+            let mut multi = archive.clone();
+            multi[eocd + field..eocd + field + 2].copy_from_slice(&1u16.to_le_bytes());
+            let error = Package::read(multi, path).expect_err("multi-disk");
+            assert!(error.is_unsupported(), "{error}");
+            assert!(error.message().contains("multi-disk"), "{}", error.message());
+        }
+
         let directory = PckDirectory::from_package(&package);
-        assert_eq!(directory.len(), 2);
+        assert_eq!(directory.len(), 3);
         let index_bytes = directory.write(path).expect("write index");
         let parsed = PckDirectory::read(&index_bytes, path).expect("read index");
         assert_eq!(parsed, directory);

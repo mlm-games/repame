@@ -214,13 +214,16 @@ mod tests {
     #[test]
     fn bc1_three_color_mode_pins_reference_fixed_point() {
         // c0 = 0x0000 <= c1 = 0xFFFF: 3-colour plus transparent mode.
-        // 2*c2 is the reference's fixed-point average, which rounds to
-        // (128, 127, 128) rather than a channel-wise 127/128 blend.
+        // bcdec v0.97's midpoint is `((v0 + v1) * M + B) >> S` on the raw
+        // 5/6/5 values, which is round-half-up of the exact normalized
+        // average ((v0 + v1)/2) * 255/(2^n - 1) for every endpoint pair.
+        // Black to white averages to 127.5 in each channel, so all three
+        // round up to 128; 127 would need truncation (the bias adds half).
         let block = [0x00, 0x00, 0xFF, 0xFF, 0x1B, 0x1B, 0x1B, 0x1B];
         let texels = Bc1.decode_block(&block).expect("bc1");
         let row = [
             [0, 0, 0, 0],
-            [128, 127, 128, 255],
+            [128, 128, 128, 255],
             [255, 255, 255, 255],
             [0, 0, 0, 255],
         ];

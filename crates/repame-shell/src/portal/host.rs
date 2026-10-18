@@ -67,7 +67,9 @@ use super::protocol::{
 /// Why an ad the game asked for is not on its way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdRefused {
-    /// Another break is already running: one at a time.
+    /// Another break is already running: one at a time, and a break the shell
+    /// released but the host has not ended yet still counts, because the
+    /// events of that one are still to come.
     Busy,
     /// The host's interstitial rate limit has not elapsed. `remaining` is how
     /// much of it is left.
@@ -120,8 +122,10 @@ pub enum AdOutcome {
     /// player before the host reported the reward. Nothing is owed.
     Skipped,
     /// The host never reported the ad's end before its deadline, so the shell
-    /// released the game. Nothing is owed, and the host's later word on that ad
-    /// is ignored: a break cannot be held open on a report that may never come.
+    /// released the game. Nothing was owed *then*: the released ad stays
+    /// attributed to its request, so a reward point the host reports after the
+    /// release and the end that follows it still pay. A break cannot be held
+    /// open on a report that may never come.
     TimedOut { after: Duration },
     /// The host could not play the ad: it gave up before the video ran.
     /// Nothing is owed, and asking again is the game's call.
@@ -178,12 +182,31 @@ pub enum PortalReport {
 #[derive(Clone, Copy, Debug)]
 struct Pending {
     kind: AdKind,
-    /// Time left before the shell releases the game.
+    /// Time left before the shell releases the game: a stall timer, started at
+    /// the request and restarted when the host reports the ad on screen, so the
+    /// wait for the ad does not eat the ad's own time.
     deadline: Duration,
     /// The host reported the reward point.
     rewarded: bool,
     /// The host reported the ad on screen.
     visible: bool,
+    /// Which request this ad answers: a released ad's late events carry it.
+    generation: u64,
+}
+
+/// An ad the shell released on its deadline while the host might still be
+/// holding it.
+///
+/// The host's events for it arrive late, if at all, and they belong to this ad
+/// and not to the next request: the tombstone keeps the ad's identity until the
+/// host ends it, which is also what keeps the next request `Busy`. A rewarded
+/// ad whose reward point lands late pays when it ends, because the host's
+/// reward point is the promise and it did arrive.
+#[derive(Clone, Copy, Debug)]
+struct Released {
+    kind: AdKind,
+    rewarded: bool,
+    generation: u64,
 }
 
 /// The shell's half of a portal: requests out, host facts in, one gate.
@@ -191,6 +214,10 @@ pub struct PortalHost {
     portal: Box<dyn Portal>,
     reports: Vec<PortalReport>,
     pending: Option<Pending>,
+    /// The last ad the shell released on its deadline, until the host ends it.
+    released: Option<Released>,
+    /// Hands every ad it sees a distinct generation.
+    generation: u64,
     audio_enabled: bool,
     host_paused: bool,
     backgrounded: bool,
@@ -224,6 +251,8 @@ impl PortalHost {
             portal,
             reports: Vec::new(),
             pending: None,
+            released: None,
+            generation: 0,
             audio_enabled: status.audio_enabled,
             host_paused: status.host_paused,
             backgrounded: lifecycle::backgrounded(),
@@ -320,25 +349,22 @@ impl PortalHost {
         for event in events {
             self.absorb(event);
         }
-        let mut released = None;
+        let mut timed_out = None;
         if let Some(pending) = &mut self.pending {
             pending.deadline = pending.deadline.saturating_sub(dt);
             if pending.deadline.is_zero() {
-                released = Some(pending.kind);
+                timed_out = Some(*pending);
             }
         }
-        if let Some(kind) = released {
+        if let Some(pending) = timed_out {
             log::warn!(
-                "{}: a {kind} ad did not finish within {:?}; releasing the game",
+                "{}: the {} ad (#{}) did not finish within {:?}; releasing the game",
                 self.portal.label(),
-                kind.timeout()
+                pending.kind,
+                pending.generation,
+                pending.kind.timeout()
             );
-            self.finish(
-                kind,
-                AdOutcome::TimedOut {
-                    after: kind.timeout(),
-                },
-            );
+            self.release_ad(pending);
         }
     }
 
@@ -346,13 +372,17 @@ impl PortalHost {
     pub fn gate(&mut self, game: GameState) -> Suspend {
         let decision = Suspend::resolve(game, self.view());
         if decision.host_gameplay() != self.announced_gameplay {
-            self.announced_gameplay = decision.host_gameplay();
             let notice = if decision.host_gameplay() {
                 HostNotice::GameplayStarted
             } else {
                 HostNotice::GameplayStopped
             };
-            let _ = self.send(notice);
+            // Only a notice the host took moves the announced state: a refused
+            // one leaves the state stale so the next frame retries it, the way
+            // `ready` retries.
+            if self.send(notice).is_ok() {
+                self.announced_gameplay = decision.host_gameplay();
+            }
         }
         decision
     }
@@ -367,14 +397,17 @@ impl PortalHost {
     ///
     /// A taken request holds gameplay the next time the gate is settled, see
     /// [`PortalHost::ad_pending`], and ends in a
-    /// [`PortalReport::AdFinished`] whichever way the host takes it.
+    /// [`PortalReport::AdFinished`] whichever way the host takes it. A request
+    /// while an ad the shell already released has not ended yet is refused
+    /// [`AdRefused::Busy`], and that released ad's own end, whenever it lands,
+    /// is reported too.
     ///
     /// A refused rewarded ad pays nothing. A game that wants to be generous
     /// where no ad can run (the games' desktop rule: an offline rewarded break
     /// always pays out) grants the reward from that refusal itself, because the
     /// policy is the game's and not the portal's.
     pub fn show_ad(&mut self, kind: AdKind, placement: Option<&str>) -> Result<(), AdRefused> {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.released.is_some() {
             return Err(AdRefused::Busy);
         }
         if kind == AdKind::Interstitial {
@@ -393,11 +426,13 @@ impl PortalHost {
         self.portal
             .request(PortalRequest::ShowAd { kind, placement })
             .map_err(AdRefused::Refusal)?;
+        self.generation += 1;
         self.pending = Some(Pending {
             kind,
             deadline: kind.timeout(),
             rewarded: false,
             visible: false,
+            generation: self.generation,
         });
         Ok(())
     }
@@ -499,8 +534,41 @@ impl PortalHost {
             self.interstitial_shown = true;
             self.since_interstitial = Duration::ZERO;
         }
-        match &mut self.pending {
-            Some(pending) => pending.visible = true,
+        if let Some(pending) = &mut self.pending {
+            // The host's report is progress: the deadline restarts once, from
+            // the open, so a slow request no longer eats the ad's own time. A
+            // host repeating the open does not extend the hold.
+            if !pending.visible {
+                pending.deadline = kind.timeout();
+            }
+            pending.visible = true;
+            self.reports.push(PortalReport::AdOpened { kind });
+            return;
+        }
+        let released = self.released.take();
+        let (rewarded, generation) = match released {
+            // The ad the shell released opened after all: it is on screen now,
+            // so the game is held from the open, with the reward point the host
+            // already reported for it.
+            Some(released) if released.kind == kind => {
+                log::info!(
+                    "{}: the released {} ad (#{}) opened late; holding gameplay from the open",
+                    self.portal.label(),
+                    kind,
+                    released.generation
+                );
+                (released.rewarded, released.generation)
+            }
+            Some(released) => {
+                log::warn!(
+                    "{}: a {kind} ad opened while the released {} ad (#{}) had not ended; holding the open one",
+                    self.portal.label(),
+                    released.kind,
+                    released.generation
+                );
+                self.generation += 1;
+                (false, self.generation)
+            }
             None => {
                 // A break the game did not ask for still covers the frame, so
                 // it is held like an asked-for one, and it is still released by
@@ -509,14 +577,17 @@ impl PortalHost {
                     "{}: a {kind} ad opened without a request; holding gameplay until it ends",
                     self.portal.label()
                 );
-                self.pending = Some(Pending {
-                    kind,
-                    deadline: kind.timeout(),
-                    rewarded: false,
-                    visible: true,
-                });
+                self.generation += 1;
+                (false, self.generation)
             }
-        }
+        };
+        self.pending = Some(Pending {
+            kind,
+            deadline: kind.timeout(),
+            rewarded,
+            visible: true,
+            generation,
+        });
         self.reports.push(PortalReport::AdOpened { kind });
     }
 
@@ -528,46 +599,103 @@ impl PortalHost {
                 self.portal.label(),
                 pending.kind
             ),
+            None => match &mut self.released {
+                // A reward point reported for a released ad is still the host's
+                // promise: the reward stands when that ad ends.
+                Some(released) if released.kind.is_rewarded() => {
+                    log::info!(
+                        "{}: the released {} ad (#{}) reached its reward point; the reward is due when it ends",
+                        self.portal.label(),
+                        released.kind,
+                        released.generation
+                    );
+                    released.rewarded = true;
+                }
+                Some(released) => log::warn!(
+                    "{}: a {} ad reported a reward; nothing is owed",
+                    self.portal.label(),
+                    released.kind
+                ),
+                None => log::warn!(
+                    "{}: a reward was reported with no ad running; nothing is owed",
+                    self.portal.label()
+                ),
+            },
+        }
+    }
+
+    fn ad_ended(&mut self, kind: AdKind, ending: AdEnding) {
+        if let Some(pending) = self.pending.take() {
+            if pending.kind != kind {
+                log::warn!(
+                    "{}: a {kind} ad ended while a {} ad was running; releasing the running one",
+                    self.portal.label(),
+                    pending.kind
+                );
+            }
+            let outcome = ending_outcome(pending.kind, pending.rewarded, ending);
+            self.finish(pending.kind, outcome);
+            return;
+        }
+        match self.released {
+            Some(released) if released.kind == kind => {
+                self.released = None;
+                let outcome = ending_outcome(released.kind, released.rewarded, ending);
+                log::info!(
+                    "{}: the released {} ad (#{}) ended; reporting {outcome}",
+                    self.portal.label(),
+                    released.kind,
+                    released.generation
+                );
+                self.finish(released.kind, outcome);
+            }
+            Some(released) => log::warn!(
+                "{}: a {kind} ad ended while the released {} ad (#{}) had not; ignored",
+                self.portal.label(),
+                released.kind,
+                released.generation
+            ),
             None => log::warn!(
-                "{}: a reward was reported with no ad running; nothing is owed",
+                "{}: an ad ended with none running; ignored",
                 self.portal.label()
             ),
         }
     }
 
-    fn ad_ended(&mut self, kind: AdKind, ending: AdEnding) {
-        let Some(pending) = self.pending.take() else {
-            log::warn!(
-                "{}: an ad ended with none running; ignored",
-                self.portal.label()
-            );
-            return;
-        };
-        if pending.kind != kind {
-            log::warn!(
-                "{}: a {kind} ad ended while a {} ad was running; releasing the running one",
-                self.portal.label(),
-                pending.kind
-            );
-        }
-        let outcome = match ending {
-            // The reward point is the host's promise, so whatever ends the ad
-            // afterwards the reward stands. Without it, a rewarded ad that just
-            // closed paid nothing.
-            AdEnding::Closed if pending.kind.is_rewarded() && !pending.rewarded => {
-                AdOutcome::Skipped
-            }
-            AdEnding::Closed => AdOutcome::Completed,
-            AdEnding::Failed if pending.rewarded => AdOutcome::Completed,
-            AdEnding::Failed => AdOutcome::Failed,
-        };
-        self.finish(pending.kind, outcome);
+    /// Release the game from an ad that outlived its deadline. The ad stays a
+    /// tombstone until the host ends it, so its late events are attributed to
+    /// it and not to the next request, and a late reward point still pays.
+    fn release_ad(&mut self, pending: Pending) {
+        self.released = Some(Released {
+            kind: pending.kind,
+            rewarded: pending.rewarded,
+            generation: pending.generation,
+        });
+        self.finish(
+            pending.kind,
+            AdOutcome::TimedOut {
+                after: pending.kind.timeout(),
+            },
+        );
     }
 
     fn finish(&mut self, kind: AdKind, outcome: AdOutcome) {
         self.pending = None;
         self.reports
             .push(PortalReport::AdFinished { kind, outcome });
+    }
+}
+
+/// What an ending means for an ad, once the reward point is known.
+fn ending_outcome(kind: AdKind, rewarded: bool, ending: AdEnding) -> AdOutcome {
+    match ending {
+        // The reward point is the host's promise, so whatever ends the ad
+        // afterwards the reward stands. Without it, a rewarded ad that just
+        // closed paid nothing.
+        AdEnding::Closed if kind.is_rewarded() && !rewarded => AdOutcome::Skipped,
+        AdEnding::Closed => AdOutcome::Completed,
+        AdEnding::Failed if rewarded => AdOutcome::Completed,
+        AdEnding::Failed => AdOutcome::Failed,
     }
 }
 

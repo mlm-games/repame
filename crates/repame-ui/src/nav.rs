@@ -243,19 +243,30 @@ struct Entry {
 ///
 /// The paint pass reports `on_globally_positioned` before `set_focus_requester`
 /// assigns the control's view id, so a control's very first observation arrives
-/// anonymous. It is bound to the id on the next frame, keyed by the
+/// anonymous. It is held until the control registers, keyed by the
 /// `FocusRequester` the control owns: one allocation for the life of the
 /// control, so it identifies it across frames. The focus group is not carried
 /// here: registration supplies it.
 struct Pending {
     key: usize,
     rect: Rect,
-    frame: u64,
 }
+
+/// How many anonymous rectangles are held. A control that never registers (its
+/// panel closed before the paint pass bound it) would otherwise hold one
+/// forever, and a broken game could push one per frame.
+const PENDING_CAP: usize = 256;
 
 /// Identity of a control's focus requester, stable across frames.
 fn requester_key(requester: &FocusRequester) -> usize {
     Rc::as_ptr(&requester.target) as usize
+}
+
+/// A capture this map took, kept past the entry: the platform's lock is global
+/// and outlives the control, so releasing it cannot need the entry to be live.
+struct Capture {
+    id: u64,
+    requester: FocusRequester,
 }
 
 #[derive(Default)]
@@ -264,20 +275,21 @@ struct Registry {
     order: Vec<u64>,
     entries: HashMap<u64, Entry>,
     pending: Vec<Pending>,
+    capture: Option<Capture>,
 }
 
 /// The controls the kit composed this frame, with their laid-out rectangles.
 ///
 /// Clone the map into every control: it is one shared registry behind an `Rc`.
 /// The game calls [`NavMap::begin_frame`] once per frame before composing, which
-/// retires controls that were not recomposed, so a panel stops being navigable
-/// in the same frame it disappears.
+/// retires controls that were not recomposed: a panel stays navigable through
+/// the frame after its last composition, so traversal made before composing
+/// still finds the layout the player was looking at, and leaves the map at the
+/// `begin_frame` after that.
 ///
 /// A control registers itself while composing ([`NavMap::register`]) and reports
 /// its rectangle from the layout callback ([`NavMap::place`]). Traversal
-/// resolves against whatever is registered, so a call made before the panels are
-/// composed in a frame resolves against the previous frame's layout — the
-/// controls the player was looking at.
+/// resolves against whatever is registered.
 #[derive(Clone, Default)]
 pub struct NavMap {
     registry: Rc<RefCell<Registry>>,
@@ -298,9 +310,6 @@ impl NavMap {
         let mut order = std::mem::take(&mut registry.order);
         order.retain(|id| registry.entries.contains_key(id));
         registry.order = order;
-        registry
-            .pending
-            .retain(|pending| pending.frame + 1 >= frame);
     }
 
     /// Forget every control, including the ones marked this frame.
@@ -316,8 +325,9 @@ impl NavMap {
     ///
     /// This is what a kit control calls while composing. It returns `false` on
     /// the control's first frame, before the first layout pass has assigned the
-    /// id; the rectangle that layout reported is kept and bound on the next
-    /// frame, so a control becomes navigable one frame after it first appears.
+    /// id; the rectangle that layout reported is kept until the control
+    /// registers with an id, so a control becomes navigable as soon as its id
+    /// arrives, whether or not the panel composed in the frames between.
     pub fn register(&self, requester: &FocusRequester, group: Option<GroupId>) -> bool {
         let Some(id) = *requester.target.borrow() else {
             return false;
@@ -386,27 +396,33 @@ impl NavMap {
     /// `Modifier::on_globally_positioned`.
     ///
     /// A rectangle that arrives before the control's view id is known is held
-    /// for it and bound by the next [`register`](Self::register); after that,
-    /// the callback only fires when the rectangle changes, so this is a cheap
-    /// update. Returns whether the rectangle was recorded against a control.
+    /// for it until the control registers with that id; after that, the callback
+    /// only fires when the rectangle changes, so this is a cheap update. A
+    /// `group` of `None` leaves the group the control already has alone: a
+    /// caller that only knows the rectangle must not clear a modal trap.
+    /// Returns whether the rectangle was recorded against a control.
     pub fn place(&self, requester: &FocusRequester, rect: Rect, group: Option<GroupId>) -> bool {
         let mut registry = self.registry.borrow_mut();
         let frame = registry.frame;
         let Some(id) = *requester.target.borrow() else {
             let key = requester_key(requester);
             match registry.pending.iter_mut().find(|pending| pending.key == key) {
-                Some(pending) => {
-                    pending.rect = rect;
-                    pending.frame = frame;
+                Some(pending) => pending.rect = rect,
+                None => {
+                    if registry.pending.len() >= PENDING_CAP {
+                        registry.pending.remove(0);
+                    }
+                    registry.pending.push(Pending { key, rect });
                 }
-                None => registry.pending.push(Pending { key, rect, frame }),
             }
             return false;
         };
         match registry.entries.get_mut(&id) {
             Some(entry) => {
                 entry.rect = Some(rect);
-                entry.group = group;
+                if group.is_some() {
+                    entry.group = group;
+                }
                 entry.frame = frame;
             }
             None => {
@@ -471,23 +487,70 @@ impl NavMap {
 
     /// Pin focus to `id` until [`release`](Self::release): what a modal panel
     /// does when it opens, so traversal cannot escape to what is underneath.
+    ///
+    /// The requester is remembered with the capture, so the release does not
+    /// depend on the control still being in the map.
     pub fn capture(&self, id: u64) -> bool {
-        self.entry(id).is_some_and(|entry| entry.requester.capture_focus())
+        let Some(entry) = self.entry(id) else {
+            return false;
+        };
+        let requester = entry.requester;
+        if !requester.capture_focus() {
+            return false;
+        }
+        self.registry.borrow_mut().capture = Some(Capture { id, requester });
+        true
     }
 
     /// Release a capture taken by [`capture`](Self::capture).
     ///
     /// Focus is cleared, so the caller asks for the next panel's focus with
-    /// [`NavDriver::enter`] once the modal is gone. `false` when `id` is not a
-    /// control of this frame's map.
+    /// [`NavDriver::enter`] once the modal is gone. A capture the map took is
+    /// freed even after its control left the map, because the platform's lock
+    /// would otherwise pin focus to an id nothing can request again.
     pub fn release(&self, id: u64) -> bool {
-        match self.entry(id) {
-            Some(entry) => {
+        let mut registry = self.registry.borrow_mut();
+        if registry.capture.as_ref().is_some_and(|capture| capture.id == id) {
+            let capture = registry.capture.take();
+            if let Some(capture) = capture {
+                capture.requester.free_focus();
+            }
+            return true;
+        }
+        match registry.entries.get(&id) {
+            Some(entry) if entry.rect.is_some() => {
                 entry.requester.free_focus();
                 true
             }
-            None => false,
+            _ => false,
         }
+    }
+
+    /// Free a capture this map took for a control that has left it: the lock
+    /// would otherwise refuse every later request. Returns whether a stale lock
+    /// was cleared.
+    fn release_stale_capture(&self) -> bool {
+        let mut registry = self.registry.borrow_mut();
+        let Some(capture) = registry.capture.as_ref() else {
+            return false;
+        };
+        let id = capture.id;
+        if registry
+            .entries
+            .get(&id)
+            .is_some_and(|entry| entry.rect.is_some())
+        {
+            return false;
+        }
+        let capture = registry.capture.take();
+        let Some(capture) = capture else {
+            return false;
+        };
+        if repose_core::runtime::focus_capture() == Some(id) {
+            capture.requester.free_focus();
+            return true;
+        }
+        false
     }
 
     fn entry(&self, id: u64) -> Option<NavEntry> {
@@ -644,12 +707,21 @@ impl NavDriver {
     ///
     /// The scheduler keeps its old focus until the platform drains the request
     /// queue after this frame's layout, which is the same cadence keyboard focus
-    /// has, so one direction never resolves twice against a stale focus.
+    /// has, so one direction never resolves twice against a stale focus. A
+    /// refusal by a capture whose control has left the map is cleared and the
+    /// request retried: a lock nothing can release would otherwise refuse every
+    /// later move, and a pause menu could never take focus again.
     pub fn drive(&self, sched: &Scheduler, dir: NavDir) -> NavStep {
         let step = self.map.resolve(sched.focused, dir, self.wrap);
         match step.target() {
             Some(id) if self.map.request(id) => step,
-            Some(_) => NavStep::Held,
+            Some(id) => {
+                if self.map.release_stale_capture() && self.map.request(id) {
+                    step
+                } else {
+                    NavStep::Held
+                }
+            }
             None => step,
         }
     }
@@ -1002,12 +1074,17 @@ mod tests {
     #[test]
     fn a_closed_panel_is_no_longer_navigable() {
         let map = grid();
+        // The panel is not composed this frame: its layout is still the one the
+        // player is looking at, so traversal made before composition finds it.
         map.begin_frame();
-        // Only the HUD survives: nothing composed the grid this frame.
         let requester = FocusRequester::new();
         *requester.target.borrow_mut() = Some(50);
         map.mark(50, None, requester.clone());
         map.place(&requester, Rect { x: 0.0, y: 0.0, w: 40.0, h: 40.0 }, None);
+        assert!(ids(&map).contains(&1), "the previous layout is still resolvable");
+
+        // A frame later the grid is two frames old and leaves the map.
+        map.begin_frame();
         assert_eq!(ids(&map), [50]);
         assert_eq!(
             map.resolve(Some(1), NavDir::Right, Wrap::Stay),
@@ -1067,17 +1144,37 @@ mod tests {
     }
 
     #[test]
-    fn a_control_that_stops_composing_takes_its_pending_rectangle_with_it() {
+    fn a_pending_rectangle_survives_the_frames_a_panel_skips() {
         let map = NavMap::new();
         let requester = FocusRequester::new();
+        let rect = Rect { x: 10.0, y: 20.0, w: 30.0, h: 40.0 };
         map.begin_frame();
-        assert!(!map.place(&requester, Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }, None));
-        // Two frames without the control: the held rectangle is dropped.
+        assert!(!map.place(&requester, rect, None));
+        // Two frames without the control, then its id: the rectangle observed
+        // on its first frame is still the one bound to it, so a panel composed
+        // on alternating frames is not left unreachable.
         map.begin_frame();
         map.begin_frame();
         *requester.target.borrow_mut() = Some(9);
-        assert!(map.register(&requester, None), "registering works, binding does not");
-        assert!(map.is_empty(), "the stale rectangle was dropped");
+        assert!(map.register(&requester, None));
+        assert_eq!(ids(&map), [9]);
+        assert_eq!(map.active()[0].rect(), rect, "the held rectangle was bound");
+    }
+
+    #[test]
+    fn a_place_without_a_group_keeps_the_one_the_control_has() {
+        let map = NavMap::new();
+        map.begin_frame();
+        let pause = GroupId::named("pause");
+        let requester = FocusRequester::new();
+        *requester.target.borrow_mut() = Some(5);
+        map.mark(5, Some(pause), requester.clone());
+        map.place(&requester, Rect { x: 0.0, y: 0.0, w: 200.0, h: 40.0 }, None);
+        assert_eq!(
+            map.active()[0].group(),
+            Some(pause),
+            "a rectangle-only place must not clear the modal trap"
+        );
     }
 
     #[test]
@@ -1110,6 +1207,63 @@ mod tests {
         drain_requests();
     }
 
+    #[test]
+    fn a_capture_can_be_released_after_its_control_retires() {
+        drain_requests();
+        let map = NavMap::new();
+        map.begin_frame();
+        let modal = FocusRequester::new();
+        *modal.target.borrow_mut() = Some(2);
+        map.mark(2, None, modal.clone());
+        map.place(&modal, Rect { x: 0.0, y: 0.0, w: 200.0, h: 40.0 }, None);
+        assert!(map.capture(2));
+        assert_eq!(repose_core::runtime::focus_capture(), Some(2));
+
+        // The modal closed before the release landed: the entry is gone, and
+        // the platform's lock still points at it.
+        map.begin_frame();
+        map.begin_frame();
+        assert!(map.is_empty(), "the panel retired");
+        assert_eq!(repose_core::runtime::focus_capture(), Some(2));
+
+        assert!(
+            map.release(2),
+            "the remembered capture is freed with the entry gone"
+        );
+        assert_eq!(repose_core::runtime::focus_capture(), None);
+        drain_requests();
+    }
+
+    #[test]
+    fn a_held_move_clears_a_capture_left_by_a_retired_control() {
+        drain_requests();
+        let map = NavMap::new();
+        map.begin_frame();
+        let modal = FocusRequester::new();
+        *modal.target.borrow_mut() = Some(2);
+        map.mark(2, None, modal.clone());
+        map.place(&modal, Rect { x: 0.0, y: 0.0, w: 200.0, h: 40.0 }, None);
+        assert!(map.capture(2));
+
+        map.begin_frame();
+        map.begin_frame();
+        let menu = FocusRequester::new();
+        *menu.target.borrow_mut() = Some(7);
+        map.mark(7, None, menu.clone());
+        map.place(&menu, Rect { x: 300.0, y: 0.0, w: 200.0, h: 40.0 }, None);
+
+        // The pause menu asks for focus: without clearing the stale lock every
+        // request would be refused Held for the rest of the session.
+        let driver = NavDriver::new(map);
+        assert_eq!(
+            driver.enter(&Scheduler::default()),
+            NavStep::Entered(7),
+            "the stale lock is cleared and the request goes through"
+        );
+        assert_eq!(repose_core::runtime::focus_capture(), None);
+        drain_requests();
+    }
+
     fn scheduler_focused_on(id: u64) -> Scheduler {
         let mut sched = Scheduler::default();
         sched.focused = Some(id);
@@ -1133,6 +1287,7 @@ mod tests {
 
         sched.focused = Some(12);
         assert_eq!(driver.drive(&sched, NavDir::Left), NavStep::Moved(11));
+        sched.focused = Some(11);
         assert_eq!(driver.drive(&sched, NavDir::Up), NavStep::Moved(1));
         assert_eq!(NavStep::Moved(1).target(), Some(1));
         assert_eq!(NavStep::Edge.target(), None);
@@ -1170,7 +1325,10 @@ mod tests {
         assert_eq!(nav.step(Vec2::new(0.0, 1.0), 0.016), Some(NavDir::Down));
         assert_eq!(nav.step(Vec2::new(-1.0, 0.0), 0.016), Some(NavDir::Left));
         assert_eq!(nav.step(Vec2::new(1.0, 0.0), 0.016), Some(NavDir::Right));
+        // Center the stick, or the next press is a repeat that is not due yet.
+        assert_eq!(nav.step(Vec2::ZERO, 0.016), None);
         assert_eq!(nav.step(Vec2::new(1.0, 0.6), 0.016), Some(NavDir::Right));
+        assert_eq!(nav.step(Vec2::ZERO, 0.016), None);
         assert_eq!(nav.step(Vec2::new(0.2, 1.0), 0.016), Some(NavDir::Down));
     }
 

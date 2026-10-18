@@ -97,11 +97,17 @@ pub fn parse_header(bytes: &[u8], path: &Path) -> Result<Ktx2Header, ContentErro
 /// Build the level table from the header and its level index.
 ///
 /// KTX 2 stores each level's byte offset, byte length and uncompressed length
-/// explicitly, so this is a copy plus a range check against `container_len`
+/// explicitly, so this is a copy plus range checks against `container_len`
 /// (the whole container, not just the bytes read so far). `index` must hold at
-/// least `24 * mip levels` bytes. A level that runs past the container is a
-/// typed [`ContentErrorKind::Format`](crate::ContentErrorKind) error, never a
+/// least `24 * mip levels` bytes. A level that runs past the container, or
+/// whose range reaches back into the level index or overlaps another level, is
+/// a typed [`ContentErrorKind::Format`](crate::ContentErrorKind) error, never a
 /// panic or a silently short read.
+///
+/// The index is read in level order but no byte order is assumed: per the
+/// specification the Mip Level Array stores the smallest level first and the
+/// base level last, so a conforming file's offsets are descending. The ranges
+/// only have to be disjoint and after the index.
 pub fn parse_levels(
     header: &Ktx2Header,
     index: &[u8],
@@ -118,10 +124,16 @@ pub fn parse_levels(
         ));
     }
     let mip_levels = header.mip_levels();
-    let index_end = mip_levels as usize * LEVEL_INDEX_ENTRY_BYTES;
-    if index.len() < index_end {
+    let index_len = mip_levels as usize * LEVEL_INDEX_ENTRY_BYTES;
+    if index.len() < index_len {
         return Err(ContentError::format(path, "KTX 2 level index is truncated"));
     }
+    // Level data begins after the index. No level's range may reach into the
+    // index or overlap another level's range: either would have this table,
+    // and every decode downstream, read header or neighbour bytes as texels.
+    // The ranges are not required to be in any order (the specification stores
+    // the smallest level first, so offsets commonly descend).
+    let data_start = header.level_index_offset + index_len as u64;
     let index_read = |base: usize| -> Result<u64, ContentError> {
         index
             .get(base..base + 8)
@@ -132,6 +144,7 @@ pub fn parse_levels(
     let depth = header.pixel_depth.max(1);
     let layers = header.layer_count.max(1) * header.face_count;
     let mut levels = Vec::with_capacity(mip_levels as usize);
+    let mut spans = Vec::with_capacity(mip_levels as usize);
     for level in 0..mip_levels {
         let base = level as usize * LEVEL_INDEX_ENTRY_BYTES;
         let offset = index_read(base)?;
@@ -146,6 +159,16 @@ pub fn parse_levels(
                 format!("KTX 2 level {level} extends past the end of the container"),
             ));
         }
+        if offset < data_start {
+            return Err(ContentError::format(
+                path,
+                format!(
+                    "KTX 2 level {level} starts at byte {offset}, inside the {} byte level index that ends at {data_start}",
+                    index_len
+                ),
+            ));
+        }
+        spans.push((offset, end, level));
         levels.push(TextureLevel {
             width: (header.pixel_width >> level).max(1),
             height: (header.pixel_height >> level).max(1),
@@ -155,6 +178,19 @@ pub fn parse_levels(
             size,
             uncompressed_size,
         });
+    }
+    spans.sort_unstable();
+    for pair in spans.windows(2) {
+        let (first_offset, first_end, _) = pair[0];
+        let (offset, end, level) = pair[1];
+        if offset < first_end {
+            return Err(ContentError::format(
+                path,
+                format!(
+                    "KTX 2 level {level} (bytes {offset}..{end}) overlaps the level at bytes {first_offset}..{first_end}"
+                ),
+            ));
+        }
     }
     Ok(levels)
 }
@@ -384,5 +420,143 @@ mod tests {
             .expect_err("bc7 not implemented");
         assert!(error.is_unsupported());
         assert_eq!(error.kind(), crate::error::ContentErrorKind::Unsupported);
+    }
+
+    /// A two-level 8x8 BC1 KTX 2 with both levels stored base-first (ascending
+    /// offsets, a valid non-overlapping layout): 80-byte header, two 24-byte
+    /// index entries, then level 0 (32 bytes) and level 1 (8 bytes).
+    fn bc1_ktx2_mipped() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&KTX2_IDENTIFIER);
+        push_u32(&mut bytes, 131); // VK_FORMAT_BC1_RGB_UNORM_BLOCK
+        push_u32(&mut bytes, 1); // typeSize
+        push_u32(&mut bytes, 8); // pixelWidth
+        push_u32(&mut bytes, 8); // pixelHeight
+        push_u32(&mut bytes, 0); // pixelDepth
+        push_u32(&mut bytes, 0); // layerCount
+        push_u32(&mut bytes, 1); // faceCount
+        push_u32(&mut bytes, 2); // levelCount
+        push_u32(&mut bytes, 0); // supercompressionScheme
+        push_u32(&mut bytes, 0); // dfdByteOffset
+        push_u32(&mut bytes, 0); // dfdByteLength
+        push_u32(&mut bytes, 0); // kvdByteOffset
+        push_u32(&mut bytes, 0); // kvdByteLength
+        push_u64(&mut bytes, 0); // sgdByteOffset
+        push_u64(&mut bytes, 0); // sgdByteLength
+        assert_eq!(bytes.len(), HEADER_BYTES);
+        push_u64(&mut bytes, 128); // level 0 byteOffset
+        push_u64(&mut bytes, 32); // level 0 byteLength
+        push_u64(&mut bytes, 32); // level 0 uncompressedByteLength
+        push_u64(&mut bytes, 160); // level 1 byteOffset
+        push_u64(&mut bytes, 8); // level 1 byteLength
+        push_u64(&mut bytes, 8); // level 1 uncompressedByteLength
+        assert_eq!(bytes.len(), HEADER_BYTES + 2 * LEVEL_INDEX_ENTRY_BYTES);
+        bytes.resize(128 + 32 + 8, 0x11);
+        bytes
+    }
+
+    /// The same chain in the specification's Mip Level Array order: the
+    /// smallest level first and the base level last, so the index entries
+    /// descend byte-wise (level 0 at 136, level 1 at 128), the layout every
+    /// mipped KTX 2 writer emits.
+    fn bc1_ktx2_spec_order() -> Vec<u8> {
+        let mut bytes = bc1_ktx2_mipped();
+        set_level_offset(&mut bytes, 0, 136);
+        set_level_offset(&mut bytes, 1, 128);
+        bytes
+    }
+
+    fn set_level_offset(bytes: &mut [u8], level: usize, offset: u64) {
+        let base = HEADER_BYTES + level * LEVEL_INDEX_ENTRY_BYTES;
+        bytes[base..base + 8].copy_from_slice(&offset.to_le_bytes());
+    }
+
+    #[test]
+    fn a_malformed_level_index_never_reads_header_bytes_as_texels() {
+        let path = Path::new("t.ktx2");
+        // The base-first layout parses: level 0 starts exactly at the end of
+        // the index, so the check must not refuse the boundary.
+        let info = parse(&bc1_ktx2_mipped(), path).expect("base-first layout");
+        assert_eq!(info.mip_levels, 2);
+        assert_eq!(info.levels[0].offset, 128);
+        assert_eq!(info.levels[1].offset, 160);
+        assert_eq!(info.data_offset, 128);
+
+        // A level whose range reaches into the 48-byte index (80..128).
+        for offset in [0u64, 96] {
+            let mut bytes = bc1_ktx2_mipped();
+            set_level_offset(&mut bytes, 0, offset);
+            let error = parse(&bytes, path).expect_err("offset inside the index");
+            assert_eq!(error.kind(), crate::error::ContentErrorKind::Format);
+            assert!(error.message().contains("level index"), "{}", error.message());
+        }
+
+        // The reviewed case: level 1 at offset 0 with length 8 fits inside the
+        // container, so before this check it decoded header bytes as BC1.
+        let mut bytes = bc1_ktx2_mipped();
+        set_level_offset(&mut bytes, 1, 0);
+        let error = parse(&bytes, path).expect_err("level 1 inside the index");
+        assert_eq!(error.kind(), crate::error::ContentErrorKind::Format);
+        assert!(error.message().contains("level index"), "{}", error.message());
+        // The streamed path shares the table, so it refuses the same index.
+        let streamed = crate::codec::stream::MipReader::open(bytes.as_slice(), path)
+            .err()
+            .expect("streamed open");
+        assert_eq!(streamed.kind(), crate::error::ContentErrorKind::Format);
+    }
+
+    #[test]
+    fn the_smallest_level_first_layout_parses_and_levels_read_where_the_index_says() {
+        let path = Path::new("t.ktx2");
+        // The specification's Mip Level Array order: level 1 (8 bytes) first,
+        // the 8x8 base level (32 bytes) last, so `levels[0].byteOffset` is the
+        // larger one. A reader that insisted on ascending offsets would refuse
+        // every conforming mipped file, which this test pins down.
+        let bytes = bc1_ktx2_spec_order();
+        let info = parse(&bytes, path).expect("smallest-first layout");
+        assert_eq!(info.levels[0].offset, 136);
+        assert_eq!(info.levels[0].size, 32);
+        assert_eq!(info.levels[1].offset, 128);
+        assert_eq!(info.levels[1].size, 8);
+
+        // Each level decodes its own range, in the level it was asked for.
+        let reader = crate::codec::stream::MipReader::open(bytes.as_slice(), path).expect("open");
+        assert_eq!(reader.level_range(1).expect("range"), 128..136);
+        let level = reader
+            .read_level(&crate::codec::BlockCodecRegistry::default(), 1)
+            .expect("level 1 decodes");
+        assert_eq!((level.width, level.height), (4, 4));
+        assert_eq!(level.data.len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn overlapping_level_ranges_are_refused() {
+        let path = Path::new("t.ktx2");
+        // Level 1 fully inside level 0's 128..160 range.
+        let mut bytes = bc1_ktx2_mipped();
+        set_level_offset(&mut bytes, 1, 140);
+        let error = parse(&bytes, path).expect_err("levels overlap");
+        assert_eq!(error.kind(), crate::error::ContentErrorKind::Format);
+        assert!(error.message().contains("overlaps"), "{}", error.message());
+
+        // Two levels starting at the same byte.
+        let mut bytes = bc1_ktx2_mipped();
+        set_level_offset(&mut bytes, 1, 128);
+        let error = parse(&bytes, path).expect_err("levels share a start");
+        assert_eq!(error.kind(), crate::error::ContentErrorKind::Format);
+        assert!(error.message().contains("overlaps"), "{}", error.message());
+
+        // Level 1 starting one byte before level 0 ends.
+        let mut bytes = bc1_ktx2_mipped();
+        set_level_offset(&mut bytes, 1, 159);
+        let error = parse(&bytes, path).expect_err("levels overlap by one byte");
+        assert_eq!(error.kind(), crate::error::ContentErrorKind::Format);
+        assert!(error.message().contains("overlaps"), "{}", error.message());
+
+        // The streamed path shares the table, so it refuses the same index.
+        let streamed = crate::codec::stream::MipReader::open(bytes.as_slice(), path)
+            .err()
+            .expect("streamed open");
+        assert_eq!(streamed.kind(), crate::error::ContentErrorKind::Format);
     }
 }

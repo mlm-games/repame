@@ -5,6 +5,10 @@
 //! level table, mirroring Godot's `modules/dds`. Formats and layouts the header
 //! can express but that this crate cannot decode are still represented in the
 //! header, so the refusal happens in the codec registry with a typed error.
+//! One exception: a pitched uncompressed header whose level offsets cannot be
+//! derived from the tight-row arithmetic is refused while the level table is
+//! built ([`parse_levels`]), because no decode downstream can tell padded rows
+//! apart.
 
 use std::path::Path;
 
@@ -18,6 +22,7 @@ const PIXEL_FORMAT_SIZE: u32 = 32;
 const HEADER_BYTES: usize = 128;
 const DX10_HEADER_BYTES: usize = 148;
 
+pub(crate) const DDSD_PITCH: u32 = 0x0000_0008;
 pub(crate) const DDSD_MIPMAPCOUNT: u32 = 0x0002_0000;
 pub(crate) const DDPF_ALPHAPIXELS: u32 = 0x0000_0001;
 pub(crate) const DDPF_ALPHAONLY: u32 = 0x0000_0002;
@@ -196,7 +201,9 @@ pub fn data_offset(header: &DdsHeader) -> u64 {
 /// whole chain, then the next). This is the exact arithmetic the streamed path
 /// and [`parse`] share. A declared chain that does not fit in `payload_len`
 /// bytes is a typed [`ContentErrorKind::Format`](crate::ContentErrorKind)
-/// error, never a panic or a silently short read.
+/// error, never a panic or a silently short read; an uncompressed header with
+/// `DDSD_PITCH` whose rows this arithmetic cannot describe is a typed
+/// [`ContentErrorKind::Unsupported`](crate::ContentErrorKind) error.
 pub fn parse_levels(
     header: &DdsHeader,
     payload_len: u64,
@@ -215,6 +222,30 @@ pub fn parse_levels(
                 header.width, header.height
             ),
         ));
+    }
+    // Every level's offset below, and every decode downstream, assumes rows
+    // are tightly packed (`surface_bytes`). A pitched uncompressed header
+    // stores no per-level pitch: with a mip chain the writer's stride decides
+    // where later levels start, and this table would read the end of one level
+    // plus the start of the next as the smaller one. A single level is only
+    // tightly packed when the stored pitch is the tight row size. Refuse both
+    // rather than return a table that decodes neighbouring bytes.
+    if header.flags & DDSD_PITCH != 0 && !header.format.is_block_compressed() {
+        let tight_row = u64::from(header.width) * header.format.bytes_per_block() as u64;
+        let pitched_row = u64::from(header.pitch_or_linear_size);
+        if mip_levels > 1 || pitched_row != tight_row {
+            return Err(ContentError::unsupported(
+                path,
+                format!(
+                    "pitched DDS rows are not supported ({} bytes per row for a {}x{} {} image, {} mip levels)",
+                    header.pitch_or_linear_size,
+                    header.width,
+                    header.height,
+                    header.format.as_str(),
+                    mip_levels
+                ),
+            ));
+        }
     }
     let is_volume = header.caps2 & DDSC2_VOLUME != 0
         || header
@@ -504,6 +535,7 @@ mod tests {
         push_u32(&mut bytes, 0); // caps2
         push_u32(&mut bytes, 0); // caps3
         push_u32(&mut bytes, 0); // caps4
+        push_u32(&mut bytes, 0); // reserved2
         assert_eq!(bytes.len(), 128);
         bytes.resize(128 + 8 * 8 * 4, 0x7f);
         bytes
@@ -535,6 +567,7 @@ mod tests {
         push_u32(&mut bytes, 0);
         push_u32(&mut bytes, 0);
         push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 0); // reserved2
         assert_eq!(bytes.len(), 128);
 
         let path = Path::new("mips.dds");
@@ -618,5 +651,104 @@ mod tests {
             .expect("decode");
         assert_eq!(decoded.format, TextureFormat::Rgba8);
         assert_eq!(decoded.data, vec![0x7f; 256]);
+    }
+
+    /// A legacy 24-bit RGB DDS that declares `DDSD_PITCH`: `width`x`height`,
+    /// `pitch` bytes per row, `mip_levels` levels, and `payload` bytes of
+    /// filled payload after the 128-byte header.
+    fn rgb8_pitched_dds(
+        width: u32,
+        height: u32,
+        pitch: u32,
+        mip_levels: u32,
+        payload: usize,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        push_u32(&mut bytes, DDS_MAGIC);
+        push_u32(&mut bytes, 124);
+        push_u32(&mut bytes, 0x0002_100f); // CAPS|HEIGHT|WIDTH|PIXELFORMAT|MIPMAPCOUNT|PITCH
+        push_u32(&mut bytes, height);
+        push_u32(&mut bytes, width);
+        push_u32(&mut bytes, pitch);
+        push_u32(&mut bytes, 0); // depth
+        push_u32(&mut bytes, mip_levels);
+        for _ in 0..11 {
+            push_u32(&mut bytes, 0); // reserved
+        }
+        push_u32(&mut bytes, 32); // pixel format size
+        push_u32(&mut bytes, 0x40); // RGB
+        push_u32(&mut bytes, 0); // four cc
+        push_u32(&mut bytes, 24); // bit count
+        push_u32(&mut bytes, 0x0000_00ff); // red mask
+        push_u32(&mut bytes, 0x0000_ff00); // green mask
+        push_u32(&mut bytes, 0x00ff_0000); // blue mask
+        push_u32(&mut bytes, 0); // alpha mask
+        push_u32(&mut bytes, 0x1000); // caps
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 0); // reserved2
+        assert_eq!(bytes.len(), 128);
+        bytes.resize(128 + payload, 0x21);
+        bytes
+    }
+
+    #[test]
+    fn pitched_mip_chain_is_refused_instead_of_read_at_tight_offsets() {
+        // 5x4 RGB8 with DWORD-aligned rows: pitch 16, so the packed chain is
+        // 64 + 16 + 4 bytes while the tight arithmetic this table uses needs
+        // 60 + 12 + 3. Level 1 would decode level 0's tail plus its first
+        // bytes, and a payload-fit check cannot see it because the padded file
+        // is larger, not smaller.
+        let path = Path::new("pitched.dds");
+        let bytes = rgb8_pitched_dds(5, 4, 16, 3, 64 + 16 + 4);
+        let header = parse_header(&bytes, path).expect("the header is representable");
+        assert_eq!(header.flags & DDSD_PITCH, DDSD_PITCH);
+        assert_eq!(header.pitch_or_linear_size, 16);
+        assert_eq!(header.format, TextureFormat::Rgb8);
+        assert_eq!(header.levels_declared(), 3);
+
+        for error in [
+            parse(&bytes, path).expect_err("whole-container parse"),
+            crate::codec::stream::MipReader::open(bytes.as_slice(), path)
+                .err()
+                .expect("streamed open"),
+        ] {
+            assert!(error.is_unsupported(), "{error}");
+            assert!(
+                error.message().contains("pitched DDS rows are not supported"),
+                "{}",
+                error.message()
+            );
+        }
+
+        // A tight base row does not make the smaller levels provable: the
+        // header stores only level 0's pitch, so a pitched chain is refused
+        // whatever its pitch.
+        let tight = rgb8_pitched_dds(8, 8, 24, 2, 8 * 3 * 8 + 4 * 3 * 4);
+        let error = parse(&tight, path).expect_err("a pitched chain is refused");
+        assert!(error.is_unsupported(), "{error}");
+        assert!(error.message().contains("pitched"), "{}", error.message());
+    }
+
+    #[test]
+    fn a_pitched_header_is_only_accepted_when_one_level_is_tight() {
+        let path = Path::new("tight.dds");
+        // 8x8 RGBA8 with the pitch flag set to the tight row: the single level
+        // is tightly packed and still decodes.
+        let mut bytes = rgba8_dds();
+        bytes[8..12].copy_from_slice(&0x0000_100fu32.to_le_bytes());
+        let info = parse(&bytes, path).expect("pitch equals the tight row");
+        assert_eq!(info.levels[0].size, 256);
+        let decoded = crate::codec::BlockCodecRegistry::default()
+            .decode(&bytes, path)
+            .expect("decode");
+        assert_eq!(decoded.data, vec![0x7f; 256]);
+
+        // 5x4 RGB8 with pitch 16: one level, padded rows, refused.
+        let error = parse(&rgb8_pitched_dds(5, 4, 16, 1, 64), path)
+            .expect_err("padded rows are refused");
+        assert!(error.is_unsupported(), "{error}");
+        assert!(error.message().contains("pitched"), "{}", error.message());
     }
 }

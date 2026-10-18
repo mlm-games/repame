@@ -5,8 +5,8 @@
 //! that touches the clock:
 //!
 //! ```ignore
-//! let live = run.playing() && !run.transitional();
 //! let suspended = self.platform.suspends_gameplay() && !run.transitional();
+//! let live = run.playing() && !run.transitional() && !suspended;
 //! self.sim.time_scale = if suspended { 0.0 } else { 1.0 };
 //! if live { schedule.run(&mut world); }
 //! ```
@@ -31,7 +31,8 @@ use repame_sim::Sim;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GameState {
     /// The run is playing: not on a menu, not in a break, not paused. The host
-    /// is told gameplay is running only while this holds.
+    /// is told gameplay is running while this holds and nothing else does:
+    /// see [`Suspend::host_gameplay`].
     pub playing: bool,
     /// A transition is in flight: a run transition, or the game's own break
     /// screen while it waits for an ad.
@@ -139,20 +140,24 @@ impl Suspend {
         } else {
             None
         };
+        // Gameplay systems run only when a run is playing and nothing holds it
+        // back: a transition, a game-side modal, an ad or a host-side pause
+        // covers the screen the same way, and running spawners, timers and
+        // input edges under any of them is a bug the games kept shipping.
+        let live = game.playing && !game.transitional && !game.modal && !ad && !away;
         Self {
             // A transition runs on the raw clock whichever way this falls: the
             // transition itself is what ends it.
             suspended: cause.is_some() && !game.transitional,
-            // Gameplay systems run only when a run is playing and neither a
-            // transition nor a modal is in flight.
-            live: game.playing && !game.transitional && !game.modal,
+            live,
             // Sound stops for the player's own mute and whenever the game is
             // not the thing on screen.
             silenced: game.muted || !portal.audio_enabled || ad || away,
             // The host counts impressions from time it believes is gameplay. A
             // transition or a modal is the game's own screen and is not the
-            // host's business, so neither is reported.
-            host_gameplay: game.playing && !ad && !away,
+            // host's business, so neither is reported: what is reported is
+            // exactly when gameplay systems run.
+            host_gameplay: live,
             cause: if game.transitional { None } else { cause },
         }
     }
@@ -163,9 +168,10 @@ impl Suspend {
         self.suspended
     }
 
-    /// Gameplay systems run this frame (the games' `live` flag). The world may
-    /// still tick under a modal or a transition, so this is not the negation of
-    /// [`Suspend::suspended`].
+    /// Gameplay systems run this frame (the games' `live` flag): a run is
+    /// playing and nothing covers it, not a transition, a modal, an ad or the
+    /// host. The world still ticks under a transition and the clock still runs,
+    /// so this is not the negation of [`Suspend::suspended`].
     pub fn live(&self) -> bool {
         self.live
     }
@@ -175,7 +181,9 @@ impl Suspend {
         self.silenced
     }
 
-    /// Whether the host should count gameplay as running this frame.
+    /// Whether the host should count gameplay as running this frame: the same
+    /// answer as [`Suspend::live`], because a transition or a modal is the
+    /// game's own screen and impression counts are contractual.
     pub fn host_gameplay(&self) -> bool {
         self.host_gameplay
     }
@@ -245,6 +253,8 @@ mod tests {
 
             let ad = view.ad_pending || view.ad_visible;
             let away = view.host_paused || view.backgrounded;
+            let live =
+                game_state.playing && !game_state.transitional && !game_state.modal && !ad && !away;
             let held = ad || away || game_state.modal;
             let reported = {
                 if view.backgrounded {
@@ -274,11 +284,7 @@ mod tests {
                 },
                 "cause at {bits:#011b}"
             );
-            assert_eq!(
-                decision.live(),
-                game_state.playing && !game_state.transitional && !game_state.modal,
-                "gameplay at {bits:#011b}"
-            );
+            assert_eq!(decision.live(), live, "gameplay at {bits:#011b}");
             assert_eq!(
                 decision.silenced(),
                 game_state.muted || !view.audio_enabled || ad || away,
@@ -286,7 +292,7 @@ mod tests {
             );
             assert_eq!(
                 decision.host_gameplay(),
-                game_state.playing && !ad && !away,
+                live,
                 "host gameplay at {bits:#011b}"
             );
             assert_eq!(

@@ -353,12 +353,13 @@ mod tests {
         push_u32(&mut bytes, 0);
         push_u32(&mut bytes, 0x4010_0008); // caps
         push_u32(&mut bytes, 0); // caps2
-        push_u32(&mut bytes, 0);
-        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 0); // caps3
+        push_u32(&mut bytes, 0); // caps4
+        push_u32(&mut bytes, 0); // reserved2
         assert_eq!(bytes.len(), 128);
         for level in 0..4u32 {
-            let count = if level == 0 { 8 } else { 1 };
-            for _ in 0..count {
+            let blocks = if level == 0 { 4 } else { 1 };
+            for _ in 0..blocks {
                 // Opaque white: color0 = white, indices = 0.
                 bytes.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]);
             }
@@ -368,8 +369,10 @@ mod tests {
     }
 
     /// A two-level, 8x8 BC1 KTX 2 with the standard chain layout: 80-byte
-    /// header, 48-byte index, then both levels' payloads.
+    /// header, 48-byte level index, a 48-byte DFD placeholder the header
+    /// declares, then both levels' payloads at 176 and 208.
     fn bc1_ktx2_mipped() -> Vec<u8> {
+        const DFD_BYTES: usize = 48;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&KTX2_IDENTIFIER);
         push_u32(&mut bytes, 131); // VK_FORMAT_BC1_RGB_UNORM_BLOCK
@@ -381,25 +384,29 @@ mod tests {
         push_u32(&mut bytes, 1);
         push_u32(&mut bytes, 2); // level count
         push_u32(&mut bytes, 0); // supercompression
-        push_u32(&mut bytes, 176); // dfd offset
-        push_u32(&mut bytes, 0);
+        let index_end = ktx2::HEADER_BYTES + 2 * ktx2::LEVEL_INDEX_ENTRY_BYTES;
+        push_u32(&mut bytes, index_end as u32); // dfd offset
+        push_u32(&mut bytes, DFD_BYTES as u32); // dfd length
         push_u32(&mut bytes, 0);
         push_u32(&mut bytes, 0);
         push_u64(&mut bytes, 0);
         push_u64(&mut bytes, 0);
         assert_eq!(bytes.len(), ktx2::HEADER_BYTES);
-        let level0_offset = (ktx2::HEADER_BYTES + 2 * ktx2::LEVEL_INDEX_ENTRY_BYTES) as u64;
+        let level0_offset = (index_end + DFD_BYTES) as u64;
         push_u64(&mut bytes, level0_offset);
         push_u64(&mut bytes, 32);
         push_u64(&mut bytes, 32);
         push_u64(&mut bytes, level0_offset + 32);
         push_u64(&mut bytes, 8);
         push_u64(&mut bytes, 8);
-        assert_eq!(bytes.len(), 176);
+        assert_eq!(bytes.len(), index_end);
+        bytes.resize(level0_offset as usize, 0); // DFD placeholder
+        // Opaque white: color0 0xFFFF > color1, all indices 0.
+        const WHITE_BLOCK: [u8; 8] = [0xFF, 0xFF, 0x00, 0x00, 0, 0, 0, 0];
         for _ in 0..4 {
-            bytes.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0x1B, 0x1B, 0x1B, 0x1B]);
+            bytes.extend_from_slice(&WHITE_BLOCK);
         }
-        bytes.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0x1B, 0x1B, 0x1B, 0x1B]);
+        bytes.extend_from_slice(&WHITE_BLOCK);
         assert_eq!(bytes.len(), 216);
         bytes
     }

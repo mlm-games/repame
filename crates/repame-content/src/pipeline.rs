@@ -250,7 +250,15 @@ impl<S: Storage> AssetPipeline<S> {
                         "content file name is not valid UTF-8",
                     ));
                 };
-                if is_output(name) || name.starts_with('.') {
+                if name.starts_with('.') {
+                    continue;
+                }
+                // The outputs are skipped only where the pipeline writes them:
+                // the source root. A game may legitimately ship a nested source
+                // named `assets.ron` or `assets.pack`, and the development store
+                // serves whatever exists, so skipping it here would make it
+                // present in development and missing when packed.
+                if is_output(name) && child.parent() == Some(self.source_root.as_path()) {
                     continue;
                 }
                 if self.storage.is_dir(&child) {
@@ -354,6 +362,9 @@ fn image_extensions() -> &'static [&'static str] {
     })
 }
 
+/// The pipeline's own two output names. [`AssetPipeline::sources`] skips them
+/// only where the pipeline writes them, at the source root; a nested file of
+/// the same name is a source like any other.
 fn is_output(name: &str) -> bool {
     name == ASSET_MANIFEST_FILE || name == ASSET_PACK_FILE
 }
@@ -460,6 +471,7 @@ mod tests {
     use repame_atlas::AtlasDesc;
 
     use crate::package::Package;
+    use crate::vfs::{AssetVfs, LooseAssets};
 
     fn tiny_png(width: u32, height: u32) -> Vec<u8> {
         let image = image::RgbaImage::from_pixel(width, height, image::Rgba([10, 20, 30, 255]));
@@ -573,6 +585,75 @@ mod tests {
         assert_eq!(first.manifest.total_size(), summed);
         assert_eq!(first.atlas_pages(), Some(1));
         assert!(first.manifest.atlas().is_some(), "atlas plan is in the manifest");
+    }
+
+    #[test]
+    fn nested_output_named_sources_are_scanned_and_packed() {
+        let storage = game_tree();
+        storage
+            .write(Path::new("game/art/levels/assets.ron"), b"(name: \"nested\")")
+            .unwrap();
+        storage
+            .write(Path::new("game/art/levels/assets.pack"), b"nested pack bytes")
+            .unwrap();
+        // Outputs land in the source root: the root copies are skipped, the
+        // nested sources named the same are not, so `pack` carries everything
+        // the development store can read.
+        let build = AssetPipeline::with_storage("game/art", storage.clone())
+            .expect("pipeline")
+            .build("game/art")
+            .expect("build");
+        let paths: Vec<&str> = build
+            .manifest
+            .entries()
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "beep.wav",
+                "levels/assets.pack",
+                "levels/assets.ron",
+                "notes.txt",
+                "tile.png",
+                "ui/hero.png",
+            ]
+        );
+        assert!(storage.read(Path::new("game/art/assets.pack")).unwrap().is_some());
+        let archive = Path::new("game/art/assets.pack");
+        let pack = storage.read(archive).unwrap().expect("pack");
+        let package = Package::read(pack.clone(), archive).expect("package");
+        let nested = AssetPath::parse("levels/assets.ron").expect("path");
+        assert_eq!(
+            package
+                .read_file(nested.entry_name(), archive)
+                .expect("nested source is packed"),
+            b"(name: \"nested\")"
+        );
+        // The packaged store resolves every manifest entry, so the nested
+        // sources named like the outputs cannot be present in development and
+        // missing when shipped.
+        let packed = AssetVfs::from_bytes(pack, archive).expect("packed store");
+        let dev = LooseAssets::open_with_storage("game/art", storage.clone()).expect("dev store");
+        assert!(packed.contains(&nested), "the archive holds the nested source");
+        for entry in build.manifest.entries() {
+            assert_eq!(
+                dev.read(&entry.path).expect("dev read"),
+                packed.read(&entry.path).expect("packed read"),
+                "reading `{}` differs between dev and packed",
+                entry.path
+            );
+        }
+
+        // A second build over the same tree (root outputs now present) is
+        // stable: the nested sources are scanned again, the root outputs are
+        // still skipped.
+        let second = AssetPipeline::with_storage("game/art", storage.clone())
+            .expect("pipeline")
+            .build("game/art")
+            .expect("second build");
+        assert_eq!(build.manifest, second.manifest);
     }
 
     #[test]

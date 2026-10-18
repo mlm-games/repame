@@ -2308,6 +2308,15 @@ impl BatchDesc {
     }
 }
 
+/// Sampler clamp for the highest LOD a batch's page array can hold: the last
+/// level [`BatchDesc::mip_levels`] creates. A fixed `1.0` capped every
+/// implicitly computed LOD (material programs sample through `textureSample`)
+/// at level 1, so streamed levels from 2 up were unreachable by any in-engine
+/// shader.
+fn sampler_lod_max_clamp(mips: u32) -> f32 {
+    mips.saturating_sub(1) as f32
+}
+
 impl Default for BatchDesc {
     fn default() -> Self {
         Self {
@@ -5699,7 +5708,7 @@ impl SceneBatch {
             min_filter: min,
             mipmap_filter: mipmap,
             lod_min_clamp: 0.0,
-            lod_max_clamp: 1.0,
+            lod_max_clamp: sampler_lod_max_clamp(self.desc.mip_levels()),
             compare: None,
             anisotropy_clamp: 1,
             border_color: None,
@@ -8577,6 +8586,22 @@ mod tests {
             texels: vec![0; 512 * 512 * 4],
         });
         assert_eq!(plain.mip_uploads.len(), 1);
+    }
+
+    #[test]
+    fn sampler_lod_clamp_covers_every_declared_level() {
+        assert_eq!(sampler_lod_max_clamp(1), 0.0);
+        assert_eq!(sampler_lod_max_clamp(2), 1.0);
+        assert_eq!(sampler_lod_max_clamp(3), 2.0);
+        // The clamp follows the level count the page array actually gets,
+        // after `mip_levels` clamps to the page edge's chain.
+        let desc = BatchDesc {
+            layer_size: 4,
+            mips: 9,
+            ..BatchDesc::default()
+        };
+        assert_eq!(desc.mip_levels(), 3);
+        assert_eq!(sampler_lod_max_clamp(desc.mip_levels()), 2.0);
     }
 
     #[test]

@@ -422,6 +422,19 @@ impl BlockCodecRegistry {
         let info_level = info.level(level).ok_or_else(|| {
             ContentError::format(path, format!("texture has no mip level {level}"))
         })?;
+        let codec = if info.format.is_block_compressed() {
+            Some(self.codec(info.format).ok_or_else(|| {
+                ContentError::unsupported(
+                    path,
+                    format!(
+                        "no block codec for `{}`; convert the texture to BC1, BC3, BC4 or an uncompressed format",
+                        info.format.as_str()
+                    ),
+                )
+            })?)
+        } else {
+            None
+        };
         let expected = info
             .format
             .surface_bytes(info_level.width, info_level.height);
@@ -434,24 +447,14 @@ impl BlockCodecRegistry {
                 ),
             ));
         }
-        if !info.format.is_block_compressed() {
+        let Some(codec) = codec else {
             return Ok(DecodedImage {
                 format: info.format,
                 width: info_level.width,
                 height: info_level.height,
                 data: data[..expected].to_vec(),
             });
-        }
-
-        let codec = self.codec(info.format).ok_or_else(|| {
-            ContentError::unsupported(
-                path,
-                format!(
-                    "no block codec for `{}`; convert the texture to BC1, BC3, BC4 or an uncompressed format",
-                    info.format.as_str()
-                ),
-            )
-        })?;
+        };
         let width = info_level.width;
         let height = info_level.height;
         let block_bytes = info.format.bytes_per_block();

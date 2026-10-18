@@ -500,10 +500,11 @@ mod tests {
         push_u32(&mut bytes, 0);
         push_u32(&mut bytes, 0);
         push_u32(&mut bytes, 0);
-        push_u32(&mut bytes, 0x4010_0008);
-        push_u32(&mut bytes, 0);
-        push_u32(&mut bytes, 0);
-        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 0x4010_0008); // caps
+        push_u32(&mut bytes, 0); // caps2
+        push_u32(&mut bytes, 0); // caps3
+        push_u32(&mut bytes, 0); // caps4
+        push_u32(&mut bytes, 0); // reserved2
         assert_eq!(bytes.len(), 128);
         for level in 0..2 {
             let blocks = if level == 0 { 4 } else { 1 };
@@ -577,10 +578,15 @@ mod tests {
                 entry.path
             );
         }
-        // The manifest is a content path like any other.
+        // The archive carries the manifest as an entry; the same bytes are the
+        // file the output root holds, which is where the dev store reads the
+        // manifest from when the sources live in an external checkout.
         let manifest_path = AssetPath::parse(ASSET_MANIFEST_FILE).expect("path");
         assert_eq!(
-            dev.read(&manifest_path).expect("dev manifest"),
+            storage
+                .read(&root.join(ASSET_MANIFEST_FILE))
+                .unwrap()
+                .expect("written manifest"),
             packed.read(&manifest_path).expect("packed manifest")
         );
 

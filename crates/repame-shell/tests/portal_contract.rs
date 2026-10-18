@@ -151,12 +151,13 @@ fn an_ad_holds_the_clock_and_the_hosts_gameplay_count_until_it_ends() {
     script
         .borrow_mut()
         .says(PortalEvent::AdOpened(AdKind::Interstitial));
+    host.update(Duration::ZERO);
+    assert!(host.ad_visible() && host.ad_pending());
     script.borrow_mut().says(PortalEvent::AdEnded {
         kind: AdKind::Interstitial,
         ending: AdEnding::Closed,
     });
     host.update(Duration::ZERO);
-    assert!(host.ad_visible());
     assert_eq!(
         host.take_reports(),
         vec![
@@ -235,8 +236,9 @@ fn a_rewarded_ad_pays_only_for_its_reward_point_and_never_outlives_its_deadline(
         "only the rewarded kind pays"
     );
 
-    // A host that never ends the ad: the deadline releases the game, and the
-    // host's late report cannot revive the break or pay a reward.
+    // A host that never ends the ad: the deadline releases the game, the
+    // released ad holds the next request, and the reward point the host reports
+    // late still pays when that ad ends.
     host.show_ad(AdKind::Rewarded, Some("revive"))
         .expect("the host takes the request");
     script
@@ -244,6 +246,13 @@ fn a_rewarded_ad_pays_only_for_its_reward_point_and_never_outlives_its_deadline(
         .says(PortalEvent::AdOpened(AdKind::Rewarded));
     host.update(Duration::from_secs(1));
     assert!(host.ad_visible() && host.ad_pending());
+    assert_eq!(
+        host.take_reports(),
+        vec![PortalReport::AdOpened {
+            kind: AdKind::Rewarded
+        }],
+        "the open is reported before the deadline runs out"
+    );
     host.update(REWARDED_TIMEOUT - Duration::from_secs(2));
     assert!(host.ad_pending(), "still inside the deadline");
     host.update(Duration::from_secs(1));
@@ -258,6 +267,13 @@ fn a_rewarded_ad_pays_only_for_its_reward_point_and_never_outlives_its_deadline(
     );
     assert!(!host.ad_pending() && !host.ad_visible());
 
+    // The released ad's events are still to come, so they cannot be read as a
+    // new ad's: a second request waits for the end of the one before it.
+    assert_eq!(
+        host.show_ad(AdKind::Rewarded, Some("revive")),
+        Err(AdRefused::Busy),
+        "the released ad's end has not landed yet"
+    );
     script.borrow_mut().says(PortalEvent::AdRewarded);
     script.borrow_mut().says(PortalEvent::AdEnded {
         kind: AdKind::Rewarded,
@@ -266,9 +282,15 @@ fn a_rewarded_ad_pays_only_for_its_reward_point_and_never_outlives_its_deadline(
     host.update(Duration::from_secs(1));
     assert_eq!(
         host.take_reports(),
-        Vec::new(),
-        "a released break stays released"
+        vec![PortalReport::AdFinished {
+            kind: AdKind::Rewarded,
+            outcome: AdOutcome::Completed,
+        }],
+        "the reward point the host reported late is the promise, so it pays"
     );
+
+    host.show_ad(AdKind::Rewarded, Some("revive"))
+        .expect("the released ad ended, so the next request is taken");
 }
 
 #[test]
@@ -479,6 +501,14 @@ fn the_no_portal_backend_refuses_every_request_and_says_why() {
     assert_eq!(
         host.notify(HostNotice::GameplayStarted),
         Err(Refusal::NoPortal)
+    );
+    assert_eq!(
+        host.take_reports(),
+        vec![PortalReport::NoticeDropped {
+            notice: HostNotice::GameplayStarted,
+            reason: Refusal::NoPortal,
+        }],
+        "a refused notice is reported, never swallowed"
     );
 
     // A notice nobody took is reported, never swallowed.

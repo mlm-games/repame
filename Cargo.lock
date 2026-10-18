@@ -1757,9 +1757,9 @@ dependencies = [
 
 [[package]]
 name = "game-utils"
-version = "0.3.3"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4026f5e9e17132bea3532a4f8ce2f4b380b86ad69974ead9fcdc99a0e010d0c8"
+checksum = "3e46f7595ddf55ca4bdcb04a8dec6522758306e719684b73febb3974339c584b"
 dependencies = [
  "directories",
  "fluent-bundle",
@@ -4702,13 +4702,6 @@ dependencies = [
  "log",
  "serde",
  "web-time",
-]
-
-[[package]]
-name = "repame-sprite"
-version = "0.3.26"
-dependencies = [
- "repame-view2d",
 ]
 
 [[package]]

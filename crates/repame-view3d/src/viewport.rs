@@ -20,9 +20,25 @@ use repose_ui::Embedded;
 use super::camera::OrbitCamera;
 use super::mesh::MeshGroup;
 use super::pick::{MeshHit, pick_ray};
-use super::render::{BatchDesc, SceneBatch, SceneLight, SceneUpload};
+use super::render::{BatchDesc, MipUpload, SceneBatch, SceneLight, SceneUpload};
 use super::render::{paint_scene_with_callback, prepare_scene_with_id};
 use super::skin::GpuSkinning;
+
+/// One page's finest resident mip level, staged on [`Frame3d`] for the
+/// viewport to apply with
+/// [`SceneBatch::set_page_level`](crate::SceneBatch::set_page_level).
+///
+/// A streaming game resolves each visible page with
+/// [`TextureResidency::resolve_level`](crate::TextureResidency::resolve_level):
+/// `Some(level)` publishes the finest level the page actually holds, `None`
+/// publishes "nothing resident" (the page draws its tint). A page with no
+/// [`Frame3d::page_levels`] entry keeps level 0, the historical fully
+/// resident sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageLevel {
+    pub page: u32,
+    pub level: Option<u32>,
+}
 
 /// Everything the viewport draws this frame. Plain data, snapshot per frame.
 ///
@@ -35,7 +51,12 @@ use super::skin::GpuSkinning;
 /// Textures ride the same snapshot: [`Frame3d::uploads`] feeds the batch
 /// texture array once per frame (games drain their image/atlas source
 /// here), and each group samples one page (see
-/// [`MeshGroup`] `texture_page`).
+/// [`MeshGroup`] `texture_page`). Streamed mips ride the same handoff:
+/// [`Frame3d::mip_uploads`] carries a
+/// [`TextureResidency`](crate::TextureResidency) drain and
+/// [`Frame3d::page_levels`] publishes each page's finest resident level, so
+/// a game streaming textures stages its frame without ever touching a
+/// [`SceneBatch`] itself.
 #[derive(Clone, Debug)]
 pub struct Frame3d {
     pub cam: OrbitCamera,
@@ -51,6 +72,21 @@ pub struct Frame3d {
     /// Per-frame texture uploads into the batch array. Applied exactly
     /// once (sprite-batch `AtlasUpload` contract).
     pub uploads: Vec<SceneUpload>,
+    /// Per-frame streamed mip levels, drained from a
+    /// [`TextureResidency`](crate::TextureResidency) with
+    /// [`take_uploads`](crate::TextureResidency::take_uploads). Applied
+    /// exactly once, in the same render-thread pass as
+    /// [`uploads`](Frame3d::uploads); an out-of-range or mis-sized level
+    /// drops with the batch's warning, never a partial write.
+    pub mip_uploads: Vec<MipUpload>,
+    /// Per-page resident levels, resolved with
+    /// [`TextureResidency::resolve_level`](crate::TextureResidency::resolve_level)
+    /// and applied in order with
+    /// [`SceneBatch::set_page_level`](crate::SceneBatch::set_page_level).
+    /// `Some(level)` samples that level, `None` means nothing is resident
+    /// (the page draws its tint), and a page not listed keeps level 0, the
+    /// historical fully resident sample. The last entry for a page wins.
+    pub page_levels: Vec<PageLevel>,
     /// Batch texture shape the groups pack against. Must match the batch
     /// the viewport draws through (`Viewport3d` takes it explicitly, so
     /// mismatches fail at the call site).
@@ -163,6 +199,8 @@ impl Default for Frame3d {
             groups: Vec::new(),
             materials: Vec::new(),
             uploads: Vec::new(),
+            mip_uploads: Vec::new(),
+            page_levels: Vec::new(),
             desc: BatchDesc::default(),
             light: SceneLight::default(),
             shadow: None,
@@ -249,6 +287,26 @@ impl Frame3d {
             if super::chunk::validate_group(draw.group) {
                 self.groups.push(draw.group.clone());
             }
+        }
+    }
+
+    /// Append streamed mip levels for this frame (see
+    /// [`mip_uploads`](Frame3d::mip_uploads)); pass the frame's
+    /// [`TextureResidency::take_uploads`](crate::TextureResidency::take_uploads)
+    /// drain, so each level is handed off once.
+    pub fn extend_mip_uploads(&mut self, uploads: impl IntoIterator<Item = MipUpload>) {
+        self.mip_uploads.extend(uploads);
+    }
+
+    /// Publish `page`'s finest resident level for this frame (see
+    /// [`page_levels`](Frame3d::page_levels)), typically
+    /// [`TextureResidency::resolve_level`](crate::TextureResidency::resolve_level)'s
+    /// answer. Publishing a page twice keeps the last level, like two
+    /// [`SceneBatch::set_page_level`] calls.
+    pub fn publish_page_level(&mut self, page: u32, level: Option<u32>) {
+        match self.page_levels.iter_mut().find(|entry| entry.page == page) {
+            Some(entry) => entry.level = level,
+            None => self.page_levels.push(PageLevel { page, level }),
         }
     }
 }
@@ -859,6 +917,13 @@ impl WgpuCallback for GpuViewport3d {
             batch.push_skinned_for_pass(s, scene_pass);
         }
         batch.extend_uploads(self.input.uploads.iter().cloned());
+        // Streamed mips ride the same drain-once handoff as the page uploads:
+        // levels write their own mip, then the per-page resident levels tell
+        // every textured draw which mip of each page to sample.
+        batch.extend_mip_uploads(self.input.mip_uploads.iter().cloned());
+        for published in &self.input.page_levels {
+            batch.set_page_level(published.page, published.level);
+        }
         batch.set_particles(self.input.particles.clone());
         batch.set_probes(&self.input.probes);
         // Occlusion: a caller-staged state wins outright; otherwise the
@@ -1100,5 +1165,199 @@ mod tests {
             cam.eye()
         );
         assert!(dir.dot(cam.target - eye) > 0.0, "into the scene: {dir:?}");
+    }
+
+    /// End-to-end GPU proof that a viewport frame carries streamed mips:
+    /// [`Frame3d::mip_uploads`] and [`Frame3d::publish_page_level`] reach the
+    /// batch through the public [`Viewport3d`] view's `prepare`, exactly like
+    /// driving a `SceneBatch` directly. One frame, two pages: page 0 fully
+    /// resident at level 0, page 1 resident only from level 1 (its level 0 is
+    /// never written). The partially resident page must sample its finest
+    /// resident level (green level 1), never the zero-filled level 0; the
+    /// fully resident page's half of the frame must be byte-identical to the
+    /// same frame staged the pre-change way ([`Frame3d::uploads`] only,
+    /// nothing published); an explicit `None` publication draws the tint
+    /// instead of any mip. Skips with a warning where no GPU exists.
+    #[test]
+    fn offscreen_viewport_carries_streamed_mips_and_page_levels() {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        use std::rc::Rc;
+
+        use repose_core::RenderContext;
+        use repose_render_wgpu::{apply_render_commands, offscreen::OffscreenRenderer};
+        use repose_ui::{Interactions, TextFieldState, layout_and_paint};
+
+        const SIZE: u32 = 64;
+
+        let desc = BatchDesc {
+            layer_size: 2,
+            layers: 2,
+            mips: 2,
+            ..BatchDesc::default()
+        };
+        // Nearly top-down with a quarter-turn yaw: the screen's left half is
+        // the page-0 quad's face, the right half page 1's (the split is the
+        // world x = 0 line, which projects to the exact screen center).
+        let cam = OrbitCamera {
+            target: glam::Vec3::ZERO,
+            yaw: std::f32::consts::FRAC_PI_2,
+            pitch: 1.45,
+            dist: 12.0,
+            fov_y_deg: 30.0,
+        };
+
+        fn half_quad(page: u32, left: bool) -> MeshGroup {
+            let mut group = MeshGroup {
+                texture_page: page,
+                depth_test: true,
+                ..Default::default()
+            };
+            let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+            let (a, b, c, d) = if left {
+                (
+                    [-10.0, 5.0, 5.0],
+                    [0.0, 5.0, 5.0],
+                    [0.0, 5.0, -5.0],
+                    [-10.0, 5.0, -5.0],
+                )
+            } else {
+                (
+                    [0.0, 5.0, 5.0],
+                    [10.0, 5.0, 5.0],
+                    [10.0, 5.0, -5.0],
+                    [0.0, 5.0, -5.0],
+                )
+            };
+            group.push_quad_textured(a, b, c, d, [1.0, 1.0, 1.0], uvs);
+            group
+        }
+
+        fn frame(cam: OrbitCamera, desc: BatchDesc) -> Frame3d {
+            Frame3d {
+                cam,
+                desc,
+                viewport_px: [SIZE as f32, SIZE as f32],
+                occlusion_feed: None,
+                ..Frame3d::default()
+            }
+        }
+
+        /// Layout + paint the public [`Viewport3d`] view into an offscreen
+        /// target (the pose-sweep harness, one frame).
+        fn render(frame: Frame3d, id: &str, desc: BatchDesc) -> Option<Vec<u8>> {
+            let mut renderer = match OffscreenRenderer::new_blocking(SIZE, SIZE, 1) {
+                Ok(renderer) => renderer,
+                Err(error) => {
+                    eprintln!("SKIP viewport streamed-mip test (no GPU): {error}");
+                    return None;
+                }
+            };
+            let ctx = RenderContext::new();
+            let geom = GeomHandle::new();
+            let view = Viewport3d(frame, geom, id, desc, |_| {});
+            let states: HashMap<u64, Rc<RefCell<TextFieldState>>> = HashMap::new();
+            let (scene, _hits, _sems) =
+                layout_and_paint(&view, (SIZE, SIZE), &states, &Interactions::default(), None);
+            apply_render_commands(renderer.renderer_mut(), ctx.drain()).log_failures();
+            Some(
+                renderer
+                    .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+                    .expect("offscreen render"),
+            )
+        }
+
+        let pixel = |px: &[u8], x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * SIZE + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+
+        // Pre-change input: page 0's level 0 through the historical per-frame
+        // texture upload, nothing published, page 1 never written.
+        let mut baseline = frame(cam, desc);
+        baseline.push(half_quad(0, true));
+        baseline.push(half_quad(1, false));
+        baseline.uploads.push(SceneUpload {
+            page: 0,
+            x: 0,
+            y: 0,
+            w: 2,
+            h: 2,
+            rgba: [255, 0, 0, 255].repeat(4),
+        });
+        let Some(base) = render(baseline, "test.viewport.stream.base", desc) else {
+            return;
+        };
+        assert_eq!(
+            pixel(&base, 16, 32),
+            [255, 0, 0, 255],
+            "the baseline probe must land on the fully resident page"
+        );
+
+        // Streamed input: page 0 drained at level 0 and published, page 1
+        // drained at level 1 (its level 0 never written) and published at
+        // level 1.
+        let mut streamed = frame(cam, desc);
+        streamed.push(half_quad(0, true));
+        streamed.push(half_quad(1, false));
+        streamed.extend_mip_uploads([
+            MipUpload {
+                page: 0,
+                level: 0,
+                width: 2,
+                height: 2,
+                texels: [255, 0, 0, 255].repeat(4),
+            },
+            MipUpload {
+                page: 1,
+                level: 1,
+                width: 1,
+                height: 1,
+                texels: vec![0, 255, 0, 255],
+            },
+        ]);
+        streamed.publish_page_level(0, Some(0));
+        streamed.publish_page_level(1, Some(1));
+        let Some(streamed_px) = render(streamed, "test.viewport.stream.mips", desc) else {
+            return;
+        };
+        assert_eq!(
+            pixel(&streamed_px, 16, 32),
+            [255, 0, 0, 255],
+            "the fully resident page samples its drained level 0"
+        );
+        assert_eq!(
+            pixel(&streamed_px, 48, 32),
+            [0, 255, 0, 255],
+            "the partially resident page samples its finest resident level 1, never the zero-filled level 0"
+        );
+
+        // Byte-identical: the fully resident page's half of the frame is the
+        // same frame the pre-change input produced (row by row, so the
+        // comparison is exact, not sampled).
+        for row in 0..SIZE {
+            let at = (row * SIZE * 4) as usize;
+            let end = at + (SIZE as usize / 2) * 4;
+            assert_eq!(
+                streamed_px[at..end],
+                base[at..end],
+                "fully resident page row {row} differs from the pre-change render"
+            );
+        }
+
+        // Nothing resident publishes `None` explicitly: the page draws its
+        // tint instead of any fabricated level.
+        let mut unresolved = frame(cam, desc);
+        unresolved.push(half_quad(0, true));
+        unresolved.push(half_quad(0, false));
+        unresolved.publish_page_level(0, None);
+        let Some(unresolved_px) = render(unresolved, "test.viewport.stream.none", desc) else {
+            return;
+        };
+        assert_eq!(
+            pixel(&unresolved_px, 16, 32),
+            [255, 255, 255, 255],
+            "nothing resident draws the tint, never an unwritten mip"
+        );
     }
 }

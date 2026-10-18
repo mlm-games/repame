@@ -502,12 +502,12 @@ mod tests {
     #[test]
     fn unsupported_formats_stay_typed_unsupported() {
         let mut bytes = bc1_ktx2_mipped();
-        bytes[12..16].copy_from_slice(&145u32.to_le_bytes()); // VK_FORMAT_BC7_UNORM_BLOCK
+        bytes[12..16].copy_from_slice(&143u32.to_le_bytes()); // VK_FORMAT_BC6H_UF16_BLOCK
         let reader = MipReader::open(bytes.as_slice(), Path::new("t.ktx2")).expect("open");
-        assert_eq!(reader.info().format, TextureFormat::Bc7);
+        assert_eq!(reader.info().format, TextureFormat::Bc6hUf16);
         let error = reader
             .read_level(&BlockCodecRegistry::default(), 0)
-            .expect_err("bc7 has no codec");
+            .expect_err("bc6h has no codec");
         assert!(error.is_unsupported());
     }
 

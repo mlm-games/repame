@@ -22,7 +22,10 @@
 //! * [`TextureResidency`] - streamed texture mip residency ([`texture_stream`]):
 //!   a byte budget, desired levels from the projected on-screen size, level
 //!   hysteresis, and background level loads whose stale arrivals drop exactly
-//!   like stale chunk builds.
+//!   like stale chunk builds. The frame carries the drain
+//!   ([`Frame3d::mip_uploads`]) and the resolved per-page levels
+//!   ([`Frame3d::publish_page_level`]), so a streaming game needs no direct
+//!   [`SceneBatch`] access.
 //!
 //! ```ignore
 //! let mut frame = Frame3d::default();
@@ -105,7 +108,10 @@ pub use reflection::{
     MAX_PROBES, MAX_PROBE_RESOLUTION, MIN_PROBE_RESOLUTION, ProbeError, ProbeSettings,
     probe_weight,
 };
-pub use render::{BatchDesc, LightRig, MipUpload, SceneBatch, SceneFilter, SceneLight, SceneUpload};
+pub use render::{
+    BatchDesc, LightRig, MAX_RESIDENT_PAGES, MipUpload, SceneBatch, SceneFilter, SceneLight,
+    SceneUpload,
+};
 pub use render::{paint_scene_with_id, prepare_scene_with_id};
 pub use shading::{ShadedBatch, ShadedGroup, ShaderCache, ShadingUniform, kcolor_view};
 pub use shadow::{
@@ -136,7 +142,9 @@ pub use textures::{
 pub use vertex::{
     IndexFormat, LayoutError, VertexAttribute, VertexFormat, VertexLayout, VertexSemantic,
 };
-pub use viewport::{CLICK_SLOP_PX, Frame3d, GeomHandle, View3dEvent, Viewport3d, ViewportGeom};
+pub use viewport::{
+    CLICK_SLOP_PX, Frame3d, GeomHandle, PageLevel, View3dEvent, Viewport3d, ViewportGeom,
+};
 pub use voxel::{
     CHUNK_SIZE, Cell, ChunkMeshInput, ChunkMeshOutput, DIRS, FaceKind, THIN_HEIGHT, VoxelShape,
     VoxelSource, build_chunk_mesh, build_chunk_mesh_lod, neighbor_occludes, world_dir_to_local,

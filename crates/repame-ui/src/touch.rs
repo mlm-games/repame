@@ -432,7 +432,7 @@ mod tests {
         let up_left = axis(Vec2::new(-46.0, -46.0), STICK_RADIUS);
         assert!(up_left.x < 0.0 && up_left.y < 0.0);
         assert!((up_left.length() - 1.0).abs() < 1e-6);
-        assert!((up_left.x + up_left.y).abs() < 1e-6, "the diagonal stays symmetric");
+        assert!((up_left.x - up_left.y).abs() < 1e-6, "the diagonal stays symmetric");
     }
 
     #[test]

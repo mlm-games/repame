@@ -409,17 +409,82 @@ mod tests {
     }
 
     #[test]
-    fn bc7_is_refused_with_a_typed_error() {
-        let mut bytes = bc1_ktx2();
-        bytes[12..16].copy_from_slice(&145u32.to_le_bytes()); // VK_FORMAT_BC7_UNORM_BLOCK
+    fn bc7_payloads_decode_through_the_registry() {
         let path = Path::new("t.ktx2");
+        // The BC7 mode 0 reference block, four times over 8x8.
+        let block: [u8; 16] = crate::codec::unhex("b5b7d6c30e06467a02b015bf5452b453");
+        let bytes = block16_ktx2(145, &block); // VK_FORMAT_BC7_UNORM_BLOCK
         let info = parse(&bytes, path).expect("container");
         assert_eq!(info.format, TextureFormat::Bc7);
+        let decoded = crate::codec::BlockCodecRegistry::default()
+            .decode(&bytes, path)
+            .expect("bc7 decodes");
+        assert_eq!(decoded.format, TextureFormat::Rgba8);
+        assert_eq!((decoded.width, decoded.height), (8, 8));
+        // Texel 0 of each of the first three blocks, from the reference decode.
+        assert_eq!(&decoded.data[0..4], &[0xd2, 0x6d, 0x5a, 0xff]);
+        assert_eq!(&decoded.data[16..20], &[0xd2, 0x6d, 0x5a, 0xff]);
+        assert_eq!(&decoded.data[128..132], &[0xd2, 0x6d, 0x5a, 0xff]);
+    }
+
+    #[test]
+    fn bc5_payloads_decode_through_the_registry() {
+        let path = Path::new("t.ktx2");
+        let block: [u8; 16] = crate::codec::unhex("ff0088c6fa88c6faff0088c6fa88c6fa");
+        let bytes = block16_ktx2(141, &block); // VK_FORMAT_BC5_UNORM_BLOCK
+        let info = parse(&bytes, path).expect("container");
+        assert_eq!(info.format, TextureFormat::Bc5);
+        let decoded = crate::codec::BlockCodecRegistry::default()
+            .decode(&bytes, path)
+            .expect("bc5 decodes");
+        assert_eq!(decoded.format, TextureFormat::Rgba8);
+        assert_eq!(&decoded.data[0..4], &[255, 255, 0, 255]);
+    }
+
+    #[test]
+    fn bc6h_is_refused_with_a_typed_error() {
+        let mut bytes = bc1_ktx2();
+        bytes[12..16].copy_from_slice(&143u32.to_le_bytes()); // VK_FORMAT_BC6H_UF16_BLOCK
+        let path = Path::new("t.ktx2");
+        let info = parse(&bytes, path).expect("container");
+        assert_eq!(info.format, TextureFormat::Bc6hUf16);
         let error = crate::codec::BlockCodecRegistry::default()
             .decode(&bytes, path)
-            .expect_err("bc7 not implemented");
+            .expect_err("bc6h not implemented");
         assert!(error.is_unsupported());
         assert_eq!(error.kind(), crate::error::ContentErrorKind::Unsupported);
+    }
+
+    /// A one-level 8x8 KTX 2 whose 64-byte payload is four copies of a
+    /// 16-byte block, for the 16-byte block formats (BC5, BC6H, BC7).
+    fn block16_ktx2(vk_format: u32, block: &[u8; 16]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&KTX2_IDENTIFIER);
+        push_u32(&mut bytes, vk_format);
+        push_u32(&mut bytes, 1); // typeSize
+        push_u32(&mut bytes, 8); // pixelWidth
+        push_u32(&mut bytes, 8); // pixelHeight
+        push_u32(&mut bytes, 0); // pixelDepth
+        push_u32(&mut bytes, 0); // layerCount
+        push_u32(&mut bytes, 1); // faceCount
+        push_u32(&mut bytes, 1); // levelCount
+        push_u32(&mut bytes, 0); // supercompressionScheme
+        push_u32(&mut bytes, 104); // dfdByteOffset
+        push_u32(&mut bytes, 28); // dfdByteLength
+        push_u32(&mut bytes, 0); // kvdByteOffset
+        push_u32(&mut bytes, 0); // kvdByteLength
+        push_u64(&mut bytes, 0); // sgdByteOffset
+        push_u64(&mut bytes, 0); // sgdByteLength
+        push_u64(&mut bytes, 132); // level index: byteOffset
+        push_u64(&mut bytes, 64); // byteLength
+        push_u64(&mut bytes, 64); // uncompressedByteLength
+        assert_eq!(bytes.len(), 104);
+        bytes.resize(132, 0); // DFD placeholder
+        for _ in 0..4 {
+            bytes.extend_from_slice(block);
+        }
+        assert_eq!(bytes.len(), 196);
+        bytes
     }
 
     /// A two-level 8x8 BC1 KTX 2 with both levels stored base-first (ascending

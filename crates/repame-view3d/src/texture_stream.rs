@@ -64,11 +64,23 @@
 //! rebuild, so the game calls [`TextureResidency::invalidate`] for the pages
 //! the rebuild dropped.
 //!
+//! A game drawing through [`Viewport3d`](super::viewport::Viewport3d) stages
+//! the same drain on its [`Frame3d`](super::viewport::Frame3d) instead of a
+//! [`SceneBatch`](super::render::SceneBatch):
+//! [`extend_mip_uploads`](super::viewport::Frame3d::extend_mip_uploads) takes
+//! the `take_uploads` vec and
+//! [`publish_page_level`](super::viewport::Frame3d::publish_page_level) takes
+//! each [`resolve_level`](TextureResidency::resolve_level) answer; `prepare`
+//! applies both to the batch unchanged, so the sampling contract below holds
+//! on either path.
+//!
 //! ```ignore
 //! // game thread, once per frame, per visible group:
 //! let Some((min, max)) = group_bounds(group) else { continue };
 //! let Some(size) = project_bounds(view_proj, viewport_px, min.into(), max.into()) else { continue };
 //! residency.touch(group.texture_page, size.max_px(), frame);
+//! // publish the level the shaders sample for this page (None = untextured)
+//! batch.set_page_level(group.texture_page, residency.resolve_level(group.texture_page));
 //!
 //! let plan = residency.plan(frame);
 //! for request in &plan.requests {
@@ -83,18 +95,29 @@
 //! for upload in residency.take_uploads() {
 //!     batch.upload_mip(upload);
 //! }
+//! // a drain can change a page's finest resident level; republish it on the
+//! // next frame's touch (the loop above does), or immediately for pages that
+//! // are not touched every frame.
 //! ```
 //!
 //! # Sampling contract
 //!
-//! [`TextureResidency::resolve_level`] is the level to sample: the finest level
-//! actually resident. The wanted range is `wanted..=coarsest`, which is what
-//! the manager loads and keeps; the finest level can only be coarser than
-//! `wanted` while levels are missing. The batch's scene shader samples mip 0 of
-//! a page, so a page whose finest resident level is `> 0` must not be drawn
-//! textured until level 0 arrives (the shader's explicit level 0 would read an
-//! unwritten mip). A game that streams mips samples the resolved level itself;
-//! this module never claims a level it does not hold.
+//! [`TextureResidency::resolve_level`] is the level to publish with
+//! [`SceneBatch::set_page_level`](super::render::SceneBatch::set_page_level):
+//! the finest level actually resident, or `None` when nothing is resident.
+//! Every textured site samples exactly that level — the explicit sites and
+//! the material programs' implicit-LOD samples alike read it, never a finer
+//! (unwritten) mip — and a page with nothing resident draws untextured (its
+//! tint, the identity texel in a material program) instead of a fabricated
+//! sample, so a page stays drawable while its levels stream in. A partially
+//! resident page therefore samples the finest level it *has*, not an implicit
+//! blend whose finer levels never arrived. A page the
+//! game never publishes stays at level 0, the fully resident page, which is
+//! the historical behavior; residency can be published for the first
+//! [`MAX_RESIDENT_PAGES`](super::render::MAX_RESIDENT_PAGES) pages (256),
+//! which covers every material page (`u8`) a draw can name. The wanted range
+//! is `wanted..=coarsest`, which is what the manager loads and keeps; the
+//! finest level can only be coarser than `wanted` while levels are missing.
 //!
 //! # Presentation only
 //!
@@ -941,9 +964,11 @@ impl TextureResidency {
         }
     }
 
-    /// The level to sample for `page`: the finest resident level, or `None`
-    /// when nothing is resident (draw the page untextured — never an invented
-    /// level). Logs once per missing episode; see the module docs.
+    /// The level to publish for `page` with
+    /// [`SceneBatch::set_page_level`](super::render::SceneBatch::set_page_level):
+    /// the finest resident level, or `None` when nothing is resident (the
+    /// shaders draw the page untextured — never an invented level). Logs once
+    /// per missing episode; see the module docs.
     pub fn resolve_level(&mut self, page: u32) -> Option<u32> {
         let Some(resident) = self.textures.get_mut(&page) else {
             return None;

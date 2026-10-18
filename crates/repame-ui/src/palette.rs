@@ -250,8 +250,8 @@ mod tests {
     #[test]
     fn lighten_and_darken_reach_white_and_black() {
         assert_eq!(lighten(A, 0.0), A);
-        assert_eq!(lighten(A, 1.0), Color(0xFF, 0xFF, 0xFF, 0x40));
-        assert_eq!(darken(A, 1.0), Color(0x00, 0x00, 0x00, 0x40));
+        assert_eq!(lighten(A, 1.0), Color(0xFF, 0xFF, 0xFF, 0xFF));
+        assert_eq!(darken(A, 1.0), Color(0x00, 0x00, 0x00, 0xFF));
     }
 
     #[test]

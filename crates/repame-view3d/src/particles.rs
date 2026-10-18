@@ -1871,6 +1871,11 @@ struct DrawParams {
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var scene_tex: texture_2d_array<f32>;
 @group(1) @binding(1) var scene_smp: sampler;
+/// Finest resident mip level per page (`-1` = nothing resident), published by
+/// the batch: 64 `vec4` slots cover 256 pages. The billboard samples the
+/// page's resident level, never a finer (unwritten) one, and draws its tint
+/// when no level is resident.
+@group(1) @binding(2) var<uniform> page_levels: array<vec4<f32>, 64>;
 @group(2) @binding(0) var<storage, read> particles: array<Particle>;
 @group(2) @binding(1) var<storage, read> emitter: Emitter;
 @group(2) @binding(2) var<uniform> draw: DrawParams;
@@ -1974,8 +1979,19 @@ fn vs_main(@builtin(vertex_index) vertex: u32) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var color = in.color;
     if (draw.scale_alpha.w > 0.5) {
-        let texel = textureSampleLevel(scene_tex, scene_smp, in.uv, i32(draw.scale_alpha.z + 0.5), 0.0);
-        color = vec4<f32>(color.rgb * texel.rgb, color.a * texel.a);
+        // The page's finest resident level: 0 for a fully resident page
+        // (the historical sample, byte for byte). Nothing resident draws the
+        // particle tint instead of an unwritten mip; a page past the covered
+        // range keeps the fully resident default.
+        let slot = u32(max(draw.scale_alpha.z, 0.0) + 0.5);
+        var resident = 0.0;
+        if (slot < 256u) {
+            resident = page_levels[slot / 4u][slot % 4u];
+        }
+        if (resident >= 0.0) {
+            let texel = textureSampleLevel(scene_tex, scene_smp, in.uv, i32(draw.scale_alpha.z + 0.5), resident);
+            color = vec4<f32>(color.rgb * texel.rgb, color.a * texel.a);
+        }
     }
     if (color.a < 0.004) {
         discard;

@@ -105,6 +105,18 @@ fn page_of(unit: u32) -> f32 {
     return material.pages[unit / 4u][unit % 4u];
 }
 
+/// Finest mip level resident for `page`: the level a textured sample reads.
+/// `-1` means nothing is resident, so the caller draws untextured (its tint)
+/// instead of sampling an unwritten mip. A page past the published cap keeps
+/// the fully resident default.
+fn repame_resident_level(page: f32) -> f32 {
+    let slot = u32(max(page, 0.0) + 0.5);
+    if (slot >= 256u) {
+        return 0.0;
+    }
+    return page_levels[slot / 4u][slot % 4u];
+}
+
 const COMBINE_LO: f32 = -4.0;
 const COMBINE_HI: f32 = 4.0;
 const COMBINE_UNIT: f32 = 1.0;
@@ -113,6 +125,12 @@ const COMBINE_ONE: f32 = 1.0;
 
 @group(1) @binding(0) var scene_tex: texture_2d_array<f32>;
 @group(1) @binding(1) var scene_smp: sampler;
+/// Finest mip level resident per page, published with
+/// `SceneBatch::set_page_level`: `-1` = nothing resident (draw the tint),
+/// `0` = the fully resident page. A textured sample reads the resident level
+/// and never a finer (unwritten) one. Fixed 64 `vec4` slots cover the first
+/// 256 pages (a uniform buffer cannot hold a runtime-sized array).
+@group(1) @binding(2) var<uniform> page_levels: array<vec4<f32>, 64>;
 @group(2) @binding(0) var shadow_tex: texture_depth_2d;
 @group(2) @binding(1) var shadow_smp: sampler_comparison;
 @group(2) @binding(2) var cascade_tex: texture_depth_2d_array;
@@ -287,12 +305,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var base = in.color;
     var alpha = in.alpha;
     if (in.tex_mix > 0.5) {
-        let tex = textureSampleLevel(scene_tex, scene_smp, in.uv, i32(in.page + 0.5), 0.0);
-        if (tex.a < 0.001 && in.cutoff < 0.001) {
-            discard;
+        // Sample the page's finest resident level: level 0 when the page is
+        // fully resident (the historical path, byte for byte), the published
+        // level when only coarser mips have arrived, nothing when no level is
+        // resident (draw the tint instead of a fabricated or unwritten mip).
+        let resident = repame_resident_level(in.page);
+        if (resident >= 0.0) {
+            let tex = textureSampleLevel(scene_tex, scene_smp, in.uv, i32(in.page + 0.5), resident);
+            if (tex.a < 0.001 && in.cutoff < 0.001) {
+                discard;
+            }
+            base = in.color * tex.rgb;
+            alpha = in.alpha * tex.a;
         }
-        base = in.color * tex.rgb;
-        alpha = in.alpha * tex.a;
     }
     if (alpha < in.cutoff) {
         discard;
@@ -2293,9 +2318,9 @@ pub struct BatchDesc {
     pub filter: SceneFilter,
     /// Mip levels each page is created with (`1` = the historical single
     /// level). Levels above 0 are written by [`SceneBatch::upload_mip`]; the
-    /// scene shader samples level 0 of a page, so a page whose level 0 has not
-    /// been uploaded must not be drawn textured. Clamped to what `layer_size`
-    /// allows by [`BatchDesc::mip_levels`].
+    /// scene shaders sample each page's finest resident level
+    /// ([`SceneBatch::set_page_level`]), level 0 for a fully resident page.
+    /// Clamped to what `layer_size` allows by [`BatchDesc::mip_levels`].
     pub mips: u32,
 }
 
@@ -2316,6 +2341,18 @@ impl BatchDesc {
 fn sampler_lod_max_clamp(mips: u32) -> f32 {
     mips.saturating_sub(1) as f32
 }
+
+/// `vec4` slots the shader's per-page resident-level array holds
+/// (`array<vec4<f32>, 64>` in [`SHADER_PREFIX`] and the particle billboard).
+/// Must stay in lockstep with both WGSL declarations.
+const RESIDENT_PAGE_SLOTS: u32 = 64;
+
+/// Pages the resident-level array covers. Material stage pages are `u8`
+/// (`<= 255`), and the legacy and particle paths validate
+/// `page < BatchDesc::layers`, so every page a draw can name fits. A page
+/// past the cap cannot be published ([`SceneBatch::set_page_level`] rejects
+/// it) and samples level 0, the fully resident default.
+pub const MAX_RESIDENT_PAGES: u32 = RESIDENT_PAGE_SLOTS * 4;
 
 impl Default for BatchDesc {
     fn default() -> Self {
@@ -2527,6 +2564,12 @@ pub struct SceneBatch {
     /// Streamed mip levels queued by [`SceneBatch::upload_mip`], applied in the
     /// same pass as `uploads`.
     mip_uploads: Vec<MipUpload>,
+    /// Finest resident mip level per page, published with
+    /// [`SceneBatch::set_page_level`]: `-1` = nothing resident, `0` = the
+    /// historical fully resident page. Staged per frame into the shader's
+    /// `page_levels` array by [`SceneBatch::upload_all`]. Survives
+    /// [`SceneBatch::clear`]: residency spans frames, unlike the draw state.
+    page_levels: Vec<f32>,
     verts: Vec<Vert>,
     indices: Vec<u32>,
     ranges: Vec<DrawRange>,
@@ -2897,6 +2940,7 @@ impl SceneBatch {
             pending: Vec::new(),
             uploads: Vec::new(),
             mip_uploads: Vec::new(),
+            page_levels: vec![0.0; RESIDENT_PAGE_SLOTS as usize * 4],
             stats: super::stats::FrameStats::new(),
             overrides: super::texfmt::TextureOverrides::new(),
             materials: Vec::new(),
@@ -3264,10 +3308,12 @@ impl SceneBatch {
     /// The level is written whole, at its own mip: the game never has to move
     /// or rescale texels. An out-of-range page or level, or a payload whose
     /// extent does not match the page's mip edge, drops with a warning — never
-    /// a partial or fabricated write
-    /// ([`TextureResidency::resolve_level`](crate::texture_stream::TextureResidency::resolve_level)
-    /// is the level to sample). Texture contents do not survive a batch
-    /// rebuild, so re-queue the resident levels afterwards.
+    /// a partial or fabricated write. The level the shaders sample is
+    /// published separately with [`set_page_level`](Self::set_page_level)
+    /// (the residency layer's
+    /// [`resolve_level`](crate::texture_stream::TextureResidency::resolve_level)).
+    /// Texture contents do not survive a batch rebuild, so re-queue the
+    /// resident levels afterwards.
     pub fn upload_mip(&mut self, upload: MipUpload) {
         let mips = self.desc.mip_levels();
         if upload.page >= self.desc.layers || upload.level >= mips {
@@ -3302,6 +3348,50 @@ impl SceneBatch {
         for upload in uploads {
             self.upload_mip(upload);
         }
+    }
+
+    /// Publish the finest mip level resident for `page`: exactly the level
+    /// every textured draw of that page samples, on the legacy and material
+    /// paths alike. Games streaming mips call this from the residency layer's
+    /// [`resolve_level`](crate::texture_stream::TextureResidency::resolve_level)
+    /// (which returns `None` when nothing is resident).
+    ///
+    /// * `Some(level)` — sample `level`. The default for every declared page
+    ///   is `Some(0)`, the fully resident page, which reproduces the
+    ///   historical pixels exactly.
+    /// * `None` — nothing is resident: the page draws untextured (its tint,
+    ///   and the identity texel in material programs) instead of sampling an
+    ///   unwritten or evicted mip.
+    ///
+    /// A page past the batch's layers, a page past
+    /// [`MAX_RESIDENT_PAGES`], or a level past the page's declared chain, is
+    /// rejected with a warning and changes nothing (a level that cannot exist
+    /// must never be sampled). The published level survives
+    /// [`clear`](Self::clear): residency spans frames. The value is uploaded
+    /// in [`upload_all`](Self::upload_all), so publishing it before
+    /// `upload_all` takes effect for that frame's draws.
+    pub fn set_page_level(&mut self, page: u32, level: Option<u32>) {
+        if page >= self.desc.layers || page >= MAX_RESIDENT_PAGES {
+            log::warn!(
+                "scene_batch[{}]: page {page} outside {} layers / {MAX_RESIDENT_PAGES} resident pages, level ignored",
+                self.id,
+                self.desc.layers
+            );
+            return;
+        }
+        let mips = self.desc.mip_levels();
+        let level = match level {
+            None => -1.0,
+            Some(level) if level < mips => level as f32,
+            Some(level) => {
+                log::warn!(
+                    "scene_batch[{}]: page {page} has no mip level {level} (chain {mips}), resident level ignored",
+                    self.id,
+                );
+                return;
+            }
+        };
+        self.page_levels[page as usize] = level;
     }
 
     /// Replaces a page's pixels for every later upload of it, letting a game
@@ -3716,7 +3806,7 @@ impl SceneBatch {
                 let sim = blank(
                     "repame_view3d_particle_sim_state",
                     size_of::<GpuSimState>() as u64,
-                    false,
+                    true,
                 );
                 let particles = blank(
                     "repame_view3d_particle_storage",
@@ -5759,6 +5849,12 @@ impl SceneBatch {
             &camera,
             skin_buffer.as_ref(),
         );
+        let page_levels = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("repame_view3d_page_levels"),
+            size: u64::from(RESIDENT_PAGE_SLOTS) * 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_tex_bgl"),
             entries: &[
@@ -5778,6 +5874,21 @@ impl SceneBatch {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    // One `vec4` per four pages, matching the WGSL
+                    // `array<vec4<f32>, 64>` (fixed size: a uniform buffer
+                    // cannot hold a runtime-sized array).
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            u64::from(RESIDENT_PAGE_SLOTS) * 16,
+                        ),
+                    },
+                    count: None,
+                },
             ],
         });
         let tex_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -5791,6 +5902,10 @@ impl SceneBatch {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: page_levels.as_entire_binding(),
                 },
             ],
         });
@@ -6441,6 +6556,7 @@ impl SceneBatch {
             material_bind,
             material_layout,
             tex_bind,
+            page_levels,
             texture,
             camera_mat: self.camera,
             last_ranges: Vec::new(),
@@ -6500,6 +6616,9 @@ impl SceneBatch {
             res.index_cap = cap;
         }
         queue.write_buffer(&res.camera, 0, bytemuck::cast_slice(&[self.camera]));
+        // The shaders' per-page resident levels: one write covers every
+        // textured draw this frame (scene, material and particle paths).
+        queue.write_buffer(&res.page_levels, 0, bytemuck::cast_slice(&self.page_levels));
         self.sync_material_pipelines(device, queue, res);
         self.sync_particles(device, queue, res);
         self.sync_probes(device, queue, res);
@@ -6684,6 +6803,16 @@ impl SceneBatch {
     pub(crate) fn test_vert_alpha(&self) -> Vec<(f32, f32)> {
         self.verts.iter().map(|v| (v.alpha, v.cutoff)).collect()
     }
+
+    /// Test-only resident-level readout: `None` = nothing resident.
+    #[cfg(test)]
+    pub(crate) fn test_page_level(&self, page: u32) -> Option<u32> {
+        match self.page_levels.get(page as usize).copied() {
+            Some(level) if level < 0.0 => None,
+            Some(level) => Some(level as u32),
+            None => None,
+        }
+    }
 }
 
 /// GPU-resource cache key for one batch: every dimension that forces a
@@ -6805,6 +6934,9 @@ struct SceneEntry {
     material_bind: wgpu::BindGroup,
     material_layout: wgpu::BindGroupLayout,
     tex_bind: wgpu::BindGroup,
+    /// Per-page resident mip levels the scene and particle shaders sample,
+    /// written by [`SceneBatch::upload_all`] from the staged table.
+    page_levels: wgpu::Buffer,
     texture: wgpu::Texture,
     camera_mat: CameraUniform,
     last_ranges: Vec<DrawRange>,
@@ -8604,6 +8736,67 @@ mod tests {
         assert_eq!(sampler_lod_max_clamp(desc.mip_levels()), 2.0);
     }
 
+    /// The shader's fixed resident-page array covers every page a draw can
+    /// name (material stage pages are `u8`, `<= 255`), and every WGSL
+    /// declaration matches the slot count the layout and buffer are built
+    /// from: a drift there would fail bind group creation on a device.
+    #[test]
+    fn resident_page_array_size_matches_the_wgsl() {
+        assert_eq!(MAX_RESIDENT_PAGES, 256);
+        assert_eq!(RESIDENT_PAGE_SLOTS, 64);
+        assert_eq!(MAX_RESIDENT_PAGES, RESIDENT_PAGE_SLOTS * 4);
+        assert!(
+            SHADER_PREFIX.contains("array<vec4<f32>, 64>"),
+            "scene prefix declares 64 slots"
+        );
+        assert!(
+            crate::particles::PARTICLE_BILLBOARD_WGSL.contains("array<vec4<f32>, 64>"),
+            "billboard declares 64 slots"
+        );
+        // The out-of-range guards must treat the whole declared array as
+        // covered, or a published page in the tail would silently fall back
+        // to level 0.
+        assert!(
+            SHADER_PREFIX.contains("slot >= 256u"),
+            "scene prefix guards past the whole array"
+        );
+        assert!(
+            crate::particles::PARTICLE_BILLBOARD_WGSL.contains("slot < 256u"),
+            "billboard guards past the whole array"
+        );
+    }
+
+    /// A page's published resident level: level 0 (fully resident) by default,
+    /// validated on both axes, and independent of the per-frame draw state.
+    #[test]
+    fn published_page_levels_are_validated_and_span_frames() {
+        let mut batch = SceneBatch::with_desc(
+            "test.page-levels",
+            BatchDesc {
+                layer_size: 4,
+                layers: 3,
+                mips: 3,
+                ..BatchDesc::default()
+            },
+        );
+        for page in 0..3 {
+            assert_eq!(batch.test_page_level(page), Some(0), "default fully resident");
+        }
+        batch.set_page_level(1, Some(2));
+        assert_eq!(batch.test_page_level(1), Some(2));
+        batch.set_page_level(1, None);
+        assert_eq!(batch.test_page_level(1), None, "nothing resident publishes None");
+        // A page past the layers and a level past the chain are rejected,
+        // leaving the published value alone.
+        batch.set_page_level(3, Some(1));
+        batch.set_page_level(1, Some(3));
+        assert_eq!(batch.test_page_level(1), None);
+        // `clear` drops per-frame draw state, not residency.
+        batch.set_page_level(1, Some(1));
+        batch.clear();
+        assert_eq!(batch.test_page_level(1), Some(1));
+    }
+
     #[test]
     fn degenerate_tris_cull_but_keep_the_group() {
         let mut batch = SceneBatch::with_id("test.degen");
@@ -10277,6 +10470,314 @@ mod tests {
         };
         let i = ((24 * 64 + 40) * 4) as usize;
         assert_eq!([px[i], px[i + 1], px[i + 2], px[i + 3]], [0, 0, 0, 255]);
+    }
+
+    /// End-to-end GPU proof for the streamed-mip sampling contract: a page
+    /// whose level 0 was never written samples its finest resident level (a
+    /// green level 1) instead of the zero-filled level 0; a page with nothing
+    /// resident draws its tint (white) instead of black; a page that never
+    /// publishes a level keeps the historical fully resident level 0 (red) on
+    /// the legacy and material paths alike. Skips gracefully where no GPU
+    /// exists.
+    #[test]
+    fn offscreen_streamed_page_samples_its_resident_level() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+        use super::super::material::ShadingModel;
+
+        struct Streamed {
+            cam: OrbitCamera,
+            group: MeshGroup,
+            mips: Vec<MipUpload>,
+            /// `None` = never publish (the fully-resident default).
+            published: Option<Option<u32>>,
+            /// `Some` routes the group through a material program.
+            material: Option<ShadingModel>,
+        }
+
+        impl WgpuCallback for Streamed {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_desc(
+                    "test.streamed",
+                    BatchDesc {
+                        layer_size: 2,
+                        layers: 1,
+                        mips: 2,
+                        ..BatchDesc::default()
+                    },
+                );
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.extend_mip_uploads(self.mips.iter().cloned());
+                if let Some(level) = self.published {
+                    batch.set_page_level(0, level);
+                }
+                match self.material.as_ref() {
+                    Some(model) => {
+                        let slot = batch.register_material(model);
+                        batch.push_group_with_material(&self.group, slot);
+                    }
+                    None => batch.push_group(&self.group),
+                }
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.streamed",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    64,
+                    64,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut CallbackRenderPass<'_, '_>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_callback("test.streamed", rpass, resources);
+            }
+        }
+
+        // Screen-filling white quad with full 0..1 uvs (so the read-back pixel
+        // is the sampled texel or the tint alone).
+        fn full_quad() -> MeshGroup {
+            let mut g = MeshGroup {
+                texture_page: 0,
+                depth_test: true,
+                ..Default::default()
+            };
+            let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+            g.push_quad_textured(
+                [-5.0, 5.0, 5.0],
+                [5.0, 5.0, 5.0],
+                [5.0, 5.0, -5.0],
+                [-5.0, 5.0, -5.0],
+                [1.0, 1.0, 1.0],
+                uvs,
+            );
+            g
+        }
+
+        fn render_case(
+            mips: Vec<MipUpload>,
+            published: Option<Option<u32>>,
+            material: Option<ShadingModel>,
+        ) -> Option<Vec<u8>> {
+            let mut renderer = match OffscreenRenderer::new_blocking(64, 64, 1) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("SKIP streamed-mip test (no GPU): {e}");
+                    return None;
+                }
+            };
+            let cam = OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: 0.0,
+                pitch: 1.45,
+                dist: 12.0,
+                fov_y_deg: 30.0,
+            };
+            let scene = Scene {
+                clear_color: Color::from_rgba(0, 0, 0, 255),
+                nodes: vec![SceneNode::Callback {
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 64.0,
+                        h: 64.0,
+                    },
+                    payload: Callback::new(Streamed {
+                        cam,
+                        group: full_quad(),
+                        mips,
+                        published,
+                        material,
+                    }),
+                }],
+            };
+            Some(
+                renderer
+                    .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+                    .expect("offscreen render"),
+            )
+        }
+
+        let center = |px: &[u8]| -> [u8; 4] {
+            let i = ((32 * 64 + 32) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+
+        // Fully resident (no publication): level 0 red, the historical sample.
+        let Some(px) = render_case(
+            vec![MipUpload {
+                page: 0,
+                level: 0,
+                width: 2,
+                height: 2,
+                texels: [255, 0, 0, 255].repeat(4),
+            }],
+            None,
+            None,
+        ) else {
+            return;
+        };
+        assert_eq!(center(&px), [255, 0, 0, 255], "default page samples level 0");
+
+        // Level 0 never written; level 1 (1x1 green) is the finest resident
+        // level and must be the one sampled.
+        let Some(px) = render_case(
+            vec![MipUpload {
+                page: 0,
+                level: 1,
+                width: 1,
+                height: 1,
+                texels: vec![0, 255, 0, 255],
+            }],
+            Some(Some(1)),
+            None,
+        ) else {
+            return;
+        };
+        assert_eq!(
+            center(&px),
+            [0, 255, 0, 255],
+            "a page resident from level 1 samples level 1, never the unwritten level 0"
+        );
+
+        // Nothing resident: the documented tint fallback, not a black sample.
+        let Some(px) = render_case(Vec::new(), Some(None), None) else {
+            return;
+        };
+        assert_eq!(
+            center(&px),
+            [255, 255, 255, 255],
+            "nothing resident draws the tint"
+        );
+
+        // The material path (modulate: output = texel * tint) samples the same
+        // published level.
+        let Some(px) = render_case(
+            vec![MipUpload {
+                page: 0,
+                level: 1,
+                width: 1,
+                height: 1,
+                texels: vec![0, 255, 0, 255],
+            }],
+            Some(Some(1)),
+            Some(ShadingModel::textured(0)),
+        ) else {
+            return;
+        };
+        assert_eq!(
+            center(&px),
+            [0, 255, 0, 255],
+            "a material program samples the page's resident level"
+        );
+
+        // Fully resident material: the historical implicit-LOD sample.
+        let Some(px) = render_case(
+            vec![MipUpload {
+                page: 0,
+                level: 0,
+                width: 2,
+                height: 2,
+                texels: [255, 0, 0, 255].repeat(4),
+            }],
+            None,
+            Some(ShadingModel::textured(0)),
+        ) else {
+            return;
+        };
+        assert_eq!(
+            center(&px),
+            [255, 0, 0, 255],
+            "a fully resident material keeps the implicit level-0 sample"
+        );
+
+        // Nothing resident through a material program: the identity texel
+        // keeps the untextured program result (the tint) instead of black.
+        let Some(px) = render_case(Vec::new(), Some(None), Some(ShadingModel::textured(0))) else {
+            return;
+        };
+        assert_eq!(
+            center(&px),
+            [255, 255, 255, 255],
+            "a material with nothing resident draws the tint"
+        );
+    }
+
+    /// GPU proof that the particle billboard path carries the same resident
+    /// levels: a staged textured system builds its module, billboard pipeline
+    /// and draw bind groups on a real device, so a binding/layout drift
+    /// panics through wgpu validation instead of surfacing at runtime. Skips
+    /// gracefully where no GPU exists.
+    #[test]
+    fn particle_billboards_bind_the_resident_levels_on_a_device() {
+        use super::super::camera::OrbitCamera;
+        use super::super::particles::{ParticleFrame, ParticleSystem};
+        let Some((device, queue)) = headless_device() else {
+            return;
+        };
+        let screen = headless_screen();
+        let mut resources = CallbackResources::default();
+        let cam = OrbitCamera {
+            target: glam::Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.9,
+            dist: 30.0,
+            fov_y_deg: 30.0,
+        };
+        let mut frame = ParticleFrame::new(1.0 / 60.0);
+        let mut system = ParticleSystem::new(16);
+        system.rate = 0.0;
+        system.display.page = Some(0);
+        frame.push(system);
+        let mut batch = SceneBatch::with_id("test.particles.gpu");
+        batch.set_camera(cam.view_proj(1.0));
+        batch.set_camera_pos(cam.eye().into());
+        batch.set_particles(Some(frame));
+        batch.finish();
+        assert!(
+            batch.particles().is_some_and(|frame| !frame.systems.is_empty()),
+            "the textured system stages"
+        );
+        batch.ensure_resources(&device, &screen, &mut resources);
+        batch.upload_all(&device, &queue, &mut resources);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("test.particles.gpu"),
+        });
+        prepare_scene_with_id(
+            batch.id(),
+            &device,
+            &queue,
+            &mut encoder,
+            &screen,
+            &mut resources,
+            64,
+            64,
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device polled clean");
     }
 
     /// End-to-end GPU proof for transparency + cutoff: a red opaque quad

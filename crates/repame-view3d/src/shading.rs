@@ -164,8 +164,10 @@ impl ShadedBatch {
 /// The stage samples the texels the program reads, lights the vertex color
 /// with the frame's sun (same inputs the legacy path uses, no shadow term),
 /// then runs the combinator chain over that result and applies material fog,
-/// matching [`tev::evaluate`]. The exposure curve below is frame state, not
-/// model state, so it has no place in that reference.
+/// matching [`tev::evaluate`]. Each unit samples its page's finest resident
+/// level (level 0 keeps the historical implicit-LOD sample byte for byte), so
+/// a streamed page never reads an unwritten mip. The exposure curve below is
+/// frame state, not model state, so it has no place in that reference.
 pub fn material_fragment(model: &ShadingModel) -> Result<String, ShadingError> {
     model.validate()?;
     let mut units: Vec<u8> = Vec::new();
@@ -176,8 +178,21 @@ pub fn material_fragment(model: &ShadingModel) -> Result<String, ShadingError> {
     }
     let mut body = String::from("    var outColor: vec4<f32>;\n");
     for unit in &units {
+        // The sampled page plus its finest resident level. A fully resident
+        // page (level 0) keeps the historical implicit-LOD `textureSample`
+        // byte for byte; a partially resident page samples exactly its finest
+        // resident level through `textureSampleLevel`; a page with nothing
+        // resident contributes the identity texel (the untextured program
+        // result) instead of a fabricated or unwritten mip.
         body.push_str(&format!(
-            "    let tex{unit} = textureSample(scene_tex, scene_smp, in.uv, i32(page_of({unit}u) + 0.5));\n"
+            "    let page{unit} = i32(page_of({unit}u) + 0.5);\n"
+        ));
+        body.push_str(&format!(
+            "    let resident{unit} = repame_resident_level(page_of({unit}u));\n"
+        ));
+        body.push_str(&format!("    var tex{unit}: vec4<f32>;\n"));
+        body.push_str(&format!(
+            "    if (resident{unit} < 0.0) {{\n        tex{unit} = vec4<f32>(1.0);\n    }} else if (resident{unit} > 0.0) {{\n        tex{unit} = textureSampleLevel(scene_tex, scene_smp, in.uv, page{unit}, resident{unit});\n    }} else {{\n        tex{unit} = textureSample(scene_tex, scene_smp, in.uv, page{unit});\n    }}\n"
         ));
         body.push_str(&format!("    let lod{unit} = 0.0;\n"));
     }

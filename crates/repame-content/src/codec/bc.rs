@@ -1,17 +1,25 @@
-//! BC1, BC3 and BC4 block decoders.
+//! BC1, BC3, BC4 and BC5 block decoders (BC7 lives in [`crate::codec::bc7`]).
 //!
 //! The fixed-point interpolation is the one used by the public-domain `bcdec`
 //! reference (and therefore by Godot's `Image::decompress`), so the decoded
-//! texels match the reference bit for bit. BC2, BC5, BC6H and BC7 are
-//! recognised by the containers but have no codec here; the registry refuses
-//! them with a typed error rather than approximating.
+//! texels match the reference bit for bit. BC2 and BC6H are recognised by the
+//! containers but have no codec here; the registry refuses them with a typed
+//! error rather than approximating.
 
 use crate::codec::{BlockCodec, TextureFormat};
 use crate::error::ContentError;
 
+use super::bc7::Bc7;
+
 /// All block codecs this crate implements.
 pub(crate) fn builtins() -> Vec<Box<dyn BlockCodec>> {
-    vec![Box::new(Bc1), Box::new(Bc3), Box::new(Bc4)]
+    vec![
+        Box::new(Bc1),
+        Box::new(Bc3),
+        Box::new(Bc4),
+        Box::new(Bc5),
+        Box::new(Bc7),
+    ]
 }
 
 /// BC1 / DXT1, including the 1-bit-alpha mode.
@@ -75,7 +83,31 @@ impl BlockCodec for Bc4 {
     }
 }
 
-fn short_block(codec: &str, expected: usize, actual: usize) -> ContentError {
+/// BC5 / ATI2 / RGTC2: the two-channel normal-map pair, two BC4 alpha blocks.
+/// Godot's decoder stops at RG8; this crate's fixed [`Rgba8`] output carries
+/// the pair in R and G with B zero and alpha opaque, the usual BC5 expansion.
+///
+/// [`Rgba8`]: TextureFormat::Rgba8
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Bc5;
+
+impl BlockCodec for Bc5 {
+    fn format(&self) -> TextureFormat {
+        TextureFormat::Bc5
+    }
+
+    fn decode_block(&self, block: &[u8]) -> Result<[[u8; 4]; 16], ContentError> {
+        let r = alpha_block(block.get(0..8).ok_or_else(|| short_block("bc5", 16, block.len()))?)?;
+        let g = alpha_block(block.get(8..16).ok_or_else(|| short_block("bc5", 16, block.len()))?)?;
+        let mut texels = [[0u8; 4]; 16];
+        for (index, texel) in texels.iter_mut().enumerate() {
+            *texel = [r[index], g[index], 0, 255];
+        }
+        Ok(texels)
+    }
+}
+
+pub(super) fn short_block(codec: &str, expected: usize, actual: usize) -> ContentError {
     ContentError::format(
         std::path::Path::new("<block>"),
         format!("{codec} block needs {expected} bytes, got {actual}"),
@@ -193,6 +225,7 @@ fn alpha_block(block: &[u8]) -> Result<[u8; 16], ContentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::unhex;
 
     #[test]
     fn bc1_block_decodes_to_exact_texels() {
@@ -277,5 +310,45 @@ mod tests {
             *texel = [value, value, value, 255];
         }
         assert_eq!(texels, expected);
+    }
+
+    /// One 16-byte BC5 block and the 32 bytes (two per texel) `bcdec_bc5`
+    /// emits for it, from the vendored-reference harness. This crate expands
+    /// to RGBA8, so R and G carry the pair, B stays zero and alpha opaque.
+    const BC5_REFERENCE: &[(&str, &str)] = &[
+        (
+            "ff0088c6fa88c6faff0088c6fa88c6fa",
+            "ffff0000dadab6b691916d6d49492424ffff0000dadab6b691916d6d49492424",
+        ),
+        (
+            "07c8397bde51a42cc807c69d11633705",
+            "c83effc87b22a13eff077b91ff7500c8c8912d75c8592d912d91c8ac5407c8c8",
+        ),
+        (
+            "adb0c9ae156f59ed96d30aea01413367",
+            "b0a2b0d3ae96ffc7ad00aeaeaf96ad96ffd3af96afc7afd3afaead00aed3ffae",
+        ),
+    ];
+
+    #[test]
+    fn bc5_blocks_match_the_bcdec_reference() {
+        for (vector, (input, expected)) in BC5_REFERENCE.iter().enumerate() {
+            let texels = Bc5.decode_block(&unhex::<16>(input)).expect("bc5");
+            let expected = unhex::<32>(expected);
+            for texel in 0..16 {
+                assert_eq!(
+                    texels[texel],
+                    [expected[texel * 2], expected[texel * 2 + 1], 0, 255],
+                    "vector {vector} texel {texel}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bc5_short_block_is_a_typed_format_error() {
+        let error = Bc5.decode_block(&[0u8; 15]).expect_err("short block");
+        assert_eq!(error.kind(), crate::error::ContentErrorKind::Format);
+        assert!(error.message().contains("bc5"), "{}", error.message());
     }
 }

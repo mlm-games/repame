@@ -13,8 +13,8 @@
 //!   [`AssetPath`] to the same asset.
 //! * [`HotReloader`] watches the content root in development, re-imports only
 //!   what changed and publishes [`ArtifactSwap`]s to apply at a boundary.
-//! * [`codec`] parses DDS and KTX 2 containers and decodes BC1, BC3 and BC4
-//!   blocks; [`codec::stream`] opens a header and reads one mip level at a time
+//! * [`codec`] parses DDS and KTX 2 containers and decodes BC1, BC3, BC4, BC5
+//!   and BC7 blocks; [`codec::stream`] opens a header and reads one mip level at a time
 //!   from a file, a slice or a package entry; [`package`] reads and writes ZIP
 //!   archives and PCK-like indexes.
 //!

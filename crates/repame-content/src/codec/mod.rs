@@ -4,11 +4,11 @@
 //!
 //! * **Containers** ([`dds`], [`ktx2`]) parse level/size/format/mips into a
 //!   [`TextureInfo`] without touching the pixel payload.
-//! * **Codecs** ([`BlockCodecRegistry`]) turn the payload into texels. BC1, BC3
-//!   and BC4 plus the uncompressed paths decode; every other recognised format
-//!   (BC2, BC5, BC6H, BC7, ETC/EAC, ASTC, Basis supercompression, half/float
-//!   formats) is refused with [`ContentErrorKind::Unsupported`], never
-//!   approximated.
+//! * **Codecs** ([`BlockCodecRegistry`]) turn the payload into texels. BC1, BC3,
+//!   BC4, BC5 and BC7 plus the uncompressed paths decode; every other
+//!   recognised format (BC2, BC6H, ETC/EAC, ASTC, Basis supercompression,
+//!   half/float formats) is refused with [`ContentErrorKind::Unsupported`],
+//!   never approximated.
 //!
 //! [`stream`] is the per-level path on top of both: it opens a header, exposes
 //! each level's byte range, and reads (and decodes) only the level asked for,
@@ -17,6 +17,7 @@
 //! [`ContentErrorKind::Unsupported`]: crate::ContentErrorKind::Unsupported
 
 pub mod bc;
+pub mod bc7;
 pub mod dds;
 pub mod ktx2;
 pub mod stream;
@@ -325,7 +326,7 @@ pub struct BlockCodecRegistry {
 }
 
 impl BlockCodecRegistry {
-    /// A registry with BC1, BC3 and BC4 registered.
+    /// A registry with BC1, BC3, BC4, BC5 and BC7 registered.
     pub fn new() -> Self {
         Self::with_builtins()
     }
@@ -427,7 +428,7 @@ impl BlockCodecRegistry {
                 ContentError::unsupported(
                     path,
                     format!(
-                        "no block codec for `{}`; convert the texture to BC1, BC3, BC4 or an uncompressed format",
+                        "no block codec for `{}`; convert the texture to BC1, BC3, BC4, BC5, BC7 or an uncompressed format",
                         info.format.as_str()
                     ),
                 )
@@ -546,4 +547,15 @@ pub(crate) fn read_u64_le(bytes: &[u8], offset: usize, path: &Path) -> Result<u6
 /// Number of mip levels a `width x height` image can hold.
 pub(crate) fn max_mip_levels(width: u32, height: u32) -> u32 {
     32 - width.max(height).max(1).leading_zeros()
+}
+
+/// Decode a hex string into `N` bytes; test vectors only.
+#[cfg(test)]
+pub(crate) fn unhex<const N: usize>(hex: &str) -> [u8; N] {
+    assert_eq!(hex.len(), 2 * N, "hex string must hold {N} bytes");
+    let mut bytes = [0u8; N];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * index..2 * index + 2], 16).expect("hex digits");
+    }
+    bytes
 }

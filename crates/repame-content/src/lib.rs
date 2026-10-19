@@ -10,7 +10,8 @@
 //!   sprite table and a hundred `include_bytes!` calls.
 //! * [`AssetStore`] is the runtime side of the same rule: loose files in
 //!   development, the packed archive when shipped, and both resolve an
-//!   [`AssetPath`] to the same asset.
+//!   [`AssetPath`] to the same asset. [`vfs`] is where that resolution lives,
+//!   with [`AssetRangeSource`] for a partial read.
 //! * [`HotReloader`] watches the content root in development, re-imports only
 //!   what changed and publishes [`ArtifactSwap`]s to apply at a boundary.
 //! * [`codec`] parses DDS and KTX 2 containers and decodes BC1, BC3, BC4, BC5

@@ -11,19 +11,35 @@ Pattern initially tested using [resims](https://github.com/mlm-games/resims)'s o
 
 | Crate | Role |
 |---|---|
-| `repame-sim` | Headless sim: `bevy_ecs` `World` + `Schedule` stepping, fixed-timestep accumulator, snapshot-out convention. |
-| `repame-content` | Headless RON project, scene, resource, and asset content foundation with typed imports, cached artifacts, validated references, and ECS scene spawning. |
+| `repame-sim` | Headless sim: `bevy_ecs` world, fixed-step accumulator, deterministic RNG, world hasher, session tape. |
+| `repame-content` | Content foundation: project manifest, import pipeline, asset VFS, DDS/KTX codecs, package archives. |
 | `repame-atlas` | CPU shelf atlas packing + upload queue (`UvRect`, drain-once uploads). |
 | `repame-anim` | Frame-strip animation player (loop/once/ping-pong). |
-| `repame-audio` | Audio banks / rigs / music wiring. |
-| `repame-view2d` | 2D viewport: instanced sprite batch (texture atlas + per-instance transform/uv/color), `Camera2d` fit + CPU picking, raster sheets, world text, design-box mapping, fullscreen postfx hook, and live vector actors (`.ren` rigs via `renamite-player`), either one presented surface or a world-anchored instanced draw list. Atm mainly aiming to cover my 2D games (rozvp, Opensus, Floppy-Warriors's rust version) and 2D remakes (nt-recreated-bevy) and stabilise later once core bugs are fixed. |
-| `repame-shell` | App wiring: Repose platform runners + sim stepping + viewport mount, gamepad to input mapping (done internally in repose). |
-| `repame-fx` | Sim-side particles (2D sprites + 3D billboards), ground decals + blob shadows, trauma shake, flash, floaters, transitions. |
+| `repame-audio` | Sound banks, buses, effects, spatial audio, and declarative cue synthesis. |
+| `repame-view2d` | 2D viewport: instanced sprite batch, camera fit, picking, raster sheets, world text, vector actors, lighting. |
+| `repame-view3d` | 3D viewport: orbit camera, mesh snapshots, glTF import, chunk streaming, shadow maps, texture streaming. |
+| `repame-shell` | App wiring: platform runners, gamepad, host helpers, and the portal integration. |
+| `repame-fx` | Sim-side particles, decals, blob shadows, trauma shake, flash, floaters, transitions. |
 | `repame-input` | Leafwing-shaped action map / `ActionState` edges-at-tick-end. |
-| `repame-view3d` | 3D viewport: orbit camera, mesh snapshots (flat/lit/textured, PBR-lite material + fog + tonemap), depth-tested wgpu pass, CPU mesh picking, glTF static import (materials/alpha) + CPU skinning/animation tracks/morphs + bone attachments, voxel chunk mesher (greedy Full faces, rotation-aware occlusion), dirty-tracked chunk cache, single-light GPU shadow maps (PCF, opt-in per frame; blob-shadow decals still cover contact grounding). Light rigs: cascaded directional shadows (texel-snapped frustum slices, normal bias), up to 8 point lights w/ inverse-square falloff + one cube-shadow caster, GPU skinning (128-joint palette, skinned shadow casters), background chunk streaming jobs (priority/dedup/stale-drop, `ChunkStreamer` + `plan_stream`). |
-| `repame-physics` | Sim-side character/voxel physics: AABB mover over `VoxelQuery` + pushback, `repame-sim` systems + transform snapshots. |
+| `repame-physics` | Sim-side character/voxel physics: AABB mover over `VoxelQuery` + pushback, transform snapshots. |
+| `repame-save` | One app identity, one versioned save envelope, one place for settings, keybinds and sim state. |
+| `repame-ui` | Shared UI kit: action queue, run flow, focus navigation, palette, touch overlay. |
+| `repame-reflect` | ECS reflection: component registry, RON world snapshot, inspectable component tree. |
+| `repame-nav` | Spatial navigation: baked navmesh, A* queries, funnel corridors, path-following agents. |
+| `repame-net` | Networking: transports, channels, replication, RPC. |
+| `repame-l10n` | Runtime localization: message catalogs from RON or Godot-style `.po`. |
+| `repame-ik` | Inverse kinematics and skeleton modifiers over view3d skeletons. |
+| `repame-xr` | XR: session lifecycle, reference spaces, stereo views, action sets. |
+| `repame-rapier2d` | Rapier physics over the sim: 2D bodies, joints, rays, snapshots. |
+| `repame-rapier3d` | Rapier physics over the sim: 3D bodies, joints, rays, snapshots. |
 
 # Internal notes
+
+## 2D coverage
+
+The 2D viewport mainly aims to cover the 2D games (rozvp, Opensus, the rust
+version of Floppy-Warriors) and 2D remakes (nt-recreated-bevy), and stabilises
+later once the core bugs are fixed.
 
 ## Pilot
 

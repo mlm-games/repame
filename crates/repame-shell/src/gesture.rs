@@ -24,7 +24,7 @@ static CALLBACK: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>> =
 ///
 /// The listener is attached to `window` for `pointerdown`, `touchstart` and
 /// `keydown`, so mouse, touch and keyboard all arm the device. It stays
-/// attached for the page's life; [`SEEN`] makes every later call a no-op, which
+/// attached for the page's life; `SEEN` makes every later call a no-op, which
 /// keeps the closure alive cheaply instead of tearing listeners down mid-gesture.
 ///
 /// Off wasm this does nothing, so callers need no cfg.

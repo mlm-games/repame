@@ -1,3 +1,13 @@
+//! Rapier physics over the sim: rigid bodies as components, the Rapier
+//! pipeline stepped from the sim schedule, and a snapshot per body for the
+//! view.
+//!
+//! [`init_world`] creates the [`RapierWorld3d`] resource and
+//! [`register_rapier3d_systems`] schedules the step. A body is a
+//! [`RapierBody3d`] component, joints are [`RapierSpherical`],
+//! [`RapierFixed3d`], [`RapierPrismatic3d`], [`RapierRope3d`] and
+//! [`RapierSpring3d`], a query returns [`RayHit3d`], and [`BodySnapshot3d`]
+//! carries the transform out to the viewport.
 use std::collections::HashMap;
 
 use bevy_ecs::lifecycle::RemovedComponents;

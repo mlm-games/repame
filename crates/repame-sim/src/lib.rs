@@ -2,6 +2,12 @@
 //! Game owns `Sim`, feeds wall time via `Sim::step`,
 //! then reads a snapshot for the viewport.
 //!
+//! [`rng`] is the one random source a game should draw from: [`SimRng`] is
+//! xoshiro256\*\* seeded through SplitMix64, and [`WorldSeed`] derives a
+//! stream per system or per entity from `(seed, tag)`, so adding a system
+//! does not shift the others' streams. [`hash`] hashes a world in a canonical
+//! order, and [`tape`] records and replays a session against those hashes.
+//!
 //! Determinism stance: `bevy_ecs` query iteration follows entity allocation
 //! history, so a replay with an identical spawn history iterates
 //! identically. The sim does NOT sort systems' iteration for you: any

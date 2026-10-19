@@ -1,10 +1,23 @@
 //! Game sound on cpal plus symphonia with an atomic command channel.
+//!
 //! [`Audio`] is the game-thread handle: [`SoundBank`] one-shots,
 //! [`Music`] direction, [`RigAudio`] rig-event routing, the [`BusTree`]
 //! mixer, and [`AudioListener3D`] spatial playback.
-//! [`CueSpec`] renders a declarative cue table to frames, so a game keeps its
-//! tuning table instead of a DSP and a WAV encoder.
 //! [`Audio::try_init`] bails without a device; [`Audio::noop`] runs silent.
+//!
+//! A cue is either bytes or a table, and the table is the newer half.
+//! [`CueSpec`] carries the tuning: waveform, frequency path, amplitude
+//! envelope, vibrato, and a white-noise blend whose [`NoiseShape`] says
+//! whether the noise rides the envelope or its square, so grit can die ahead
+//! of the tone it sits on. [`CueSpec::render`] makes frames,
+//! [`CueSpec::render_wav`] makes PCM16 bytes, and [`SoundBank::load_synth`]
+//! and [`SoundBank::request_synth`] register a whole table of variations, so a
+//! game keeps no DSP and no encoder of its own.
+//!
+//! Under the bank sit the parts that shape what a cue becomes: the
+//! [`BusTree`]'s sends, sidechains and mix order, the [`EffectSpec`] chain of
+//! delays, reverbs and filters, spatial panning, and the loader worker that
+//! decodes off the game thread.
 
 mod audio;
 mod bank;

@@ -2,7 +2,7 @@
 //! limiter, and a 3-band EQ.
 //!
 //! [`EffectSpec`] is the authored description carried on a [`crate::BusTree`];
-//! [`EffectDsp`] is the audio-thread instance holding the filter memory. The
+//! `EffectDsp` is the audio-thread instance holding the filter memory. The
 //! instance is created from the spec at the device rate, and only its
 //! parameters are rewritten when the tree is re-synced, so a running delay or
 //! reverb tail is not flushed by an unrelated fader move.
@@ -42,7 +42,7 @@ pub enum FilterMode {
 }
 
 /// One effect in a bus chain. Cheap to copy; the DSP state lives on the audio
-/// thread in [`EffectDsp`].
+/// thread in `EffectDsp`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EffectSpec {
     /// Linear gain from decibels.

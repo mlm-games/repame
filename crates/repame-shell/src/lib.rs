@@ -1,6 +1,21 @@
-//! App wiring: Repose platform runners plus sim, gamepad and portal helpers.
-/// Games provide the root view; `run_*` runners mount only, stepping
-/// stays game-side via [`Sim::step`].
+//! App wiring: Repose platform runners, host helpers, and the portal.
+//!
+//! Games provide the root view; the `run_*` runners mount only, and stepping
+//! stays game-side via [`Sim::step`]. [`RetainedRoot`] keeps the mounted view
+//! alive across frames, and [`GamepadPoller`] drains hardware events from the
+//! shared platform backend into the UI nav and the game's own pad state.
+//!
+//! Around that sit the helpers a host game needs once: [`Staging`] as the one
+//! per-frame input snapshot (held keys, edges, clicks, aim, touches, pads),
+//! [`on_first_user_gesture`] for the browser's autoplay rule, [`RumbleBridge`]
+//! for haptics, [`PadBank`] and [`PadMotion`] for pads and their motion,
+//! [`apply_scheduler_levels`] for scheduler priority, [`Quit`] for the
+//! platform-specific exit, and the shared shortcut edges.
+//!
+//! [`portal`] is the part a hosted game cannot do without: ads with deadlines,
+//! cloud-save push and pull, host pause, lifecycle mute, and the [`Suspend`]
+//! gate that decides whether the clock runs this frame. It is a module of its
+//! own because those rules are worth reading in one place.
 use std::collections::HashSet;
 use web_time::Duration;
 
@@ -78,7 +93,7 @@ impl Default for RetainedRoot {
 
 /// Desktop entry point. Mounts `root` with title and size.
 /// The root closure owns stepping and requests frames for continuity.
-/// The closure receives the live [`Scheduler`] each frame, whose
+/// The closure receives the live [`repose_core::runtime::Scheduler`] each frame, whose
 /// `held_keys` / `window_focused` / `mouse_*` fields are the single
 /// polled hardware snapshot (GML `keyboard_check` /
 /// `mouse_check_button` parity).

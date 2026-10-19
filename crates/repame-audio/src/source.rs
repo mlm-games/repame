@@ -68,7 +68,7 @@ impl AudioSource {
 ///
 /// The first synth helper the games shipped with; it is now a thin
 /// [`CueSpec`] preset (sine, a `1/30` s exponential decay, gain `0.5`), so
-/// tuning and rendering live in [`crate::synth`]. Arguments that cannot render
+/// tuning and rendering live in [`CueSpec`]. Arguments that cannot render
 /// (a zero rate, a non-positive length) yield a valid but empty WAV after a
 /// warning, because the signature has no way to report the failure.
 pub fn synth_sine_wav(freq_hz: f32, secs: f32, sample_rate: u32) -> Vec<u8> {

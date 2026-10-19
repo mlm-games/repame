@@ -813,7 +813,9 @@ mod tests {
             .position(|v| v.abs() > 1e-6)
             .expect("spike arrived");
         assert_eq!(first, 150, "branch point must be sample-exact");
-        let p = std::f32::consts::FRAC_1_SQRT_2;
+        // The incoming voice rides the music bus, whose default fader is 0.8,
+        // so the spike lands at the center pan gain times that fader.
+        let p = std::f32::consts::FRAC_1_SQRT_2 * 0.8;
         assert!((out[150 * 2] - p).abs() < 1e-4);
     }
 

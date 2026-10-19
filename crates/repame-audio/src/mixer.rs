@@ -353,15 +353,27 @@ mod tests {
         fill(&mut g, sfx.index(), frames, 1.0, 1.0);
         fill(&mut g, music.index(), frames, 1.0, 1.0);
         let out = render(&mut g, frames);
-        // Music is summed at unity, so the sample value is the duck gain.
-        assert!((out[0] - 0.9778312).abs() < 1e-5, "sample 0 = {}", out[0]);
+        // `sfx` passes at unity into the same master mix, so the music duck
+        // gain is the output minus that copy: 0.9778312 on the first sample,
+        // 0.0045547 once the attack has settled.
         assert!(
-            (out[(frames - 1) * 2] - 0.0045547).abs() < 1e-5,
+            (out[0] - 1.0 - 0.9778312).abs() < 1e-5,
+            "sample 0 = {}",
+            out[0]
+        );
+        assert!(
+            (out[(frames - 1) * 2] - 1.0 - 0.0045547).abs() < 1e-5,
             "settled = {}",
             out[(frames - 1) * 2]
         );
-        // Sfx itself passes untouched.
-        assert!((out[0] - 0.9778312).abs() < 1e-5);
+        // Sfx itself passes untouched: with the music bus silent and the same
+        // compressor still keyed on sfx, every output sample is sfx alone.
+        let mut quiet = graph(&tree, 48000);
+        quiet.begin(frames);
+        fill(&mut quiet, sfx.index(), frames, 1.0, 1.0);
+        for v in render(&mut quiet, frames) {
+            assert!((v - 1.0).abs() < 1e-6, "key bus is ducked: {v}");
+        }
     }
 
     /// Without a key the compressor must not touch the signal.

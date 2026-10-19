@@ -45,7 +45,9 @@ pub use spatial::{
     attenuation_gain, doppler_pitch, spatial_3d,
 };
 pub use state::AudioState;
-pub use synth::{AmplitudeEnvelope, CueSpec, Sweep, SynthError, Vibrato, Waveform, wav_pcm16};
+pub use synth::{
+    AmplitudeEnvelope, CueSpec, NoiseShape, Sweep, SynthError, Vibrato, Waveform, wav_pcm16,
+};
 
 pub mod prelude {
     pub use crate::{

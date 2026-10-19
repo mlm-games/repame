@@ -29,6 +29,8 @@
 //!   hand-written impact cues all added by hand - and `noise_seed` makes that
 //!   noise reproducible: the stream is drawn once per frame whatever the
 //!   waveform, so one seed fixes the same noise for every spec.
+//!   [`NoiseShape`] picks whether the noise rides the same envelope as the
+//!   waveform or its square, so grit can die ahead of the tone it sits on.
 //! - `gain` (clamped to `>= 0`) scales the mixed signal; every frame is
 //!   clamped to `-1.0..=1.0` afterwards, so an over-driven spec distorts
 //!   instead of wrapping the 16-bit encoder.
@@ -280,6 +282,18 @@ impl fmt::Display for SynthError {
 
 impl std::error::Error for SynthError {}
 
+/// How the white-noise blend follows the amplitude envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseShape {
+    /// Noise rides the same envelope as the waveform.
+    #[default]
+    Envelope,
+    /// Noise rides the envelope's square, so it dies twice as fast as the
+    /// tone it sits on: the law the hand-rolled cue tables used.
+    Squared,
+}
+
 /// One cue, declaratively: waveform, frequency path, envelope, and render
 /// parameters. All plain data, so a table of these can live in content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -302,6 +316,8 @@ pub struct CueSpec {
     /// Seed of the noise stream. `0` maps to a fixed non-zero fallback,
     /// because a zero xorshift state never advances.
     pub noise_seed: u64,
+    /// Whether the noise blend follows the envelope or its square.
+    pub noise_shape: NoiseShape,
     /// Cue length in seconds; the envelope runs over exactly this long.
     pub secs: f32,
     /// Linear output gain, clamped to `>= 0` and applied before clipping.
@@ -355,6 +371,12 @@ impl CueSpec {
         self
     }
 
+    /// Whether the noise blend follows the envelope or its square.
+    pub fn with_noise_shape(mut self, shape: NoiseShape) -> Self {
+        self.noise_shape = shape;
+        self
+    }
+
     /// Rate the spec is written for.
     pub fn with_sample_rate(mut self, sample_rate: u32) -> Self {
         self.sample_rate = sample_rate;
@@ -362,7 +384,9 @@ impl CueSpec {
     }
 
     /// Frame count an unclamped render would have at `sample_rate`, or why it
-    /// cannot render. The cap keeps a typo in `secs` from eating memory.
+    /// cannot render. The count is the nearest whole sample, so a duration
+    /// written as `frames / rate` in `f32` renders exactly that many frames.
+    /// The cap keeps a typo in `secs` from eating memory.
     pub fn duration_frames(&self, sample_rate: u32) -> Result<usize, SynthError> {
         if sample_rate == 0 {
             return Err(SynthError::ZeroSampleRate);
@@ -370,7 +394,7 @@ impl CueSpec {
         if !self.secs.is_finite() || self.secs <= 0.0 {
             return Err(SynthError::InvalidDuration { secs: self.secs });
         }
-        let frames = (self.secs as f64 * sample_rate as f64) as usize;
+        let frames = (self.secs as f64 * sample_rate as f64).round() as usize;
         if frames == 0 {
             return Err(SynthError::InvalidDuration { secs: self.secs });
         }
@@ -499,7 +523,22 @@ impl CueSpec {
                 tuned + (noise_sample - tuned) * noise_mix
             };
             let amplitude = self.amplitude.value_at(t, self.secs);
-            frames.push((mixed * amplitude * gain).clamp(-1.0, 1.0));
+            let sample = match self.noise_shape {
+                NoiseShape::Envelope => mixed * amplitude * gain,
+                NoiseShape::Squared => {
+                    let noise_amplitude = amplitude * amplitude;
+                    let blended = if noise_mix >= 1.0 {
+                        noise_sample * noise_amplitude
+                    } else if noise_mix <= 0.0 {
+                        tuned * amplitude
+                    } else {
+                        tuned * (1.0 - noise_mix) * amplitude
+                            + noise_sample * noise_mix * noise_amplitude
+                    };
+                    blended * gain
+                }
+            };
+            frames.push(sample.clamp(-1.0, 1.0));
             phase = (phase + frequency as f64 * inv_rate as f64).rem_euclid(1.0);
         }
         Ok(SharedFrames {
@@ -559,6 +598,7 @@ impl Default for CueSpec {
             vibrato: None,
             noise_mix: 0.0,
             noise_seed: 0,
+            noise_shape: NoiseShape::default(),
             secs: 0.25,
             gain: 1.0,
             sample_rate: DEFAULT_SAMPLE_RATE,
@@ -1060,6 +1100,82 @@ mod tests {
             .render_wav()
             .expect("encodes");
         assert_eq!(crate::sniff_format(&wav), crate::AudioFormat::Wav);
+    }
+
+    #[test]
+    fn durations_written_in_frames_render_those_frames() {
+        // `frames / rate` in `f32` lands a hair below the integer for these,
+        // and a truncated count silently dropped the final sample.
+        for (frames, rate) in [
+            (2200u32, 22_050u32),
+            (1600, 22_050),
+            (900, 22_050),
+            (1800, 22_050),
+            (2400, 22_050),
+            (3400, 22_050),
+            (5000, 22_050),
+            (11_000, 22_050),
+            (4410, 44_100),
+            (100, 1000),
+        ] {
+            let spec = CueSpec::new(Waveform::Sine, 440.0, frames as f32 / rate as f32);
+            assert_eq!(
+                spec.duration_frames(rate).expect("fits"),
+                frames as usize,
+                "{frames} frames at {rate} Hz"
+            );
+            assert_eq!(
+                spec.render_at(rate).expect("renders").len_frames(),
+                frames as usize,
+                "{frames} frames at {rate} Hz, rendered"
+            );
+        }
+    }
+
+    #[test]
+    fn squared_noise_rides_the_envelope_squared() {
+        let envelope = AmplitudeEnvelope::Adsr {
+            attack_s: 0.0,
+            decay_s: 0.05,
+            sustain: 0.0,
+            release_s: 0.0,
+        };
+        let render = |shape: NoiseShape| {
+            CueSpec::new(Waveform::Noise, 440.0, 0.1)
+                .with_noise(1.0, 0x51ED)
+                .with_noise_shape(shape)
+                .with_amplitude(envelope.clone())
+                .with_sample_rate(16_000)
+                .render()
+                .expect("renders")
+                .frames
+        };
+        let linear = render(NoiseShape::Envelope);
+        let squared = render(NoiseShape::Squared);
+        assert_eq!(linear.len(), squared.len());
+        for (i, (a, b)) in linear.iter().zip(squared.iter()).enumerate() {
+            let env = envelope.value_at(i as f32 / 16_000.0, 0.1);
+            if env <= 0.01 {
+                continue;
+            }
+            // Both shapes draw the same noise sample at the same instant, so
+            // dividing the envelope back out leaves one number.
+            assert!(
+                (b / (env * env) - a / env).abs() < 1e-6,
+                "sample {i}: {a} at env {env} vs {b}"
+            );
+        }
+        // With noise at zero the blend is unity, so the shape cannot matter.
+        let quiet = |shape: NoiseShape| {
+            CueSpec::new(Waveform::Sine, 440.0, 0.05)
+                .with_noise(0.0, 7)
+                .with_noise_shape(shape)
+                .render()
+                .expect("renders")
+                .frames
+        };
+        assert_eq!(quiet(NoiseShape::Envelope), quiet(NoiseShape::Squared));
+        assert_eq!(CueSpec::default().noise_shape, NoiseShape::Envelope);
     }
 
     #[test]

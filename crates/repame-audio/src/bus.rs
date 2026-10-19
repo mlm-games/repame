@@ -570,11 +570,16 @@ mod tests {
         assert_eq!(tree.parent(music), Some(MASTER));
         assert_eq!(tree.len(), 5);
 
-        // A send that closes the loop is refused too.
-        let err = tree.add_send(bus, music, 0.5).unwrap_err();
+        // A send that closes the loop is refused too: `music` feeding its own
+        // child would demand music renders first, but the child already
+        // renders first as music's child.
+        let err = tree.add_send(music, bus, 0.5).unwrap_err();
         assert!(matches!(err, BusError::Cycle(_)));
-        assert!(tree.sends(bus).is_empty());
-        tree.add_send(music, bus, 0.5).expect("forward send is fine");
+        assert!(tree.sends(music).is_empty());
+        // The same pair the other way is no cycle: a child sending into its
+        // parent repeats the parent edge, so the order is unchanged.
+        tree.add_send(bus, music, 0.5)
+            .expect("forward send is fine");
         tree.validate().expect("still valid");
     }
 
@@ -600,23 +605,34 @@ mod tests {
         let key = order.iter().position(|b| *b == sfx).unwrap();
         let target = order.iter().position(|b| *b == music).unwrap();
         assert!(key < target, "key must render first: {order:?}");
-        // A key that would need the target first is a cycle.
+        // A key downstream of the bus it keys is a cycle: `sfx` sends into
+        // `music`, so music cannot render before it.
         let mut tree = BusTree::new();
         let mut spec = EffectSpec::compressor(-24.0, 4.0);
         if let EffectSpec::Compressor { sidechain, .. } = &mut spec {
             *sidechain = Some(music);
         }
+        tree.add_send(sfx, music, 0.5).expect("send");
         let err = tree.push_effect(sfx, spec).unwrap_err();
         assert!(matches!(err, BusError::Cycle(_)), "{err:?}");
+        assert!(tree.effects(sfx).is_empty(), "rejected effect is not kept");
     }
 
+    /// Removing a bus re-parents its children onto its parent, drops every
+    /// send and sidechain reference to it, and compacts the ids above it so
+    /// the surviving names still resolve.
     #[test]
     fn removing_a_bus_relinks_children_and_drops_references() {
         let mut tree = BusTree::new();
         let sfx = BusId::channel(AudioChannel::Sfx);
         let sub = tree.add_bus("sfx_weapons", sfx).expect("adds");
+        tree.add_bus("sfx_weapons_dry", sub).expect("adds");
+        let aux = tree.add_bus("aux", MASTER).expect("adds");
         let ui = BusId::channel(AudioChannel::Ui);
-        tree.add_send(sub, ui, 0.25).expect("send");
+        // Both reference kinds point *at* the bus that goes away.
+        tree.add_send(ui, sub, 0.25).expect("send");
+        tree.push_effect(aux, EffectSpec::sidechain_duck(sub, -30.0, 4.0))
+            .expect("effect");
         tree.push_effect(
             ui,
             EffectSpec::Filter {
@@ -628,12 +644,27 @@ mod tests {
         )
         .expect("effect");
         tree.remove_bus(sub).expect("removable");
-        assert_eq!(tree.len(), 5);
+        assert_eq!(tree.len(), 6);
         assert!(tree.id("sfx_weapons").is_none());
-        // The keyboard-bus id still names its bus after the shift.
+        // The child re-parented onto `sfx` and shifted down; `aux` was above
+        // the hole, so it shifted too and still resolves by name.
+        let dry = tree.id("sfx_weapons_dry").expect("child survives");
+        let aux = tree.id("aux").expect("bus above the hole survives");
+        assert_eq!(dry.index(), 4);
+        assert_eq!(tree.parent(dry), Some(sfx));
+        assert_eq!(aux.index(), 5);
+        assert_eq!(tree.parent(aux), Some(MASTER));
+        // `ui` sits below the hole, so its id still names its bus.
         assert_eq!(tree.name(ui), Some("ui"));
-        assert!(tree.effects(ui).len() == 1);
+        // The send and the sidechain key dropped; the effects themselves stay.
         assert!(tree.sends(ui).is_empty());
+        assert_eq!(tree.effects(ui).len(), 1);
+        assert_eq!(tree.effects(aux).len(), 1);
+        let key = match &tree.effects(aux)[0] {
+            EffectSpec::Compressor { sidechain, .. } => *sidechain,
+            other => panic!("expected a compressor, got {other:?}"),
+        };
+        assert_eq!(key, None, "sidechain reference must drop");
         tree.validate().expect("valid after removal");
     }
 

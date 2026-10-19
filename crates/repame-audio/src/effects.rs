@@ -1246,7 +1246,10 @@ mod tests {
             spread: 0.0,
         };
         let out = run(&effect, 48000, &impulse(4096));
-        let early: f32 = out[..64].iter().map(|v| v.abs()).sum();
+        // Equal-length windows: the per-pass feedback clamp to 0.95 (plus the
+        // damped feedback path) must make the second half hold less than the
+        // first. Unequal windows would compare echo counts, not decay.
+        let early: f32 = out[..2048].iter().map(|v| v.abs()).sum();
         let late: f32 = out[2048..].iter().map(|v| v.abs()).sum();
         assert!(early > 0.0);
         assert!(late < early, "delay must decay: {early} -> {late}");
@@ -1260,7 +1263,14 @@ mod tests {
         assert!(out.iter().all(|v| v.is_finite()));
         let tail: f32 = out[20000..].iter().map(|v| v.abs()).sum();
         assert!(tail > 0.0, "reverb produced no tail");
-        assert!(out[0].abs() < 1.0, "dry path is untouched");
+        // Every wet path spans at least the predelay, so sample 0 is the dry
+        // input alone: the impulse, at exactly its own amplitude (`dry` is
+        // 1.0 and `EffectSpec::reverb` leaves it there).
+        assert!(
+            (out[0] - 1.0).abs() < 1e-6,
+            "dry path is untouched: {}",
+            out[0]
+        );
     }
 
     #[test]

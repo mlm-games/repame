@@ -19,6 +19,7 @@ use repose_ui::Embedded;
 
 use super::camera::OrbitCamera;
 use super::mesh::MeshGroup;
+use super::occlusion::{GpuOcclusion, warn_feed_unavailable};
 use super::pick::{MeshHit, pick_ray};
 use super::render::{BatchDesc, MipUpload, SceneBatch, SceneLight, SceneUpload};
 use super::render::{paint_scene_with_callback, prepare_scene_with_id};
@@ -185,11 +186,39 @@ pub struct Frame3d {
     /// so no false negative survives a frame. `None` disables the feed (no
     /// dispatch, no map) and leaves [`occlusion`](Frame3d::occlusion) as the
     /// only source.
+    ///
+    /// The feed, phase two included, needs [`GpuOcclusion`]: a device
+    /// without it never arms one (the staged descriptor is dropped with a
+    /// one-time warning), no occlusion buffer is created and nothing is
+    /// dispatched, so a caller-staged
+    /// [`occlusion`](Frame3d::occlusion) is then the only source.
     pub occlusion_feed: Option<crate::OcclusionFeedDesc>,
     /// Cold-start viewport size in physical px, used for the GPU camera
     /// until the first painted size arrives (same role as `repame-view2d`
     /// `FrameInput::viewport_dp`). Falls back to 16:9.
     pub viewport_px: [f32; 2],
+    /// GPU-occlusion capability mode, resolved when `prepare` runs. A
+    /// three-way choice, mirroring
+    /// [`gpu_skinning`](Frame3d::gpu_skinning):
+    /// 1. an explicit `Some(mode)` staged here wins;
+    /// 2. `None` derives from the device: the adapter's
+    ///    [`wgpu::DownlevelCapabilities`], which repose publishes into
+    ///    `CallbackResources`, maps through
+    ///    [`GpuOcclusion::from_downlevel_flags`] (`COMPUTE_SHADERS` and
+    ///    `INDIRECT_EXECUTION`);
+    /// 3. a device with no capabilities published (an older repose) falls
+    ///    back to [`GpuOcclusion::Supported`], the historical GPU path, byte
+    ///    for byte.
+    ///
+    /// On the resolved [`GpuOcclusion::Unsupported`] the feed
+    /// ([`occlusion_feed`](Frame3d::occlusion_feed)) is unavailable: the
+    /// viewport creates no occlusion buffers, appends no
+    /// [`PassKind::Occlusion`](crate::PassKind::Occlusion) pass and encodes
+    /// neither the chain nor an indirect draw (the dropped feed is logged
+    /// once). A caller-staged [`occlusion`](Frame3d::occlusion) keeps
+    /// culling, since the hierarchical-Z test itself is host-side. Defaults
+    /// to `None` (derive from the device).
+    pub gpu_occlusion: Option<crate::GpuOcclusion>,
 }
 
 impl Default for Frame3d {
@@ -215,6 +244,7 @@ impl Default for Frame3d {
             occlusion: None,
             occlusion_feed: Some(crate::OcclusionFeedDesc::default()),
             viewport_px: [1600.0, 900.0],
+            gpu_occlusion: None,
         }
     }
 }
@@ -759,6 +789,24 @@ impl GpuViewport3d {
             })
             .unwrap_or(GpuSkinning::Supported)
     }
+
+    /// Resolves this frame's [`GpuOcclusion`] mode the same way
+    /// [`GpuViewport3d::effective_skinning`] resolves skinning: an explicit
+    /// [`Frame3d::gpu_occlusion`] wins; otherwise the device's downlevel
+    /// capabilities decide through [`GpuOcclusion::from_downlevel_flags`]
+    /// (`COMPUTE_SHADERS` and `INDIRECT_EXECUTION`); a device with no
+    /// capabilities published (an older repose) falls back to
+    /// [`GpuOcclusion::Supported`], the historical GPU path, byte for byte.
+    fn effective_occlusion(&self, resources: &CallbackResources) -> GpuOcclusion {
+        self.input
+            .gpu_occlusion
+            .or_else(|| {
+                resources
+                    .get::<wgpu::DownlevelCapabilities>()
+                    .map(|capabilities| GpuOcclusion::from_downlevel_flags(capabilities.flags))
+            })
+            .unwrap_or(GpuOcclusion::Supported)
+    }
 }
 
 impl WgpuCallback for GpuViewport3d {
@@ -852,9 +900,22 @@ impl WgpuCallback for GpuViewport3d {
         if chain.is_some() {
             batch.set_post(post);
         }
-        // Caller-staged occlusion wins over the feed; a frame that stages its
-        // own state owns its pass list too.
-        let feed = if self.input.occlusion.is_some() {
+        // The GPU feed is a device capability: compute shaders for the chain
+        // and the phase-two test, indirect execution for the args it writes.
+        // Resolved here and staged on the batch, so a device without it
+        // creates no occlusion buffers at all and encodes neither the chain
+        // nor an indirect draw.
+        let gpu_occlusion = self.effective_occlusion(resources);
+        batch.set_gpu_occlusion(gpu_occlusion);
+        if !gpu_occlusion.is_supported()
+            && self.input.occlusion.is_none()
+            && self.input.occlusion_feed.is_some()
+        {
+            warn_feed_unavailable("viewport");
+        }
+        // Caller-staged occlusion wins over the feed; a device that cannot
+        // run the feed never arms one either.
+        let feed = if self.input.occlusion.is_some() || !gpu_occlusion.is_supported() {
             None
         } else {
             self.input.occlusion_feed

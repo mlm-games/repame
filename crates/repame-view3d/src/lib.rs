@@ -15,6 +15,9 @@
 //!   depth ([`occlusion`]), applied before the frustum phase. The viewport
 //!   drives the readback itself with [`OcclusionFeedDesc`] (armed by default on
 //!   frames that declare a depth pass), so games need no feed of their own.
+//!   The feed is GPU work and exists only where [`GpuOcclusion`] says the
+//!   device can run it; a device without it keeps the host-side path, a
+//!   pyramid the game stages itself.
 //! * [`PostProcess`] - bloom, DOF, camera motion blur, FXAA and ray-marched
 //!   volumetric fog ([`postfx`]).
 //! * [`LodGroup`] - distance/hysteresis mesh LOD ([`lod`]), with coarse voxel
@@ -83,7 +86,7 @@ pub use material::{
 };
 pub use mesh::{Material, MeshGroup, Rgb, shade, shade_for_dir};
 pub use occlusion::{
-    DEFAULT_BIAS, DEFAULT_TILE, DepthPyramid, DepthSource, MAX_TILE, OcclusionCulling,
+    DEFAULT_BIAS, DEFAULT_TILE, DepthPyramid, DepthSource, GpuOcclusion, MAX_TILE, OcclusionCulling,
     OcclusionFeedDesc, aabb_ndc, decode_f16, nearest_view_depth,
 };
 pub use pass::{

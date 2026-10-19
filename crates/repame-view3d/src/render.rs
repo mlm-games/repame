@@ -639,6 +639,7 @@ use repose_render_wgpu::{
 };
 
 use super::mesh::MeshGroup;
+use super::occlusion::{GpuOcclusion, warn_feed_unavailable};
 use super::particles::{
     GpuColliders, GpuDrawParams, GpuEmitter, GpuSimState, ParticleFrame, SIMULATE_WORKGROUP,
     pack_colliders, pack_emitter, request_capacity,
@@ -2534,6 +2535,46 @@ struct HizCandidate {
 /// Must stay the WGSL `Candidate`: 48 bytes.
 const _: () = assert!(std::mem::size_of::<HizCandidate>() == 48);
 
+/// Bytes one indirect draw's args occupy: `index_count`, `instance_count`,
+/// `first_index`, `base_vertex`, `first_instance`.
+const HIZ_ARGS_STRIDE: u64 = 20;
+
+/// The phase-two buffers of one batch entry, one slot per phase-one reject:
+/// this frame's candidate records and the indirect args the GPU test writes.
+///
+/// Built only where the device runs the feed
+/// ([`GpuOcclusion::Supported`]): a device that cannot execute indirect draws
+/// is never asked to create an `INDIRECT` buffer at all, which is why the
+/// whole pair is optional. Both grow together, so the entry never holds args
+/// without the records they belong to.
+struct OcclusionBuffers {
+    candidates: wgpu::Buffer,
+    args: wgpu::Buffer,
+    /// Slots both buffers hold.
+    capacity: u32,
+}
+
+impl OcclusionBuffers {
+    /// Both buffers for `capacity` slots.
+    fn new(device: &wgpu::Device, capacity: u32) -> Self {
+        Self {
+            candidates: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("repame_view3d_occlusion_candidates"),
+                size: capacity as u64 * std::mem::size_of::<HizCandidate>() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            args: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("repame_view3d_occlusion_args"),
+                size: capacity as u64 * HIZ_ARGS_STRIDE,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+                mapped_at_creation: false,
+            }),
+            capacity,
+        }
+    }
+}
+
 /// Per-frame snapshot batch. `Send + Sync` so it can cross into the
 /// compositor thread via [`repose_render_wgpu::Callback`].
 ///
@@ -2617,6 +2658,9 @@ pub struct SceneBatch {
     occlusion: Option<super::occlusion::OcclusionCulling>,
     /// Feed settings staged with [`SceneBatch::set_occlusion_feed`].
     occlusion_feed: Option<crate::OcclusionFeedDesc>,
+    /// Device capability staged with [`SceneBatch::set_gpu_occlusion`]: the
+    /// feed is armed only where the device runs it.
+    gpu_occlusion: GpuOcclusion,
     /// [`SceneBatch::finish`] decided this frame re-tests its rejects in
     /// phase two.
     occlusion_phase_two: bool,
@@ -2950,6 +2994,7 @@ impl SceneBatch {
             probes: Vec::new(),
             occlusion: None,
             occlusion_feed: None,
+            gpu_occlusion: GpuOcclusion::Supported,
             occlusion_phase_two: false,
             occluded: 0,
             occlusion_candidates: Vec::new(),
@@ -4335,6 +4380,23 @@ impl SceneBatch {
         &self.probes
     }
 
+    /// Declares whether the device behind this batch can run the GPU
+    /// occlusion feed ([`GpuOcclusion`], read from the adapter at device
+    /// creation). Defaults to [`GpuOcclusion::Supported`], the historical GPU
+    /// path. The viewport stages the mode it resolved for the device; a game
+    /// driving [`SceneBatch`] directly does the same.
+    ///
+    /// On [`GpuOcclusion::Unsupported`] the feed
+    /// ([`SceneBatch::set_occlusion_feed`]) stays inert: [`SceneBatch::finish`]
+    /// keeps a phase-one reject only where phase two can draw it, no occlusion
+    /// buffer is created (the args buffer's `INDIRECT` usage is never
+    /// requested) and neither the chain nor an indirect draw is encoded. The
+    /// mode is part of the resource key, so an entry built for the other mode
+    /// is rebuilt rather than reused.
+    pub fn set_gpu_occlusion(&mut self, mode: GpuOcclusion) {
+        self.gpu_occlusion = mode;
+    }
+
     /// Stages the frame's occlusion test: [`finish`](SceneBatch::finish)
     /// runs it before the frustum phase over the frame's *opaque*
     /// depth-tested groups that carry bounds (the depth pass it reads
@@ -4359,9 +4421,29 @@ impl SceneBatch {
     /// Stages the viewport-driven occlusion feed's settings
     /// ([`crate::OcclusionFeedDesc`]), including whether the same-frame
     /// phase two runs. `None` (default) leaves the feed to the caller-staged
-    /// [`SceneBatch::set_occlusion`] state alone.
+    /// [`SceneBatch::set_occlusion`] state alone. A feed staged on a device
+    /// whose [`GpuOcclusion`] is [`Unsupported`](GpuOcclusion::Unsupported)
+    /// ([`SceneBatch::set_gpu_occlusion`]) is dropped: phase one drops its
+    /// rejects as it always did, and the caller-staged pyramid stays the only
+    /// cull source.
     pub fn set_occlusion_feed(&mut self, feed: Option<crate::OcclusionFeedDesc>) {
         self.occlusion_feed = feed;
+    }
+
+    /// The feed this frame really arms: `None` when the frame staged none, or
+    /// when the device cannot run one ([`GpuOcclusion::Unsupported`]), and the
+    /// staged descriptor is dropped with the one-time notice
+    /// ([`super::occlusion::warn_feed_unavailable`]). Resolved here rather
+    /// than in [`SceneBatch::set_occlusion_feed`] so the answer does not
+    /// depend on the order the two setters were called in; both
+    /// [`SceneBatch::finish`] and the upload read it.
+    fn armed_feed(&self) -> Option<crate::OcclusionFeedDesc> {
+        let feed = self.occlusion_feed?;
+        if self.gpu_occlusion.is_supported() {
+            return Some(feed);
+        }
+        warn_feed_unavailable(&format!("scene_batch[{}]", self.id));
+        None
     }
 
     /// Groups culled by the last [`SceneBatch::finish`]'s hierarchical-Z
@@ -5321,7 +5403,7 @@ impl SceneBatch {
         // the scene's groups become candidates (the shared scene target or a
         // declared scene-color pass, the same notion the scheduler and the
         // phase-two draw use).
-        let phase_two = self.occlusion_feed.is_some_and(|feed| feed.phase_two)
+        let phase_two = self.armed_feed().is_some_and(|feed| feed.phase_two)
             && self.occlusion.is_some()
             && culling
             && self
@@ -5715,10 +5797,12 @@ impl SceneBatch {
             .len()
             .next_power_of_two()
             .max(crate::MAX_SKIN_JOINTS);
-        // The skin variant is part of the cache key: a device swap (or a
-        // capability change) must never reuse pipelines built for the other
-        // mode, even when every other dimension matches.
+        // The capability variants are part of the cache key: a device swap
+        // (or a capability change) must never reuse pipelines built for the
+        // other mode, and an entry built without the occlusion feed's
+        // phase-two buffers must not be reused where the feed can run.
         let skin_supported = self.skinning.is_supported();
+        let occlusion_supported = self.gpu_occlusion.is_supported();
         let key = (
             screen.target_format,
             screen.sample_count,
@@ -5731,7 +5815,7 @@ impl SceneBatch {
             cascade_count,
             cube_size,
             skin_slots,
-            skin_supported,
+            (skin_supported, occlusion_supported),
         );
         let fresh = resources
             .get::<SceneResources>()
@@ -5745,7 +5829,7 @@ impl SceneBatch {
         }
         if stale {
             log::warn!(
-                "scene_batch[{}]: rebuilding pipeline/texture (format/sample/desc/shadow/rig/skin changed); texture contents dropped, re-upload required",
+                "scene_batch[{}]: rebuilding pipeline/texture (format/sample/desc/shadow/rig/skin/occlusion changed); texture contents dropped, re-upload required",
                 self.id
             );
         }
@@ -6489,19 +6573,7 @@ impl SceneBatch {
             depth_velocity_bind,
             occlusion_feed: OcclusionFeed::default(),
             occlusion_feed_desc: None,
-            occlusion_candidates: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("repame_view3d_occlusion_candidates"),
-                size: std::mem::size_of::<HizCandidate>() as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            occlusion_args: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("repame_view3d_occlusion_args"),
-                size: 20,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
-                mapped_at_creation: false,
-            }),
-            occlusion_capacity: 1,
+            occlusion: occlusion_supported.then(|| OcclusionBuffers::new(device, 1)),
             occlusion_candidate_count: 0,
             occlusion_phase_two: false,
             post: None,
@@ -6736,32 +6808,21 @@ impl SceneBatch {
             );
         }
         res.last_ranges = self.ranges.clone();
-        res.occlusion_feed_desc = self.occlusion_feed;
+        res.occlusion_feed_desc = self.armed_feed();
         res.occlusion_phase_two = self.occlusion_phase_two;
         let candidates = self.occlusion_candidates.len() as u32;
         res.occlusion_candidate_count = candidates;
-        if candidates > res.occlusion_capacity {
-            let cap = candidates.next_power_of_two();
-            res.occlusion_candidates = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("repame_view3d_occlusion_candidates"),
-                size: cap as u64 * std::mem::size_of::<HizCandidate>() as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            res.occlusion_args = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("repame_view3d_occlusion_args"),
-                size: cap as u64 * 20,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
-                mapped_at_creation: false,
-            });
-            res.occlusion_capacity = cap;
-        }
-        if candidates > 0 {
-            queue.write_buffer(
-                &res.occlusion_candidates,
-                0,
-                bytemuck::cast_slice(&self.occlusion_candidates),
-            );
+        if let Some(buffers) = res.occlusion.as_mut() {
+            if candidates > buffers.capacity {
+                *buffers = OcclusionBuffers::new(device, candidates.next_power_of_two());
+            }
+            if candidates > 0 {
+                queue.write_buffer(
+                    &buffers.candidates,
+                    0,
+                    bytemuck::cast_slice(&self.occlusion_candidates),
+                );
+            }
         }
     }
 
@@ -6820,17 +6881,17 @@ impl SceneBatch {
 /// agree on it, so it lives in one place.
 type SceneKey = (
     wgpu::TextureFormat,
-    u32,   // sample count
-    u32,   // layer size
-    u32,   // layers
-    u32,   // filter
-    u32,   // mip levels
-    u32,   // shadow map size
-    u32,   // cascade map size
-    u32,   // cascade count
-    u32,   // point shadow size
-    usize, // skin slots
-    bool,  // GPU skinning supported
+    u32,          // sample count
+    u32,          // layer size
+    u32,          // layers
+    u32,          // filter
+    u32,          // mip levels
+    u32,          // shadow map size
+    u32,          // cascade map size
+    u32,          // cascade count
+    u32,          // point shadow size
+    usize,        // skin slots
+    (bool, bool), // GPU capabilities: skinning, occlusion feed
 );
 
 struct SceneEntry {
@@ -6859,13 +6920,10 @@ struct SceneEntry {
     occlusion_feed: OcclusionFeed,
     /// Feed settings the last upload staged.
     occlusion_feed_desc: Option<crate::OcclusionFeedDesc>,
-    /// The frame's phase-two candidate records.
-    occlusion_candidates: wgpu::Buffer,
-    /// The frame's indirect draw args, written by the phase-two test;
-    /// `occlusion_capacity` slots each.
-    occlusion_args: wgpu::Buffer,
-    /// Slots both occlusion buffers hold.
-    occlusion_capacity: u32,
+    /// The frame's phase-two buffers, or `None` where the device cannot run
+    /// the feed (the mode staged when the entry was built was
+    /// [`GpuOcclusion::Unsupported`]).
+    occlusion: Option<OcclusionBuffers>,
     /// Candidates the last upload wrote.
     occlusion_candidate_count: u32,
     /// The staged frame re-tests its phase-one rejects in phase two.
@@ -7023,13 +7081,17 @@ pub fn prepare_scene_with_id(
         probe_captures: Option<ProbeCaptureSet>,
         /// The frame's settled camera uniform, the base for each probe face.
         camera_mat: CameraUniform,
-        /// Phase two re-tested this frame's phase-one rejects on the GPU:
-        /// the scene pass draws those ranges through
-        /// [`Snapshot::occlusion_args`].
+        /// Phase two will re-test this frame's phase-one rejects on the GPU:
+        /// the scene pass skips those ranges and the phase-two pass draws
+        /// them through [`Snapshot::occlusion_args`].
         occlusion_indirect: bool,
         /// Candidates [`Snapshot::occlusion_args`] holds args for.
         occlusion_candidates: u32,
-        occlusion_args: wgpu::Buffer,
+        /// The indirect args the test writes, one [`HIZ_ARGS_STRIDE`]-byte
+        /// record per candidate. `None` where the device cannot run the feed:
+        /// [`Snapshot::occlusion_indirect`] is false then and the scene pass
+        /// draws every range itself.
+        occlusion_args: Option<wgpu::Buffer>,
     }
     // A frame with neither geometry nor particles still has to clear the
     // scene target: `ensure` leaves a matching target untouched, and `paint`
@@ -7068,9 +7130,12 @@ pub fn prepare_scene_with_id(
         }
         let mat = res.camera_mat;
         // Phase two re-tests this frame's rejects against a chain built from
-        // the depth pass; it needs that pass's target in this frame's plan.
+        // the depth pass; it needs that pass's target in this frame's plan and
+        // the phase-two buffers the test writes, which exist only where the
+        // device runs the feed. Only then may the scene pass skip a reject.
         let phase_two_ran = res.occlusion_phase_two
             && res.occlusion_candidate_count > 0
+            && res.occlusion.is_some()
             && res.pass_specs.iter().any(|spec| {
                 matches!(spec.kind, super::pass::PassKind::Depth | super::pass::PassKind::Occlusion)
                     && res.pass_targets.contains_key(&spec.target.name)
@@ -7196,7 +7261,7 @@ pub fn prepare_scene_with_id(
             camera_mat: res.camera_mat,
             occlusion_indirect: phase_two_ran,
             occlusion_candidates: res.occlusion_candidate_count,
-            occlusion_args: res.occlusion_args.clone(),
+            occlusion_args: res.occlusion.as_ref().map(|buffers| buffers.args.clone()),
             probe_captures: res.probes.as_ref().map(|gpu| ProbeCaptureSet {
                 capture_bind: gpu.capture_bind.clone(),
                 probes: gpu
@@ -7552,7 +7617,9 @@ pub fn prepare_scene_with_id(
 
     // Phase two: the depth pass runs before the scene pass, so this frame's
     // chain is available to re-test the phase-one rejects; the test compute
-    // writes their indirect args before the scene pass draws them.
+    // writes their indirect args before the scene pass draws them. Without
+    // the args buffer (a device that cannot run the feed) a reject is drawn
+    // by the pass that owns it instead.
     let mut occlusion_indirect = snap.occlusion_indirect;
     // Phase two runs once per frame: right after the depth pass the chain
     // reads.
@@ -7597,8 +7664,8 @@ pub fn prepare_scene_with_id(
                     None => &snap.pipeline_flat,
                 },
             });
-            if let Some(index) = r.hz_culled {
-                pass.draw_indexed_indirect(&snap.occlusion_args, index as u64 * 20);
+            if let (Some(index), Some(args)) = (r.hz_culled, snap.occlusion_args.as_ref()) {
+                pass.draw_indexed_indirect(args, index as u64 * HIZ_ARGS_STRIDE);
             }
         }
     };
@@ -7656,9 +7723,10 @@ pub fn prepare_scene_with_id(
                     None => &snap.pipeline_flat,
                 },
             });
-            if r.hz_culled.is_some() {
+            if r.hz_culled.is_some() && snap.occlusion_args.is_some() {
                 // A phase-one reject: stays culled unless the phase-two
-                // pass draws it after the depth pass.
+                // pass draws it after the depth pass. Without the args
+                // buffer the device runs no phase two, so it draws here.
                 continue;
             }
             pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
@@ -7683,6 +7751,7 @@ pub fn prepare_scene_with_id(
                 if let Some(all) = resources.get_mut::<SceneResources>()
                     && let Some(res) = all.batches.get_mut(id)
                     && let Some(desc) = res.occlusion_feed_desc
+                    && let Some(buffers) = res.occlusion.as_ref()
                 {
                     let width = spec.target.width.max(1);
                     let height = spec.target.height.max(1);
@@ -7704,9 +7773,9 @@ pub fn prepare_scene_with_id(
                             desc.clamped_bias(),
                             width,
                             height,
-                            &res.occlusion_candidates,
+                            &buffers.candidates,
                             snap.occlusion_candidates,
-                            &snap.occlusion_args,
+                            &buffers.args,
                         );
                     } else {
                         // No chain to test against: the rejects stay culled.
@@ -7892,9 +7961,10 @@ pub fn prepare_scene_with_id(
             1.0,
         );
         for r in snap.ranges.iter().filter(|r| r.pass == pass_index) {
-            if r.hz_culled.is_some() {
+            if r.hz_culled.is_some() && snap.occlusion_args.is_some() {
                 // A phase-one reject: stays culled, or the phase-two pass
-                // draws it after the depth pass.
+                // draws it after the depth pass. Without the args buffer
+                // the device runs no phase two, so it draws here.
                 continue;
             }
             let program = snap
@@ -9342,6 +9412,51 @@ mod tests {
         assert_eq!(batch.occlusion_candidates.len(), 1);
         assert!(!batch.is_empty());
         assert!(batch.ranges.iter().any(|r| r.hz_culled == Some(0)));
+    }
+
+    /// On a device that cannot run the feed ([`GpuOcclusion::Unsupported`])
+    /// a staged feed is dropped, so phase two never keeps a reject: it is
+    /// drawn like a frame with no feed at all (no candidate, no flagged
+    /// range for the indirect encode to skip).
+    #[test]
+    fn unsupported_device_drops_the_feed() {
+        use super::super::camera::OrbitCamera;
+        use super::super::occlusion::{DepthPyramid, OcclusionCulling, OcclusionFeedDesc};
+        use glam::Vec3;
+        let cam = OrbitCamera {
+            target: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.9,
+            dist: 30.0,
+            fov_y_deg: 30.0,
+        };
+        let view_proj = cam.view_proj(1.0);
+        let state = OcclusionCulling {
+            pyramid: DepthPyramid::build(64, 64, 8, &[20.0f32; 64 * 64]).expect("valid"),
+            view_proj,
+            cam_pos: cam.eye().into(),
+            cam_forward: cam.forward().into(),
+            bias: 0.1,
+        };
+        let mut batch = SceneBatch::with_id("test.occlusion.unsupported");
+        batch.set_camera(view_proj);
+        batch.set_camera_pos(cam.eye().into());
+        batch.set_passes(&[depth_pass()]).expect("a lone depth pass validates");
+        batch.set_gpu_occlusion(GpuOcclusion::Unsupported);
+        batch.set_occlusion(Some(state));
+        batch.set_occlusion_feed(Some(OcclusionFeedDesc {
+            phase_two: true,
+            ..Default::default()
+        }));
+        // One group the wall hides and one it does not: the frame keeps the
+        // visible geometry and drops the reject outright.
+        batch.push_group(&solid_box());
+        batch.push_group(&big_far_box(&cam));
+        batch.finish();
+        assert_eq!(batch.occluded(), 1);
+        assert!(batch.occlusion_candidates.is_empty());
+        assert!(!batch.is_empty(), "the visible group still draws");
+        assert!(batch.ranges.iter().all(|r| r.hz_culled.is_none()));
     }
 
     /// Particle staging drops invalid systems, resolves sub-emitter dispatch

@@ -54,6 +54,15 @@
 //! drawn over the scene pass's target, loaded with the depth that pass left.
 //! The one-frame latency is then only a phase-one filter, not a visible
 //! delay.
+//!
+//! Both phases run on the GPU, so the feed is a device capability:
+//! [`GpuOcclusion`] resolves it from the adapter's downlevel flags, and a
+//! device without them gets no feed at all (no buffers, no compute pass, no
+//! indirect draw) instead of a validation error. The host-side pieces
+//! ([`DepthPyramid`], [`OcclusionCulling`], the builders) are unaffected, and
+//! a game can still stage its own pyramid on such a device.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use glam::Mat4;
 
@@ -70,6 +79,91 @@ const MIN_TILE: u32 = 1;
 /// default (see [`OcclusionFeedDesc::bias`]).
 pub const DEFAULT_BIAS: f32 = 0.1;
 
+/// Whether the device behind a viewport can run the viewport-driven
+/// occlusion feed ([`OcclusionFeedDesc`]): the compute chain that reduces a
+/// depth pass ([`wgpu::DownlevelFlags::COMPUTE_SHADERS`]) and the phase-two
+/// test that writes and executes indirect draw args
+/// ([`wgpu::DownlevelFlags::INDIRECT_EXECUTION`]).
+///
+/// wgpu exposes the flags on the adapter
+/// ([`Adapter::get_downlevel_capabilities`](wgpu::Adapter::get_downlevel_capabilities)),
+/// and a Repose paint callback only ever sees the device. Repose publishes
+/// the adapter's capabilities into `CallbackResources`, so the viewport
+/// resolves the mode from the device automatically; a caller can still pin
+/// it explicitly through
+/// [`Frame3d::gpu_occlusion`](crate::Frame3d::gpu_occlusion) (`Some`), and a
+/// device with nothing published (an older repose) falls back to
+/// [`Supported`](GpuOcclusion::Supported).
+///
+/// On [`Unsupported`](GpuOcclusion::Unsupported) the viewport creates no
+/// occlusion buffers at all (so no `INDIRECT` usage is ever requested),
+/// appends no [`PassKind::Occlusion`](crate::PassKind::Occlusion) pass and
+/// encodes neither the chain nor the phase-two test; a feed staged through
+/// [`SceneBatch::set_occlusion_feed`](crate::SceneBatch::set_occlusion_feed)
+/// is dropped (`warn_feed_unavailable` logs it once).
+/// [`OcclusionCulling`] staged through
+/// [`SceneBatch::set_occlusion`](crate::SceneBatch::set_occlusion) still
+/// runs: the hierarchical-Z test is host-side, so a game that builds its own
+/// pyramid keeps culling.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuOcclusion {
+    /// The device runs compute and indirect execution: the feed builds its
+    /// chain, tests it, and draws the survivors through indirect args.
+    #[default]
+    Supported,
+    /// The device lacks `COMPUTE_SHADERS` or `INDIRECT_EXECUTION`: the feed
+    /// is unavailable, its buffers are never created and the caller's
+    /// pyramid (if any) is the only occlusion source.
+    Unsupported,
+}
+
+impl GpuOcclusion {
+    /// Reads the capability from an adapter's downlevel flags. Call this
+    /// with the adapter the device is requested from.
+    pub fn from_adapter(adapter: &wgpu::Adapter) -> Self {
+        Self::from_downlevel_flags(adapter.get_downlevel_capabilities().flags)
+    }
+
+    /// Both flags present ⇒ [`GpuOcclusion::Supported`], either absent ⇒
+    /// [`GpuOcclusion::Unsupported`]. They are the loop's whole downlevel
+    /// requirement: compute pipelines and dispatches need `COMPUTE_SHADERS`,
+    /// and the args buffer's `INDIRECT` usage plus `draw_indexed_indirect`
+    /// need `INDIRECT_EXECUTION`. Nothing else the feed does is gated: its
+    /// storage buffers are core in a compute stage (the storage downlevel
+    /// flags gate the vertex and fragment stages), its per-candidate
+    /// indirect offset is a multiple of the draw-args alignment, and the
+    /// depth pass it reduces is an ordinary render target.
+    pub fn from_downlevel_flags(flags: wgpu::DownlevelFlags) -> Self {
+        if flags.contains(
+            wgpu::DownlevelFlags::COMPUTE_SHADERS | wgpu::DownlevelFlags::INDIRECT_EXECUTION,
+        ) {
+            Self::Supported
+        } else {
+            Self::Unsupported
+        }
+    }
+
+    /// True when the GPU occlusion feed is usable on this device.
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+}
+
+/// Warns, once per process, that a staged occlusion feed cannot run here
+/// because the resolved [`GpuOcclusion`] is
+/// [`Unsupported`](GpuOcclusion::Unsupported). `source` names the caller
+/// (the viewport, or the batch id): the feed is dropped either way and only
+/// the caller-staged pyramid keeps culling, so one line says it.
+pub(crate) fn warn_feed_unavailable(source: &str) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if WARNED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    log::warn!(
+        "{source}: GPU occlusion feed unavailable (needs the COMPUTE_SHADERS and INDIRECT_EXECUTION downlevel flags); occlusion culling uses the staged pyramid only"
+    );
+}
+
 /// Configuration of the viewport-driven occlusion feed
 /// ([`Frame3d::occlusion_feed`](crate::Frame3d::occlusion_feed)).
 ///
@@ -79,6 +173,11 @@ pub const DEFAULT_BIAS: f32 = 0.1;
 /// state - on the next frame. A frame that carries no depth pass feeds
 /// nothing (there is nothing to reduce), and a caller that stages its own
 /// [`Frame3d::occlusion`](crate::Frame3d::occlusion) wins over the feed.
+///
+/// The feed is GPU work, so it is armed only where [`GpuOcclusion`] says the
+/// device can run it: on an unsupported device a descriptor staged here stays
+/// inert (the feed is dropped, logged once) and the frame culls through
+/// [`Frame3d::occlusion`](crate::Frame3d::occlusion) alone.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OcclusionFeedDesc {
     /// Level-0 tile edge in pixels of the GPU reduction, clamped to `1..=64`
@@ -649,6 +748,37 @@ mod tests {
         assert!(!pyramid.occluded([-1.0, -1.0], [0.0, 1.0], 5.0, 0.0));
         let empty = DepthPyramid::build(8, 8, 4, &[0.0; 64]).expect("valid");
         assert!(!empty.occluded([-1.0, -1.0], [1.0, 1.0], 100.0, 0.0));
+    }
+
+    /// The capability decision maps both downlevel flags the loop needs; a
+    /// device with compute but no indirect (or the other way around) is
+    /// unsupported, because phase two cannot run without both and phase one
+    /// shares the feed.
+    #[test]
+    fn gpu_occlusion_follows_compute_and_indirect_flags() {
+        assert_eq!(GpuOcclusion::default(), GpuOcclusion::Supported);
+        assert_eq!(
+            GpuOcclusion::from_downlevel_flags(
+                wgpu::DownlevelFlags::COMPUTE_SHADERS | wgpu::DownlevelFlags::INDIRECT_EXECUTION
+            ),
+            GpuOcclusion::Supported
+        );
+        assert_eq!(
+            GpuOcclusion::from_downlevel_flags(wgpu::DownlevelFlags::empty()),
+            GpuOcclusion::Unsupported
+        );
+        assert_eq!(
+            GpuOcclusion::from_downlevel_flags(wgpu::DownlevelFlags::COMPUTE_SHADERS),
+            GpuOcclusion::Unsupported
+        );
+        assert_eq!(
+            GpuOcclusion::from_downlevel_flags(
+                wgpu::DownlevelFlags::INDIRECT_EXECUTION | wgpu::DownlevelFlags::VERTEX_STORAGE
+            ),
+            GpuOcclusion::Unsupported
+        );
+        assert!(GpuOcclusion::Supported.is_supported());
+        assert!(!GpuOcclusion::Unsupported.is_supported());
     }
 
     /// The feed descriptor clamps its settings on use, keeping a

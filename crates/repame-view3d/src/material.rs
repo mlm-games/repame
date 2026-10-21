@@ -434,6 +434,8 @@ pub struct ShadingModel {
     pub material_fog: MaterialFog,
     /// Ambient occlusion factor applied to indirect light.
     pub ao: f32,
+    /// Which faces this program culls. Defaults to back faces.
+    pub cull_mode: super::mesh::CullMode,
 }
 
 impl Default for ShadingModel {
@@ -445,6 +447,7 @@ impl Default for ShadingModel {
             ambient: 0,
             material_fog: MaterialFog::default(),
             ao: 1.0,
+            cull_mode: super::mesh::CullMode::default(),
         }
     }
 }
@@ -541,6 +544,7 @@ impl ShadingModel {
         self.material_fog.near.to_bits().hash(&mut hasher);
         self.material_fog.far.to_bits().hash(&mut hasher);
         self.material_fog.color.map(f32::to_bits).hash(&mut hasher);
+        self.cull_mode.hash(&mut hasher);
         hasher.finish()
     }
 }

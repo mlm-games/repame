@@ -28,6 +28,37 @@ impl Default for Material {
     }
 }
 
+/// Which faces a group culls.
+///
+/// Every group carries its own mode, so a game can draw the default
+/// back-face culled geometry next to a front-culled shell (the classic
+/// inverted-hull outline) or a double-sided sheet, without touching the
+/// rest of the frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CullMode {
+    /// Cull back faces. The default.
+    #[default]
+    Back,
+    /// Cull front faces, so only the far side of the mesh draws.
+    Front,
+    /// Draw both sides.
+    None,
+}
+
+impl CullMode {
+    /// Every mode, in pipeline order.
+    pub const ALL: [CullMode; 3] = [CullMode::Back, CullMode::Front, CullMode::None];
+
+    /// Index of this mode in the per-mode pipeline arrays.
+    pub fn index(self) -> usize {
+        match self {
+            CullMode::Back => 0,
+            CullMode::Front => 1,
+            CullMode::None => 2,
+        }
+    }
+}
+
 /// One draw group: indexed triangles in world space with per-vertex tint.
 ///
 /// Normals opt in to lighting. Must match positions when present.
@@ -70,6 +101,8 @@ pub struct MeshGroup {
     pub indices: Vec<u32>,
     /// Opaque geometry occludes when true. False draws on top.
     pub depth_test: bool,
+    /// Which faces this group culls. Defaults to back faces.
+    pub cull_mode: CullMode,
 }
 
 impl Default for MeshGroup {
@@ -91,7 +124,31 @@ impl Default for MeshGroup {
             material_index: usize::MAX,
             indices: Vec::new(),
             depth_test: false,
+            cull_mode: CullMode::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cull_mode_defaults_to_back_faces() {
+        let group = MeshGroup::default();
+        assert_eq!(group.cull_mode, CullMode::Back);
+        assert_eq!(CullMode::default(), CullMode::Back);
+    }
+
+    #[test]
+    fn cull_modes_index_the_pipeline_array() {
+        let mut seen = Vec::new();
+        for mode in CullMode::ALL {
+            assert!(!seen.contains(&mode.index()), "duplicate index");
+            seen.push(mode.index());
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2]);
     }
 }
 

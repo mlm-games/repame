@@ -84,7 +84,7 @@ pub use material::{
     MaterialFog, Rgba, ShadingError, ShadingModel, TevArg, TevBias, TevDest, TevMode, TevOp,
     TevScale, TevStage,
 };
-pub use mesh::{Material, MeshGroup, Rgb, shade, shade_for_dir};
+pub use mesh::{CullMode, Material, MeshGroup, Rgb, shade, shade_for_dir};
 pub use occlusion::{
     DEFAULT_BIAS, DEFAULT_TILE, DepthPyramid, DepthSource, GpuOcclusion, MAX_TILE, OcclusionCulling,
     OcclusionFeedDesc, aabb_ndc, decode_f16, nearest_view_depth,

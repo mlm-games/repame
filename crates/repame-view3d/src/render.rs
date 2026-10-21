@@ -2487,6 +2487,8 @@ struct Pending {
     alpha: f32,
     alpha_cutoff: f32,
     depth_test: bool,
+    /// Which faces this group culls.
+    cull_mode: super::mesh::CullMode,
     /// Material program slot stamped into every vertex of the group; 0 is
     /// the legacy PBR-lite path.
     material_slot: u32,
@@ -2509,6 +2511,8 @@ struct DrawRange {
     index_end: u32,
     depth_test: bool,
     transparent: bool,
+    /// Which faces this range culls.
+    cull_mode: super::mesh::CullMode,
     /// Material program that drew this range; 0 = legacy path.
     material: u32,
     /// Index into the frame's pass list; 0 = the shared scene target.
@@ -3519,6 +3523,7 @@ impl SceneBatch {
             alpha: group.alpha.clamp(0.0, 1.0),
             alpha_cutoff: group.alpha_cutoff.clamp(0.0, 1.0),
             depth_test: group.depth_test,
+            cull_mode: group.cull_mode,
             material_slot,
             pass,
             hz_culled: false,
@@ -3637,7 +3642,11 @@ impl SceneBatch {
                     primitive: wgpu::PrimitiveState {
                         topology: wgpu::PrimitiveTopology::TriangleList,
                         front_face: wgpu::FrontFace::Ccw,
-                        cull_mode: Some(wgpu::Face::Back),
+                        cull_mode: match entry.model.cull_mode {
+                            super::mesh::CullMode::Back => Some(wgpu::Face::Back),
+                            super::mesh::CullMode::Front => Some(wgpu::Face::Front),
+                            super::mesh::CullMode::None => None,
+                        },
                         ..Default::default()
                     },
                     depth_stencil: Some(wgpu::DepthStencilState {
@@ -5529,6 +5538,7 @@ impl SceneBatch {
                 index_end: end,
                 depth_test: g.depth_test,
                 transparent: g.transparent,
+                cull_mode: g.cull_mode,
                 material: g.material_slot,
                 pass: g.pass,
                 hz_culled,
@@ -5656,6 +5666,7 @@ impl SceneBatch {
                 index_end: end,
                 depth_test,
                 transparent,
+                cull_mode: super::mesh::CullMode::default(),
                 material: 0,
                 pass: s.pass,
                 hz_culled,
@@ -6235,7 +6246,10 @@ impl SceneBatch {
         });
         let buffers = [Some(self.vertex_buffer_layout())];
 
-        let mk_with = |module: &wgpu::ShaderModule, depth_test: bool, transparent: bool| {
+        let mk_with = |module: &wgpu::ShaderModule,
+                       depth_test: bool,
+                       transparent: bool,
+                       cull: super::mesh::CullMode| {
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("repame_view3d_pipeline"),
                 layout: Some(&pipe_layout),
@@ -6264,7 +6278,11 @@ impl SceneBatch {
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
+                    cull_mode: match cull {
+                        super::mesh::CullMode::Back => Some(wgpu::Face::Back),
+                        super::mesh::CullMode::Front => Some(wgpu::Face::Front),
+                        super::mesh::CullMode::None => None,
+                    },
                     ..Default::default()
                 },
                 // Real depth: tested ranges occlude correctly; untested
@@ -6305,7 +6323,9 @@ impl SceneBatch {
             (pipeline, depth_test)
         };
         let mk = |_label: &'static str, depth_test: bool, transparent: bool| {
-            mk_with(&shader, depth_test, transparent).0
+            std::array::from_fn(|i| {
+                mk_with(&shader, depth_test, transparent, super::mesh::CullMode::ALL[i]).0
+            })
         };
         let shadow_depth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("repame_view3d_shadow_depth"),
@@ -6896,10 +6916,10 @@ type SceneKey = (
 
 struct SceneEntry {
     key: SceneKey,
-    pipeline_depth: wgpu::RenderPipeline,
-    pipeline_flat: wgpu::RenderPipeline,
-    pipeline_transparent: wgpu::RenderPipeline,
-    pipeline_transparent_flat: wgpu::RenderPipeline,
+    pipeline_depth: [wgpu::RenderPipeline; 3],
+    pipeline_flat: [wgpu::RenderPipeline; 3],
+    pipeline_transparent: [wgpu::RenderPipeline; 3],
+    pipeline_transparent_flat: [wgpu::RenderPipeline; 3],
     shadow_depth_pipeline: wgpu::RenderPipeline,
     /// Depth + camera velocity pipeline for a declared
     /// [`PassKind::Depth`](super::pass::PassKind::Depth) target: the scene
@@ -7065,10 +7085,10 @@ pub fn prepare_scene_with_id(
         point_faces: Option<[[[f32; 4]; 4]; 6]>,
         verts: wgpu::Buffer,
         indices: wgpu::Buffer,
-        pipeline_depth: wgpu::RenderPipeline,
-        pipeline_flat: wgpu::RenderPipeline,
-        pipeline_transparent: wgpu::RenderPipeline,
-        pipeline_transparent_flat: wgpu::RenderPipeline,
+        pipeline_depth: [wgpu::RenderPipeline; 3],
+        pipeline_flat: [wgpu::RenderPipeline; 3],
+        pipeline_transparent: [wgpu::RenderPipeline; 3],
+        pipeline_transparent_flat: [wgpu::RenderPipeline; 3],
         depth_velocity_pipeline: wgpu::RenderPipeline,
         depth_only_pipeline: wgpu::RenderPipeline,
         depth_velocity_pipeline_r32f: wgpu::RenderPipeline,
@@ -7524,7 +7544,7 @@ pub fn prepare_scene_with_id(
                     }
                     pass.set_pipeline(match program {
                         Some(pipes) => &pipes.depth,
-                        None => &snap.pipeline_depth,
+                        None => &snap.pipeline_depth[r.cull_mode.index()],
                     });
                     pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
                 }
@@ -7649,19 +7669,19 @@ pub fn prepare_scene_with_id(
             pass.set_pipeline(match (r.transparent, r.depth_test) {
                 (true, true) => match program {
                     Some(pipes) => &pipes.transparent,
-                    None => &snap.pipeline_transparent,
+                    None => &snap.pipeline_transparent[r.cull_mode.index()],
                 },
                 (true, false) => match program {
                     Some(pipes) => &pipes.transparent_flat,
-                    None => &snap.pipeline_transparent_flat,
+                    None => &snap.pipeline_transparent_flat[r.cull_mode.index()],
                 },
                 (false, true) => match program {
                     Some(pipes) => &pipes.depth,
-                    None => &snap.pipeline_depth,
+                    None => &snap.pipeline_depth[r.cull_mode.index()],
                 },
                 (false, false) => match program {
                     Some(pipes) => &pipes.flat,
-                    None => &snap.pipeline_flat,
+                    None => &snap.pipeline_flat[r.cull_mode.index()],
                 },
             });
             if let (Some(index), Some(args)) = (r.hz_culled, snap.occlusion_args.as_ref()) {
@@ -7708,19 +7728,19 @@ pub fn prepare_scene_with_id(
             pass.set_pipeline(match (r.transparent, r.depth_test) {
                 (true, true) => match program {
                     Some(pipes) => &pipes.transparent,
-                    None => &snap.pipeline_transparent,
+                    None => &snap.pipeline_transparent[r.cull_mode.index()],
                 },
                 (true, false) => match program {
                     Some(pipes) => &pipes.transparent_flat,
-                    None => &snap.pipeline_transparent_flat,
+                    None => &snap.pipeline_transparent_flat[r.cull_mode.index()],
                 },
                 (false, true) => match program {
                     Some(pipes) => &pipes.depth,
-                    None => &snap.pipeline_depth,
+                    None => &snap.pipeline_depth[r.cull_mode.index()],
                 },
                 (false, false) => match program {
                     Some(pipes) => &pipes.flat,
-                    None => &snap.pipeline_flat,
+                    None => &snap.pipeline_flat[r.cull_mode.index()],
                 },
             });
             if r.hz_culled.is_some() && snap.occlusion_args.is_some() {
@@ -7974,19 +7994,19 @@ pub fn prepare_scene_with_id(
             pass.set_pipeline(match (r.transparent, r.depth_test) {
                 (true, true) => match program {
                     Some(pipes) => &pipes.transparent,
-                    None => &snap.pipeline_transparent,
+                    None => &snap.pipeline_transparent[r.cull_mode.index()],
                 },
                 (true, false) => match program {
                     Some(pipes) => &pipes.transparent_flat,
-                    None => &snap.pipeline_transparent_flat,
+                    None => &snap.pipeline_transparent_flat[r.cull_mode.index()],
                 },
                 (false, true) => match program {
                     Some(pipes) => &pipes.depth,
-                    None => &snap.pipeline_depth,
+                    None => &snap.pipeline_depth[r.cull_mode.index()],
                 },
                 (false, false) => match program {
                     Some(pipes) => &pipes.flat,
-                    None => &snap.pipeline_flat,
+                    None => &snap.pipeline_flat[r.cull_mode.index()],
                 },
             });
             if r.material > 0

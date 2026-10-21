@@ -26,8 +26,9 @@ struct Instance {
     @location(9) flags: u32,
     // Half a texel in normalized UV.
     @location(10) texel: f32,
-    // Layer bits this instance is lit by; its lowest set bit is the layer.
-    @location(11) light_mask: u32,
+    // Light layer this instance samples, resolved from its mask on the CPU
+    // (`countTrailingZeros` lowers to GLSL `findLSB`, absent from WebGL2).
+    @location(11) layer: u32,
 };
 
 struct Camera {
@@ -71,10 +72,10 @@ fn vs_main(@location(0) corner: vec2<f32>, inst: Instance) -> VertexOut {
     out.tint = inst.tint;
     out.page = inst.page;
     out.world = world.xy;
-    // Godot's rule, resolved to an index: an item is lit by every light whose
-    // mask shares its lowest set bit, and lights are accumulated per bit.
-    // Zero reads past every real layer and lands on the identity one.
-    out.layer = countTrailingZeros(inst.light_mask);
+    // Godot's rule: an item is lit by every light whose mask shares its lowest
+    // set bit, and lights are accumulated per bit. Zero reads past every real
+    // layer and lands on the identity one.
+    out.layer = inst.layer;
     return out;
 }
 

@@ -259,13 +259,14 @@ struct BatchInstance {
     /// Half a texel in normalized UV, used to inset the UV rect to texel
     /// centres in the vertex shader. Zero disables the inset.
     texel: f32,
-    /// Light layer bits; the vertex shader resolves the low bit to a layer.
-    light_mask: u32,
+    /// Light layer to sample, resolved from the mask on push. `32` reads the
+    /// identity layer.
+    layer: u32,
 }
 
 // Locked to `shaders/sprite.wgsl::Instance` (row0@0, row1@16,
 // uv_min@32, uv_max@40, tint@48, page@64, z@68, flags@72, texel@76,
-// light_mask@80; stride 84).
+// layer@80; stride 84).
 // If this fires, update the WGSL offsets and the vertex buffer layout
 // below together.
 const _: () = assert!(size_of::<BatchInstance>() == 84);
@@ -506,7 +507,7 @@ impl SpriteBatch {
             z,
             flags,
             texel: 0.5 / self.desc.layer_size.max(1) as f32,
-            light_mask,
+            layer: light_mask.trailing_zeros(),
         });
     }
 
@@ -1786,7 +1787,7 @@ mod tests {
         // Default anchor centers: top-left at (8, 17).
         let p = apply((inst.row0, inst.row1), [-0.5, -0.5]);
         assert_eq!(p, [8.0, 17.0]);
-        assert_eq!(inst.light_mask, 1, "sprites default to light layer 0");
+        assert_eq!(inst.layer, 0, "sprites default to light layer 0");
     }
 
     #[test]

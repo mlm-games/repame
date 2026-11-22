@@ -103,6 +103,15 @@ pub enum TargetSemantics {
 pub enum PassKind {
     /// Draw groups into the target.
     Render,
+    /// Draw scene groups into a G-buffer: the declared target (an
+    /// `Rgba16Float` colour attachment) holds albedo, while two engine-owned
+    /// `Rgba16Float` attachments hold view-space normals (plus the lit flag)
+    /// and material params (metallic, roughness, emissive, view depth).
+    Gbuffer,
+    /// Fullscreen light accumulation over a [`PassKind::Gbuffer`] source.
+    /// Samples all three of the source's attachments and the camera uniform,
+    /// and writes one colour target. Requires `source`.
+    Deferred,
     /// Fill the target by replaying the frame's scene geometry as view-depth
     /// and camera velocity (`Rgba16Float`: depth, velocity x, velocity y, 1;
     /// `R32Float` when only the chain reads it). The batch owns the geometry,
@@ -322,10 +331,11 @@ impl RenderTarget {
 pub struct RenderPass {
     pub target: RenderTarget,
     pub kind: PassKind,
-    /// Target sampled by [`PassKind::Resolve`], [`PassKind::Fullscreen`] and
-    /// [`PassKind::Copy`].
+    /// Target sampled by [`PassKind::Resolve`], [`PassKind::Fullscreen`],
+    /// [`PassKind::Deferred`] and [`PassKind::Copy`].
     pub source: Option<String>,
-    /// Groups drawn by [`PassKind::Render`]; empty for the other kinds.
+    /// Groups drawn by [`PassKind::Render`] and [`PassKind::Gbuffer`]; empty
+    /// for the other kinds.
     pub groups: Vec<crate::MeshGroup>,
     /// Composites this pass's target over the scene when the frame is
     /// painted. Only the presenting pass reaches the screen.
@@ -361,6 +371,43 @@ impl RenderPass {
             kind: PassKind::Render,
             source: None,
             groups,
+            presents: false,
+            overlay: [1.0, 1.0, 1.0, 1.0],
+            post: None,
+            aux: None,
+            load: false,
+            copy: None,
+            tint: [1.0, 1.0, 1.0, 1.0],
+            depends_on: Vec::new(),
+        }
+    }
+
+    /// Draw scene groups into a G-buffer target. The target must be
+    /// `Rgba16Float`; the batch owns its two auxiliary attachments.
+    pub fn gbuffer(target: RenderTarget, groups: Vec<crate::MeshGroup>) -> Self {
+        Self {
+            target,
+            kind: PassKind::Gbuffer,
+            source: None,
+            groups,
+            presents: false,
+            overlay: [1.0, 1.0, 1.0, 1.0],
+            post: None,
+            aux: None,
+            load: false,
+            copy: None,
+            tint: [1.0, 1.0, 1.0, 1.0],
+            depends_on: Vec::new(),
+        }
+    }
+
+    /// A deferred light-accumulation pass sampling a G-buffer `source`.
+    pub fn deferred(source: impl Into<String>, target: RenderTarget) -> Self {
+        Self {
+            target,
+            kind: PassKind::Deferred,
+            source: Some(source.into()),
+            groups: Vec::new(),
             presents: false,
             overlay: [1.0, 1.0, 1.0, 1.0],
             post: None,
@@ -478,6 +525,8 @@ pub enum PassError {
     /// More than one pass claims the screen. Only the first is composited,
     /// so the rest render every frame and are never seen.
     MultiplePresenting,
+    /// A deferred pass samples a source that is not a G-buffer pass.
+    InvalidDeferredSource,
     /// A dependency cycle: the `source`/`aux` names and the depth-after-
     /// scene rules walk back to a pass that depends on itself.
     Circular,
@@ -519,7 +568,7 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
         }
         if matches!(
             pass.kind,
-            PassKind::Resolve | PassKind::Fullscreen | PassKind::Copy
+            PassKind::Resolve | PassKind::Fullscreen | PassKind::Deferred | PassKind::Copy
         ) && pass.source.is_none()
         {
             return Err(PassError::MissingSource);
@@ -543,6 +592,13 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
                     || source_target.height != pass.target.height)
             {
                 return Err(PassError::SizeMismatch);
+            }
+            if pass.kind == PassKind::Deferred
+                && !passes
+                    .iter()
+                    .any(|other| other.target.name == source && other.kind == PassKind::Gbuffer)
+            {
+                return Err(PassError::InvalidDeferredSource);
             }
         }
         if let Some(aux) = pass.aux.as_deref()
@@ -590,8 +646,9 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
 /// - a pass that names a target in `depends_on` runs after the pass that
 ///   writes it;
 /// - a [`PassKind::Depth`] or [`PassKind::Occlusion`] pass runs after every
-///   [`TargetSemantics::SceneColor`] pass, because it replays that scene's
-///   geometry (and the engine's same-frame occlusion phase draws after it).
+///   [`TargetSemantics::SceneColor`] pass, whether it is a [`PassKind::Render`]
+///   or [`PassKind::Gbuffer`] pass, because it replays that scene's geometry
+///   (and the engine's same-frame occlusion phase draws after it).
 ///
 /// [`validate_passes`] rejects a list whose dependencies cannot be
 /// satisfied, so a validated list always has a full order.
@@ -623,7 +680,8 @@ pub fn pass_order(passes: &[RenderPass]) -> Vec<usize> {
 }
 
 /// Indices `index` must run after: the writers of the targets it samples or
-/// depends on, plus, for the depth replays, every scene-color render pass.
+/// depends on, plus, for the depth replays, every scene-color render or
+/// G-buffer pass.
 fn dependencies(passes: &[RenderPass], index: usize) -> Vec<usize> {
     let pass = &passes[index];
     let mut deps = Vec::new();
@@ -643,7 +701,7 @@ fn dependencies(passes: &[RenderPass], index: usize) -> Vec<usize> {
     }
     if matches!(pass.kind, PassKind::Depth | PassKind::Occlusion) {
         for (scene, other) in passes.iter().enumerate() {
-            if other.kind == PassKind::Render
+            if matches!(other.kind, PassKind::Render | PassKind::Gbuffer)
                 && other.target.semantics == TargetSemantics::SceneColor
                 && scene != index
                 && !deps.contains(&scene)
@@ -711,6 +769,20 @@ mod tests {
         // No dependencies: declaration order.
         let passes = [blit("a", "b"), blit("b", "c"), scene()];
         assert_eq!(pass_order(&passes), vec![0, 1, 2]);
+        // A deferred pass must name the G-buffer it samples.
+        let deferred = RenderPass::deferred("scene", RenderTarget::color("lit", 64, 64));
+        assert_eq!(
+            validate_passes(&[scene(), deferred.clone()]),
+            Err(PassError::InvalidDeferredSource)
+        );
+        let gbuffer = RenderPass::gbuffer(RenderTarget::color("scene", 64, 64), Vec::new());
+        assert!(validate_passes(&[gbuffer, deferred.clone()]).is_ok());
+        let mut missing = deferred;
+        missing.source = None;
+        assert_eq!(
+            validate_passes(&[scene(), missing]),
+            Err(PassError::MissingSource)
+        );
     }
 
     /// A depth replay runs after every scene-color render pass, whatever the
@@ -721,6 +793,9 @@ mod tests {
         assert_eq!(pass_order(&passes), vec![1, 0]);
         let passes = [scene(), depth("depth")];
         assert_eq!(pass_order(&passes), vec![0, 1]);
+        let gbuffer = RenderPass::gbuffer(RenderTarget::color("gbuffer", 64, 64), Vec::new());
+        let passes = [depth("depth"), gbuffer];
+        assert_eq!(pass_order(&passes), vec![1, 0]);
     }
 
     /// A dependency cycle is rejected rather than scheduled by guesswork.

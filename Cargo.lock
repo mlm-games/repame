@@ -4749,6 +4749,7 @@ dependencies = [
  "log",
  "naga",
  "repame-input",
+ "repame-save",
  "repose-core",
  "repose-render-wgpu",
  "repose-ui",

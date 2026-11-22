@@ -224,6 +224,15 @@ impl PickFeed {
             distance,
         })
     }
+
+    /// Drains every completed pick, including the maps started this call.
+    pub fn take_ready(&mut self, device: &wgpu::Device) -> Vec<PickResult> {
+        let mut ready = Vec::new();
+        while let Some(result) = self.take(device) {
+            ready.push(result);
+        }
+        ready
+    }
 }
 
 const PICK_SLOTS: usize = 4;

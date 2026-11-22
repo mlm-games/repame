@@ -487,6 +487,52 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// G-buffer fragment stage, appended to [`scene_prefix`]. The declared target
+/// holds albedo and coverage; the two engine-owned attachments hold the
+/// view-space normal (`.w` carries the lit flag) and material params
+/// (`metallic`, `roughness`, emissive as luminance, view depth).
+const GBUFFER_FS: &str = r#"
+struct GbufferOut {
+    @location(0) albedo: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+    @location(2) material: vec4<f32>,
+};
+
+@fragment
+fn fs_main(in: VsOut) -> GbufferOut {
+    var out: GbufferOut;
+    var base = in.color;
+    var alpha = in.alpha;
+    if (in.tex_mix > 0.5) {
+        let resident = repame_resident_level(in.page);
+        if (resident >= 0.0) {
+            let tex = textureSampleLevel(scene_tex, scene_smp, in.uv, i32(in.page + 0.5), resident);
+            if (tex.a < 0.001 && in.cutoff < 0.001) {
+                discard;
+            }
+            base = in.color * tex.rgb;
+            alpha = in.alpha * tex.a;
+        }
+    }
+    if (alpha < in.cutoff) {
+        discard;
+    }
+    let world_n = normalize(in.normal);
+    let forward = normalize(camera.cam_forward);
+    let axis = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(forward.y) > 0.99);
+    let right = normalize(cross(axis, forward));
+    let up = cross(forward, right);
+    out.albedo = vec4<f32>(base, alpha);
+    out.normal = vec4<f32>(
+        dot(world_n, right), dot(world_n, up), dot(world_n, forward), in.lit_flag);
+    out.material = vec4<f32>(
+        in.metallic, in.roughness,
+        dot(in.emissive, vec3<f32>(0.2126, 0.7152, 0.0722)),
+        in.view_depth);
+    return out;
+}
+"#;
+
 /// Fullscreen pass shader: one triangle over the viewport, sampling the
 /// source pass target. The fragment stage applies the pass's tint, so a
 /// presenting pass can grade or fade what it composites.
@@ -514,6 +560,194 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let tex = textureSample(src_tex, src_smp, in.uv);
     return vec4<f32>(tex.rgb * tint.rgb, tex.a * tint.a);
+}
+"#;
+
+/// Deferred light accumulation over the three G-buffer attachments. The
+/// camera block is the same uniform the scene passes bind; shading reproduces
+/// the legacy sun, ambient, point, fog and tone-map terms but has no shadow
+/// maps or reflection probes (the G-buffer carries no world position).
+const DEFERRED_SHADER: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+    light_dir: vec3<f32>,
+    _pad0: f32,
+    light_color: vec3<f32>,
+    diffuse: f32,
+    ambient: vec3<f32>,
+    _pad1: f32,
+    fog: vec4<f32>,
+    fog_range: vec4<f32>,
+    cam_pos: vec3<f32>,
+    _pad2: f32,
+    cam_forward: vec3<f32>,
+    _pad3: f32,
+    shadow_vp: mat4x4<f32>,
+    shadow_params: vec4<f32>,
+    shadow_texel: vec4<f32>,
+    cascade_vp0: mat4x4<f32>,
+    cascade_vp1: mat4x4<f32>,
+    cascade_vp2: mat4x4<f32>,
+    cascade_vp3: mat4x4<f32>,
+    cascade_splits: vec4<f32>,
+    cascade_params: vec4<f32>,
+    point_pos0: vec4<f32>,
+    point_pos1: vec4<f32>,
+    point_col0: vec4<f32>,
+    point_col1: vec4<f32>,
+    point_pos2: vec4<f32>,
+    point_pos3: vec4<f32>,
+    point_col2: vec4<f32>,
+    point_col3: vec4<f32>,
+    point_pos4: vec4<f32>,
+    point_pos5: vec4<f32>,
+    point_col4: vec4<f32>,
+    point_col5: vec4<f32>,
+    point_pos6: vec4<f32>,
+    point_pos7: vec4<f32>,
+    point_col6: vec4<f32>,
+    point_col7: vec4<f32>,
+    point_params: vec4<f32>,
+    probe_pos: array<vec4<f32>, 4>,
+    probe_params: array<vec4<f32>, 4>,
+};
+
+@group(0) @binding(0) var albedo_tex: texture_2d<f32>;
+@group(0) @binding(1) var normal_tex: texture_2d<f32>;
+@group(0) @binding(2) var material_tex: texture_2d<f32>;
+@group(0) @binding(3) var src_smp: sampler;
+@group(0) @binding(4) var<uniform> camera: Camera;
+
+fn repame_pbr_neutral(c: vec3<f32>) -> vec3<f32> {
+    let start_compression = 0.8 - 0.04;
+    let desaturation = 0.15;
+    var color = c;
+    let x = min(color.r, min(color.g, color.b));
+    let offset = select(0.04, x - 6.25 * x * x, x < 0.08);
+    color = color - vec3<f32>(offset);
+    let peak = max(color.r, max(color.g, color.b));
+    if (peak < start_compression) {
+        return color;
+    }
+    let d = 1.0 - start_compression;
+    let new_peak = 1.0 - d * d / (peak + d - start_compression);
+    color = color * (new_peak / peak);
+    let g = 1.0 - 1.0 / (desaturation * (peak - new_peak) + 1.0);
+    return mix(color, vec3<f32>(new_peak), g);
+}
+
+fn repame_tonemap(c: vec3<f32>, exposure: f32, method: f32) -> vec3<f32> {
+    let m = i32(round(method));
+    if (m == 0) {
+        return c;
+    }
+    if (m == 2) {
+        return repame_pbr_neutral(c * exposure);
+    }
+    return (c * exposure) / (c * (exposure - 1.0) + vec3<f32>(1.0));
+}
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32((index << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(index & 2u) * 2.0 - 1.0;
+    out.pos = vec4<f32>(x, -y, 0.0, 1.0);
+    out.uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let albedo = textureSample(albedo_tex, src_smp, in.uv);
+    let g_normal = textureSample(normal_tex, src_smp, in.uv);
+    let g_material = textureSample(material_tex, src_smp, in.uv);
+    let view_depth = g_material.w;
+    if (view_depth <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let base = albedo.rgb;
+    let lit_flag = g_normal.w;
+    let metallic = clamp(g_material.x, 0.0, 1.0);
+    let roughness = clamp(g_material.y, 0.0, 1.0);
+
+    let forward = normalize(camera.cam_forward);
+    let axis = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(forward.y) > 0.99);
+    let right = normalize(cross(axis, forward));
+    let up = cross(forward, right);
+    let n = normalize(right * g_normal.x + up * g_normal.y + forward * g_normal.z);
+
+    // The projection's xy scale gives the half-FOV tangents; the view axis is
+    // reconstructed from the camera basis so a view depth along it can be
+    // turned back into a world position for view and point-light vectors.
+    let ndc = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+    let tan_x = 1.0 / max(abs(camera.view_proj[0][0]), 1e-6);
+    let tan_y = 1.0 / max(abs(camera.view_proj[1][1]), 1e-6);
+    let ray = normalize(forward + right * (ndc.x * tan_x) + up * (ndc.y * tan_y));
+    let world_pos = camera.cam_pos + ray * (view_depth / max(dot(ray, forward), 1e-4));
+    let v = normalize(camera.cam_pos - world_pos);
+
+    let ndl = max(dot(n, camera.light_dir), 0.0);
+    let diffuse = base * (1.0 - metallic) * ndl * camera.diffuse;
+    let h = normalize(camera.light_dir + v);
+    let spec_pow = mix(256.0, 8.0, roughness);
+    let spec = mix(camera.light_color, base, metallic)
+        * pow(max(dot(n, h), 0.0), spec_pow)
+        * (1.0 - roughness) * camera.diffuse;
+
+    var point_accum = vec3<f32>(0.0);
+    let point_count = i32(camera.point_params.x + 0.5);
+    for (var pi: i32 = 0; pi < 8; pi = pi + 1) {
+        if (pi >= point_count) { break; }
+        var lpos: vec3<f32>;
+        var lcol: vec3<f32>;
+        if (pi == 0) { lpos = camera.point_pos0.xyz; lcol = camera.point_col0.xyz; }
+        else if (pi == 1) { lpos = camera.point_pos1.xyz; lcol = camera.point_col1.xyz; }
+        else if (pi == 2) { lpos = camera.point_pos2.xyz; lcol = camera.point_col2.xyz; }
+        else if (pi == 3) { lpos = camera.point_pos3.xyz; lcol = camera.point_col3.xyz; }
+        else if (pi == 4) { lpos = camera.point_pos4.xyz; lcol = camera.point_col4.xyz; }
+        else if (pi == 5) { lpos = camera.point_pos5.xyz; lcol = camera.point_col5.xyz; }
+        else if (pi == 6) { lpos = camera.point_pos6.xyz; lcol = camera.point_col6.xyz; }
+        else { lpos = camera.point_pos7.xyz; lcol = camera.point_col7.xyz; }
+        var lrange: f32;
+        var linten: f32;
+        if (pi == 0) { lrange = camera.point_pos0.w; linten = camera.point_col0.w; }
+        else if (pi == 1) { lrange = camera.point_pos1.w; linten = camera.point_col1.w; }
+        else if (pi == 2) { lrange = camera.point_pos2.w; linten = camera.point_col2.w; }
+        else if (pi == 3) { lrange = camera.point_pos3.w; linten = camera.point_col3.w; }
+        else if (pi == 4) { lrange = camera.point_pos4.w; linten = camera.point_col4.w; }
+        else if (pi == 5) { lrange = camera.point_pos5.w; linten = camera.point_col5.w; }
+        else if (pi == 6) { lrange = camera.point_pos6.w; linten = camera.point_col6.w; }
+        else { lrange = camera.point_pos7.w; linten = camera.point_col7.w; }
+        let to_light = lpos - world_pos;
+        let dist = length(to_light);
+        if (dist < lrange && dist > 1e-4) {
+            let ldir = to_light / dist;
+            let atten = linten / (dist * dist + 1.0);
+            let pndl = max(dot(n, ldir), 0.0);
+            let pdiff = base * (1.0 - metallic) * pndl * atten;
+            let ph = normalize(ldir + v);
+            let pspec = mix(lcol, base, metallic)
+                * pow(max(dot(n, ph), 0.0), spec_pow)
+                * (1.0 - roughness) * atten;
+            point_accum = point_accum + (pdiff * lcol + pspec) * lit_flag;
+        }
+    }
+
+    let emissive = vec3<f32>(g_material.z);
+    let lit = base * camera.ambient + (camera.light_color * diffuse + spec) + point_accum + emissive;
+    var rgb = mix(base, lit, lit_flag);
+    let fog_t = clamp((view_depth - camera.fog_range.x)
+        / max(camera.fog_range.y - camera.fog_range.x, 1e-6), 0.0, 1.0)
+        * clamp(camera.fog.x, 0.0, 1.0);
+    rgb = mix(rgb, camera.fog.yzw, fog_t * lit_flag);
+    rgb = repame_tonemap(rgb, camera.fog_range.z, camera.fog_range.w);
+    return vec4<f32>(rgb, albedo.a);
 }
 "#;
 
@@ -578,6 +812,14 @@ fn scene_prefix(skinning: GpuSkinning) -> String {
 fn scene_shader(skinning: GpuSkinning) -> String {
     let mut source = scene_prefix(skinning);
     source.push_str(SHADER_LEGACY_FS);
+    source
+}
+
+/// The G-buffer pipeline's module: the shared vertex prefix with the MRT
+/// fragment stage, with the same skinning capability splice as the scene.
+fn gbuffer_shader(skinning: GpuSkinning) -> String {
+    let mut source = scene_prefix(skinning);
+    source.push_str(GBUFFER_FS);
     source
 }
 
@@ -1260,6 +1502,30 @@ struct CopyState {
     params: HashMap<u32, wgpu::Buffer>,
 }
 
+/// GPU state for the deferred light-accumulation passes.
+struct DeferredState {
+    layout: wgpu::BindGroupLayout,
+    module: wgpu::ShaderModule,
+    sampler: wgpu::Sampler,
+    /// One pipeline per declared target format.
+    pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    /// Bind groups for this frame's deferred passes, keyed by
+    /// [`PassSpec::index`].
+    binds: HashMap<u32, wgpu::BindGroup>,
+}
+
+/// The two engine-owned attachments of a G-buffer target. The declared target
+/// is attachment 0; these are attachments 1 and 2.
+struct GbufferAux {
+    _normal: wgpu::Texture,
+    normal_view: wgpu::TextureView,
+    _material: wgpu::Texture,
+    material_view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    format: super::pass::RenderTargetFormat,
+}
+
 /// GPU state for fullscreen passes.
 struct FullscreenState {
     pipeline: wgpu::RenderPipeline,
@@ -1288,6 +1554,9 @@ struct PassEntry {
     /// Pixel size and format of the target a copy pass samples.
     source_size: Option<(u32, u32)>,
     source_format: Option<super::pass::RenderTargetFormat>,
+    /// Auxiliary G-buffer attachments this pass writes, when it is a G-buffer.
+    aux_normal_view: Option<wgpu::TextureView>,
+    aux_material_view: Option<wgpu::TextureView>,
 }
 
 /// A declared render target the batch owns: its texture and view, allocated
@@ -1304,6 +1573,8 @@ struct PassTarget {
     height: u32,
     format: super::pass::RenderTargetFormat,
     samples: u32,
+    /// G-buffer-only auxiliary attachments, reallocated with the target.
+    aux: Option<GbufferAux>,
 }
 
 /// Async-map state of a depth readback, written by the map callback and read
@@ -2373,6 +2644,58 @@ fn make_copy_pipeline(
             ..Default::default()
         },
         depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache,
+    })
+}
+
+/// Deferred fullscreen pipeline for one target format. The G-buffer is
+/// sampled as-is; depth is present but neither tested nor written, matching
+/// the fullscreen composite the presenting pass uses.
+fn make_deferred_pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+    cache: Option<&wgpu::PipelineCache>,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("repame_view3d_deferred_pl"),
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("repame_view3d_deferred"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth24PlusStencil8,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache,
@@ -4551,7 +4874,10 @@ impl SceneBatch {
     /// format), and a [`Depth`](super::pass::PassKind::Depth) or
     /// [`Occlusion`](super::pass::PassKind::Occlusion) pass must be
     /// `Rgba16Float`, or `R32Float` where the device renders to it (view
-    /// depth needs the range). A mismatched pass is reported and skipped.
+    /// depth needs the range). A [`Gbuffer`](super::pass::PassKind::Gbuffer)
+    /// pass must be `Rgba16Float` (the MRT attachments all use it), and a
+    /// [`Deferred`](super::pass::PassKind::Deferred) pass may use any colour
+    /// format. A mismatched pass is reported and skipped.
     fn sync_pass_targets(&self, device: &wgpu::Device, res: &mut SceneEntry) {
         let supported = |spec: &PassSpec| match spec.kind {
             super::pass::PassKind::Depth | super::pass::PassKind::Occlusion => {
@@ -4566,6 +4892,10 @@ impl SceneBatch {
                 )
             }
             super::pass::PassKind::Render => pass_format(spec.target.format) == res.key.0,
+            super::pass::PassKind::Gbuffer => {
+                spec.target.format == super::pass::RenderTargetFormat::Rgba16Float
+            }
+            super::pass::PassKind::Deferred => !spec.target.format.is_depth(),
             super::pass::PassKind::Resolve
             | super::pass::PassKind::Fullscreen
             | super::pass::PassKind::Copy => true,
@@ -4589,6 +4919,12 @@ impl SceneBatch {
                         || target.height != spec.target.height
                         || target.format != spec.target.format
                         || target.samples != spec.target.samples
+                        || (spec.kind == super::pass::PassKind::Gbuffer
+                            && target.aux.as_ref().is_none_or(|aux| {
+                                aux.width != spec.target.width
+                                    || aux.height != spec.target.height
+                                    || aux.format != spec.target.format
+                            }))
                 });
             if !stale {
                 continue;
@@ -4622,6 +4958,40 @@ impl SceneBatch {
                 view_formats: &[],
             });
             let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+            let aux = if spec.kind == super::pass::PassKind::Gbuffer {
+                let make_aux = |label: &'static str| {
+                    let texture = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some(label),
+                        size: wgpu::Extent3d {
+                            width: spec.target.width.max(1),
+                            height: spec.target.height.max(1),
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: spec.target.samples.max(1),
+                        dimension: wgpu::TextureDimension::D2,
+                        format: pass_format(super::pass::RenderTargetFormat::Rgba16Float),
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    });
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    (texture, view)
+                };
+                let (normal, normal_view) = make_aux("repame_view3d_gbuffer_normal");
+                let (material, material_view) = make_aux("repame_view3d_gbuffer_material");
+                Some(GbufferAux {
+                    _normal: normal,
+                    normal_view,
+                    _material: material,
+                    material_view,
+                    width: spec.target.width,
+                    height: spec.target.height,
+                    format: spec.target.format,
+                })
+            } else {
+                None
+            };
             res.pass_targets.insert(
                 spec.target.name.clone(),
                 PassTarget {
@@ -4633,6 +5003,7 @@ impl SceneBatch {
                     height: spec.target.height,
                     format: spec.target.format,
                     samples: spec.target.samples,
+                    aux,
                 },
             );
         }
@@ -4644,6 +5015,15 @@ impl SceneBatch {
             .collect();
         res.pass_targets.retain(|name, _| live.contains(&name));
         if let Some(state) = res.fullscreen.as_mut() {
+            let live_indices: Vec<u32> = self
+                .passes
+                .iter()
+                .filter(|spec| supported(spec))
+                .map(|spec| spec.index)
+                .collect();
+            state.binds.retain(|index, _| live_indices.contains(index));
+        }
+        if let Some(state) = res.deferred.as_mut() {
             let live_indices: Vec<u32> = self
                 .passes
                 .iter()
@@ -5248,6 +5628,166 @@ impl SceneBatch {
         });
         state.binds.insert(index, bind.clone());
         Some(bind)
+    }
+
+    /// Builds the deferred shader, bind layout and sampler when a frame
+    /// declares a deferred pass. Pipelines are created per target format in
+    /// [`warm_deferred_binds`](Self::warm_deferred_binds).
+    fn sync_deferred(&self, device: &wgpu::Device, res: &mut SceneEntry) {
+        let needs = self
+            .passes
+            .iter()
+            .any(|spec| spec.kind == super::pass::PassKind::Deferred);
+        if !needs {
+            res.deferred = None;
+            return;
+        }
+        if res.deferred.is_some() {
+            return;
+        }
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("repame_view3d_deferred"),
+            source: wgpu::ShaderSource::Wgsl(DEFERRED_SHADER.into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("repame_view3d_deferred_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("repame_view3d_deferred_smp"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        res.deferred = Some(DeferredState {
+            layout,
+            module,
+            sampler,
+            pipelines: HashMap::new(),
+            binds: HashMap::new(),
+        });
+    }
+
+    /// Rebuilds each deferred pass's bind group over its G-buffer source's
+    /// three attachments and the frame's camera uniform.
+    fn warm_deferred_binds(&self, device: &wgpu::Device, res: &mut SceneEntry) {
+        let Some(state) = res.deferred.as_mut() else {
+            return;
+        };
+        let camera = res.camera.clone();
+        let cache = res.pipeline_cache.clone();
+        for spec in &self.passes {
+            if spec.kind != super::pass::PassKind::Deferred {
+                continue;
+            }
+            let Some(source) = spec.source.as_deref() else {
+                continue;
+            };
+            let Some(target) = res.pass_targets.get(source) else {
+                continue;
+            };
+            let Some(aux) = target.aux.as_ref() else {
+                log::warn!(
+                    "scene_batch[{}]: deferred pass '{}' samples '{}', which is not a G-buffer; pass skipped",
+                    self.id,
+                    spec.target.name,
+                    source
+                );
+                continue;
+            };
+            let (albedo, normal, material) = (
+                target.view.clone(),
+                aux.normal_view.clone(),
+                aux.material_view.clone(),
+            );
+            let format = pass_format(spec.target.format);
+            if !state.pipelines.contains_key(&format) {
+                let pipeline = make_deferred_pipeline(
+                    device,
+                    &state.module,
+                    &state.layout,
+                    format,
+                    cache.as_ref(),
+                );
+                state.pipelines.insert(format, pipeline);
+            }
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("repame_view3d_deferred_bg"),
+                layout: &state.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&albedo),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&normal),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&material),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&state.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: camera.as_entire_binding(),
+                    },
+                ],
+            });
+            state.binds.insert(spec.index, bind);
+        }
     }
 
     /// Builds the copy shader, its bind layout and the two samplers the
@@ -5870,6 +6410,12 @@ impl SceneBatch {
                 mesh.name
             );
         }
+        let mut palette: Vec<[[f32; 4]; 4]> = draw
+            .palette
+            .iter()
+            .map(|m| m.to_cols_array_2d())
+            .collect();
+        palette.resize(crate::MAX_SKIN_JOINTS, [[0.0; 4]; 4]);
         self.skinned.push(SkinnedPending {
             positions: mesh.positions.clone(),
             colors: mesh.colors.clone(),
@@ -5877,7 +6423,7 @@ impl SceneBatch {
             uvs: mesh.uvs.clone(),
             joints: clamped_joints,
             weights: mesh.weights.clone(),
-            palette: draw.palette.iter().map(|m| m.to_cols_array_2d()).collect(),
+            palette,
             morph: draw.morph.clone(),
             texture_page: mesh.texture_page,
             material: mesh.material,
@@ -6169,9 +6715,7 @@ impl SceneBatch {
             }
             let base = self.verts.len() as u32;
             let skin_base = self.palette.len() as f32;
-            let _ = self
-                .morph
-                .add(s.morph.as_ref().unwrap_or(&MorphDraw::default()), base);
+            self.morph.push(s.morph.as_ref(), base);
             self.palette.extend_from_slice(&s.palette);
             let lit = !s.normals.is_empty();
             let textured = !s.uvs.is_empty();
@@ -6930,6 +7474,64 @@ impl SceneBatch {
                 mk_with(&shader, depth_test, transparent, super::mesh::CullMode::ALL[i]).0
             })
         };
+        let gbuffer_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("repame_view3d_gbuffer"),
+            source: wgpu::ShaderSource::Wgsl(gbuffer_shader(self.skinning).into()),
+        });
+        let gbuffer_targets: [Option<wgpu::ColorTargetState>; 3] =
+            std::array::from_fn(|_| {
+                Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            });
+        let gbuffer_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("repame_view3d_gbuffer"),
+            layout: Some(&pipe_layout),
+            vertex: wgpu::VertexState {
+                module: &gbuffer_shader,
+                entry_point: Some("vs_main"),
+                buffers: &buffers,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &gbuffer_shader,
+                entry_point: Some("fs_main"),
+                targets: &gbuffer_targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState {
+                    front: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::LessEqual,
+                        ..Default::default()
+                    },
+                    back: wgpu::StencilFaceState {
+                        compare: wgpu::CompareFunction::LessEqual,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: SCENE_TARGET_SAMPLE_COUNT,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache,
+        });
         let shadow_depth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("repame_view3d_shadow_depth"),
             source: wgpu::ShaderSource::Wgsl(shadow_depth_shader(self.skinning).into()),
@@ -7207,6 +7809,8 @@ impl SceneBatch {
             pipeline_flat: mk("repame_view3d_flat", false, false),
             pipeline_transparent: mk("repame_view3d_transparent", true, true),
             pipeline_transparent_flat: mk("repame_view3d_transparent_flat", false, true),
+            gbuffer_pipeline,
+            deferred: None,
             shadow_depth_pipeline,
             depth_velocity_pipeline,
             depth_only_pipeline,
@@ -7338,9 +7942,11 @@ impl SceneBatch {
         self.sync_probes(device, queue, res);
         self.sync_pass_targets(device, res);
         self.sync_fullscreen(device, res);
+        self.sync_deferred(device, res);
         self.sync_post(device, res);
         self.sync_copy(device, res);
         self.warm_fullscreen_binds(device, queue, res);
+        self.warm_deferred_binds(device, res);
         self.warm_post_binds(device, queue, res);
         self.warm_copy_binds(device, queue, res);
         let prev = self
@@ -7569,6 +8175,11 @@ struct SceneEntry {
     pipeline_flat: [wgpu::RenderPipeline; 3],
     pipeline_transparent: [wgpu::RenderPipeline; 3],
     pipeline_transparent_flat: [wgpu::RenderPipeline; 3],
+    /// MRT scene pipeline for [`PassKind::Gbuffer`](super::pass::PassKind::Gbuffer)
+    /// targets, built for the `Rgba16Float` attachment format.
+    gbuffer_pipeline: wgpu::RenderPipeline,
+    /// Deferred light-accumulation state, built when a frame declares one.
+    deferred: Option<DeferredState>,
     shadow_depth_pipeline: wgpu::RenderPipeline,
     /// Depth + camera velocity pipeline for a declared
     /// [`PassKind::Depth`](super::pass::PassKind::Depth) target: the scene
@@ -7724,6 +8335,10 @@ pub fn prepare_scene_with_id(
         /// Pass index -> fullscreen bind group, built during upload.
         fullscreen_binds: HashMap<u32, wgpu::BindGroup>,
         fullscreen_pipeline: Option<wgpu::RenderPipeline>,
+        /// MRT G-buffer pipeline and the deferred state for this frame.
+        gbuffer_pipeline: wgpu::RenderPipeline,
+        deferred_pipeline: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+        deferred_binds: HashMap<u32, wgpu::BindGroup>,
         tex_bind: wgpu::BindGroup,
         shadow_bind: wgpu::BindGroup,
         shadow_depth_pipeline: wgpu::RenderPipeline,
@@ -7862,6 +8477,17 @@ pub fn prepare_scene_with_id(
                 .map(|state| state.binds.clone())
                 .unwrap_or_default(),
             fullscreen_pipeline: res.fullscreen.as_ref().map(|state| state.pipeline.clone()),
+            gbuffer_pipeline: res.gbuffer_pipeline.clone(),
+            deferred_pipeline: res
+                .deferred
+                .as_ref()
+                .map(|state| state.pipelines.clone())
+                .unwrap_or_default(),
+            deferred_binds: res
+                .deferred
+                .as_ref()
+                .map(|state| state.binds.clone())
+                .unwrap_or_default(),
             passes: res
                 .pass_specs
                 .iter()
@@ -7893,6 +8519,14 @@ pub fn prepare_scene_with_id(
                                 .as_ref()
                                 .and_then(|name| res.pass_targets.get(name))
                                 .map(|target| target.format),
+                            aux_normal_view: target
+                                .aux
+                                .as_ref()
+                                .map(|aux| aux.normal_view.clone()),
+                            aux_material_view: target
+                                .aux
+                                .as_ref()
+                                .map(|aux| aux.material_view.clone()),
                         })
                 })
                 .collect(),
@@ -8607,7 +9241,130 @@ pub fn prepare_scene_with_id(
             }
             continue;
         }
-        if spec.kind == super::pass::PassKind::Fullscreen {
+        if spec.kind == super::pass::PassKind::Gbuffer {
+            let (Some(normal_view), Some(material_view)) = (
+                entry.aux_normal_view.as_ref(),
+                entry.aux_material_view.as_ref(),
+            ) else {
+                continue;
+            };
+            let mut gbuffer = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("repame_view3d_gbuffer"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: if spec.load {
+                                wgpu::LoadOp::Load
+                            } else {
+                                wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: target[0] as f64,
+                                    g: target[1] as f64,
+                                    b: target[2] as f64,
+                                    a: target[3] as f64,
+                                })
+                            },
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: normal_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: if spec.load {
+                                wgpu::LoadOp::Load
+                            } else {
+                                wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 0.0,
+                                })
+                            },
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: material_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: if spec.load {
+                                wgpu::LoadOp::Load
+                            } else {
+                                wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 0.0,
+                                })
+                            },
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: profiler.as_mut().and_then(|p| p.timestamp_writes()),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if let Some(p) = profiler.as_mut() {
+                p.begin_statistics(&mut gbuffer);
+            }
+            gbuffer.set_pipeline(&snap.gbuffer_pipeline);
+            gbuffer.set_bind_group(0, &snap.cam_bind, &[]);
+            gbuffer.set_bind_group(1, &snap.tex_bind, &[]);
+            gbuffer.set_bind_group(2, &snap.shadow_bind, &[]);
+            gbuffer.set_bind_group(3, &snap.material_bind, &[]);
+            gbuffer.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
+            gbuffer.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
+            gbuffer.set_viewport(
+                0.0,
+                0.0,
+                spec.target.width as f32,
+                spec.target.height as f32,
+                0.0,
+                1.0,
+            );
+            for r in snap.ranges.iter().filter(|r| r.pass == pass_index) {
+                if r.hz_culled.is_some() && snap.occlusion_args.is_some() {
+                    continue;
+                }
+                let program = snap
+                    .material_pipelines
+                    .get(r.material.saturating_sub(1) as usize)
+                    .filter(|_| r.material > 0);
+                if let Some(pipes) = program {
+                    gbuffer.set_bind_group(3, &pipes.bind, &[]);
+                }
+                gbuffer.draw_indexed(r.index_start..r.index_end, 0, 0..1);
+            }
+            if let Some(p) = profiler.as_ref() {
+                p.end_statistics(&mut gbuffer);
+            }
+            continue;
+        }
+        if spec.kind == super::pass::PassKind::Fullscreen
+            || spec.kind == super::pass::PassKind::Deferred
+        {
+            let deferred = if spec.kind == super::pass::PassKind::Deferred {
+                let format = pass_format(spec.target.format);
+                snap.deferred_pipeline
+                    .get(&format)
+                    .zip(snap.deferred_binds.get(&spec.index))
+            } else {
+                None
+            };
             // A post stage runs the effect shader with the stage's bind group;
             // a plain fullscreen pass keeps the tinted blit.
             let post = spec.post.and_then(|_| {
@@ -8621,9 +9378,13 @@ pub fn prepare_scene_with_id(
                     .get(&spec.index)
                     .map(|bind| (pipeline, bind))
             });
-            if let Some((pipeline, bind)) = post.or(plain) {
+            if let Some((pipeline, bind)) = deferred.or(post).or(plain) {
                 let mut full = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("repame_view3d_fullscreen"),
+                    label: if spec.kind == super::pass::PassKind::Deferred {
+                        Some("repame_view3d_deferred")
+                    } else {
+                        Some("repame_view3d_fullscreen")
+                    },
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view,
                         resolve_target: None,
@@ -9093,7 +9854,13 @@ mod tests {
         parses("shadow_depth_shader(unsupported)", &shadow_unsupported);
         assert!(!shadow_unsupported.contains("morph_data"));
         assert!(!shadow_unsupported.contains("skin_palette"));
+        parses("gbuffer_shader(supported)", &gbuffer_shader(GpuSkinning::Supported));
+        parses(
+            "gbuffer_shader(unsupported)",
+            &gbuffer_shader(GpuSkinning::Unsupported),
+        );
         parses("FULLSCREEN_SHADER", FULLSCREEN_SHADER);
+        parses("DEFERRED_SHADER", DEFERRED_SHADER);
         parses("HIZ_WGSL", HIZ_WGSL);
         parses("HIZ_TEST_WGSL", HIZ_TEST_WGSL);
         // The dispatch stride is built from `HIZ_WORKGROUP` and the

@@ -228,6 +228,11 @@ pub struct Frame3d {
     /// Suppresses the CPU-derived `MeshClick`/`HoverMesh`/`GroundClick`
     /// events when GPU picking is enabled, making `GpuPickHit` authoritative.
     pub gpu_pick_authoritative: bool,
+    /// App identity used to persist the driver pipeline cache. `None`
+    /// (default) leaves the cache in memory only.
+    pub pipeline_cache_app: Option<repame_save::AppId>,
+    /// Requests a one-shot pipeline-cache write during the next `prepare`.
+    pub pipeline_cache_flush: bool,
 }
 
 impl Default for Frame3d {
@@ -256,6 +261,8 @@ impl Default for Frame3d {
             gpu_occlusion: None,
             gpu_pick: false,
             gpu_pick_authoritative: false,
+            pipeline_cache_app: None,
+            pipeline_cache_flush: false,
         }
     }
 }
@@ -663,15 +670,13 @@ pub fn Viewport3d(
                 let aspect = Frame3d::aspect(g.viewport_px);
                 let vp = Vec2::new(g.viewport_px[0].max(1.0), g.viewport_px[1].max(1.0));
                 let (eye, dir) = hover_input.cam.screen_ray(aspect, vp, Vec2::new(p.x, p.y));
-                if let Ok(mut requests) = hover_pick.requests.lock() {
-                    requests.push_back(crate::PickRequest {
-                        id: hover_pick.next_id.fetch_add(1, Ordering::Relaxed),
-                        kind: crate::PickKind::Hover,
-                        origin: eye,
-                        dir,
-                        triangles: crate::PickTriangles::from_groups(&hover_input.groups),
-                    });
-                }
+                hover_pick.enqueue(crate::PickRequest {
+                    id: 0,
+                    kind: crate::PickKind::Hover,
+                    origin: eye,
+                    dir,
+                    triangles: crate::PickTriangles::from_groups(&hover_input.groups),
+                });
                 let ready: Vec<View3dEvent> = hover_pick
                     .results
                     .lock()
@@ -708,15 +713,13 @@ pub fn Viewport3d(
                     let aspect = Frame3d::aspect(g.viewport_px);
                     let vp = Vec2::new(g.viewport_px[0].max(1.0), g.viewport_px[1].max(1.0));
                     let (eye, dir) = click_input.cam.screen_ray(aspect, vp, Vec2::new(p.x, p.y));
-                    if let Ok(mut requests) = click_pick.requests.lock() {
-                        requests.push_back(crate::PickRequest {
-                            id: click_pick.next_id.fetch_add(1, Ordering::Relaxed),
-                            kind: crate::PickKind::Click,
-                            origin: eye,
-                            dir,
-                            triangles: crate::PickTriangles::from_groups(&click_input.groups),
-                        });
-                    }
+                    click_pick.enqueue(crate::PickRequest {
+                        id: 0,
+                        kind: crate::PickKind::Click,
+                        origin: eye,
+                        dir,
+                        triangles: crate::PickTriangles::from_groups(&click_input.groups),
+                    });
                     let ready: Vec<View3dEvent> = click_pick
                         .results
                         .lock()
@@ -755,6 +758,8 @@ pub fn Viewport3d(
         });
     let payload = GpuViewport3d {
         input: draw_input.clone(),
+        pipeline_cache_app: input.pipeline_cache_app,
+        pipeline_cache_flush: input.pipeline_cache_flush,
         pick: draw_pick,
         geom: geom_out.arc(),
         history: geom_out.history(),
@@ -830,8 +835,22 @@ struct PickBridge {
     next_id: std::sync::atomic::AtomicU64,
 }
 
+impl PickBridge {
+    fn enqueue(&self, mut request: crate::PickRequest) {
+        if let Ok(mut requests) = self.requests.lock() {
+            if requests.len() >= 16 {
+                requests.pop_front();
+            }
+            request.id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            requests.push_back(request);
+        }
+    }
+}
+
 struct GpuViewport3d {
     input: Arc<Frame3d>,
+    pipeline_cache_app: Option<repame_save::AppId>,
+    pipeline_cache_flush: bool,
     pick: Arc<PickBridge>,
     geom: Arc<Mutex<ViewportGeom>>,
     /// Previous frame's view-projection, for camera motion vectors. Shared
@@ -927,34 +946,50 @@ impl WgpuCallback for GpuViewport3d {
         let w = vp_px[0].max(1.0) as u32;
         let h = vp_px[1].max(1.0) as u32;
         let aspect = Frame3d::aspect(vp_px);
+        if let Some(app) = self.pipeline_cache_app {
+            crate::pipeline_cache_io::prepare(&self.batch_id, app, device, resources);
+        }
         if self.input.gpu_pick {
             let has_feed = resources.get::<crate::PickFeed>().is_some();
             if !has_feed {
                 resources.insert(crate::PickFeed::new(device));
             }
-            let request = match self.pick.requests.lock() {
-                Ok(mut q) => {
-                    let newest = q.pop_back();
-                    q.clear();
-                    newest
+            let requests: Vec<crate::PickRequest> = self
+                .pick
+                .requests
+                .lock()
+                .map(|mut q| q.drain(..).collect())
+                .unwrap_or_default();
+            let ready = resources
+                .get_mut::<crate::PickFeed>()
+                .map(|feed| feed.take_ready(device))
+                .unwrap_or_default();
+            if let Ok(mut results) = self.pick.results.lock() {
+                for result in ready {
+                    results.push_back(View3dEvent::GpuPickHit {
+                        pick_id: result.pick_id,
+                        point: (result.origin + result.dir * result.distance).into(),
+                        request_id: result.id,
+                        kind: result.kind,
+                    });
                 }
-                Err(_) => None,
-            };
-            if let Some(feed) = resources.get_mut::<crate::PickFeed>()
-                && let Some(result) = feed.take(device)
-                && let Ok(mut results) = self.pick.results.lock()
-            {
-                results.push_back(View3dEvent::GpuPickHit {
-                    pick_id: result.pick_id,
-                    point: (result.origin + result.dir * result.distance).into(),
-                    request_id: result.id,
-                    kind: result.kind,
-                });
             }
-            if let Some(request) = request
-                && let Some(feed) = resources.get_mut::<crate::PickFeed>()
+            let mut pending = 0;
+            for request in &requests {
+                let Some(feed) = resources.get_mut::<crate::PickFeed>() else {
+                    break;
+                };
+                if feed.encode(device, queue, encoder, request).is_none() {
+                    break;
+                }
+                pending += 1;
+            }
+            if pending < requests.len()
+                && let Ok(mut q) = self.pick.requests.lock()
             {
-                feed.encode(device, queue, encoder, &request);
+                for request in requests.into_iter().skip(pending) {
+                    q.push_back(request);
+                }
             }
         }
         let desc = self.effective_desc();
@@ -1165,6 +1200,11 @@ impl WgpuCallback for GpuViewport3d {
                 );
             }
             None => batch.retire_occlusion_feed(device, resources),
+        }
+        if self.pipeline_cache_flush
+            && let Some(app) = self.pipeline_cache_app
+        {
+            crate::pipeline_cache_io::flush(&self.batch_id, app, device, resources);
         }
         Vec::new()
     }

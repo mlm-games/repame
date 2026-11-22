@@ -71,6 +71,26 @@ impl MorphStore {
         Some(slot as u32)
     }
 
+    /// Always reserves a slot for one skinned draw. When the draw's morph
+    /// data cannot be stored, the slot is left empty so `skin_base / stride`
+    /// keeps naming the right slot for later draws.
+    pub fn push(&mut self, draw: Option<&MorphDraw>, vertex_base: u32) -> Option<u32> {
+        if self.slots.len() >= MAX_MORPH_DRAWS {
+            return None;
+        }
+        if let Some(draw) = draw
+            && let Some(slot) = self.add(draw, vertex_base)
+        {
+            return Some(slot);
+        }
+        let slot = self.slots.len() as u32;
+        self.slots.push(MorphSlot {
+            a: [0, vertex_base, 0, 0],
+            b: [0, 0, 0, 0],
+        });
+        Some(slot)
+    }
+
     pub fn bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         let mut slots = vec![MorphSlot::zeroed(); MAX_MORPH_DRAWS];

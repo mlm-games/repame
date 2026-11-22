@@ -83,6 +83,7 @@ pub(crate) fn strip_skin_palette(source: &mut String) {
         crate::morph_gpu::MORPH_STRUCT_WGSL,
         crate::morph_gpu::MORPH_BINDING_WGSL,
         crate::morph_gpu::MORPH_BODY_WGSL,
+        crate::morph_gpu::MORPH_POS_WGSL,
     ] {
         let stripped = source.replace(fragment, "");
         *source = stripped;
@@ -1664,6 +1665,27 @@ impl SkinnedDraw {
         player: &SkeletonPlayer,
     ) -> Option<Self> {
         Self::from_matrices(mesh, &player.joint_matrices(anim, skeleton, mesh))
+    }
+
+    /// Samples joints and morph weights together. `mesh_index` is the key
+    /// used by [`Animation::morph_tracks`] and the importer's morph map.
+    pub fn from_player_with_morphs(
+        mesh: &SkinnedMesh,
+        mesh_index: usize,
+        anim: &Animation,
+        skeleton: &Skeleton,
+        player: &SkeletonPlayer,
+        morphs: &std::collections::HashMap<usize, MorphSet>,
+    ) -> Option<Self> {
+        let draw = Self::from_player(mesh, anim, skeleton, player)?;
+        let mut sampled = player.morph_weights(anim);
+        let Some(weights) = sampled.remove(&mesh_index) else {
+            return Some(draw);
+        };
+        let Some(set) = morphs.get(&mesh_index) else {
+            return Some(draw);
+        };
+        Some(draw.with_morphs(set, &weights))
     }
 
     /// Build from explicit joint matrices (same order as

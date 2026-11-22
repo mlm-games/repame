@@ -64,6 +64,9 @@ impl MorphStore {
             b: [weight_base, 0, 0, 0],
         });
         self.weights.extend_from_slice(&draw.weights);
+        while self.weights.len() % 4 != 0 {
+            self.weights.push(0.0);
+        }
         self.deltas.extend_from_slice(&draw.deltas);
         Some(slot as u32)
     }
@@ -113,6 +116,55 @@ struct MorphData {
 
 pub const MORPH_BINDING_WGSL: &str =
     "@group(0) @binding(2) var<storage, read> morph_data: MorphData;\n";
+
+pub const MORPH_POS_WGSL: &str = "\
+        let morph_index = u32(skin_base + 0.5) / 128u;
+        if (morph_index < 64u) {
+            let slot = morph_data.slots[morph_index];
+            let target_count = slot.a.w;
+            let vertex_count = slot.a.z;
+            let local = vertex_index - slot.a.y;
+            if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+                var delta_pos = vec3<f32>(0.0);
+                for (var k: u32 = 0u; k < target_count; k = k + 1u) {
+                    let w = morph_data.weights[slot.b.x / 4u + k / 4u][k % 4u];
+                    let d = morph_data.deltas[slot.a.x + k * vertex_count + local];
+                    delta_pos = delta_pos + d.pos.xyz * w;
+                }
+                morph_pos = pos + delta_pos;
+            }
+        }
+";
+
+pub const MORPH_POS_FN_WGSL: &str = "\
+fn morph_pose(pos: vec3<f32>, skin_base: f32, vertex_index: u32, skin_mix: f32) -> vec3<f32> {
+    if (skin_mix <= 0.5) { return pos; }
+    let morph_index = u32(skin_base + 0.5) / 128u;
+    var morph_pos = pos;
+    if (morph_index < 64u) {
+        let slot = morph_data.slots[morph_index];
+        let target_count = slot.a.w;
+        let vertex_count = slot.a.z;
+        let local = vertex_index - slot.a.y;
+        if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+            var delta_pos = vec3<f32>(0.0);
+            for (var k: u32 = 0u; k < target_count; k = k + 1u) {
+                let w = morph_data.weights[slot.b.x / 4u + k / 4u][k % 4u];
+                let d = morph_data.deltas[slot.a.x + k * vertex_count + local];
+                delta_pos = delta_pos + d.pos.xyz * w;
+            }
+            morph_pos = pos + delta_pos;
+        }
+    }
+    return morph_pos;
+}
+";
+
+pub const MORPH_POS_FN_PASSTHROUGH_WGSL: &str = "\
+fn morph_pose(pos: vec3<f32>, skin_base: f32, vertex_index: u32, skin_mix: f32) -> vec3<f32> {
+    return pos;
+}
+";
 
 pub const MORPH_BODY_WGSL: &str = "\
         let morph_index = u32(skin_base + 0.5) / 128u;
@@ -172,5 +224,14 @@ mod tests {
         );
         let slots: &[MorphSlot] = bytemuck::cast_slice(&bytes[..MAX_MORPH_DRAWS * 32]);
         assert_eq!(slots[0].a, [0, 12, 1, 2]);
+        let second = MorphDraw {
+            weights: vec![1.0],
+            deltas: vec![MorphDelta::zeroed()],
+            vertex_count: 1,
+        };
+        assert_eq!(store.add(&second, 20), Some(1));
+        let padded = store.bytes();
+        let slots: &[MorphSlot] = bytemuck::cast_slice(&padded[..MAX_MORPH_DRAWS * 32]);
+        assert_eq!(slots[1].b[0], 4, "weight bases stay vec4-aligned");
     }
 }

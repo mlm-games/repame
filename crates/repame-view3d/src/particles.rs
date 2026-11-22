@@ -748,7 +748,16 @@ pub struct ParticleVoxels {
     pub dims: [u32; 3],
     /// Occupancy per cell, row-major `x + dims.x * (y + dims.y * z)`; `1`
     /// = solid.
-    pub cells: Vec<u32>,
+    cells: Vec<u32>,
+    /// Unique generation: assigned at build time, bumped by
+    /// [`Self::bump_revision`] whenever cells change in place.
+    pub revision: u64,
+}
+
+static NEXT_VOXEL_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_voxel_revision() -> u64 {
+    NEXT_VOXEL_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ParticleVoxels {
@@ -797,7 +806,22 @@ impl ParticleVoxels {
             cell,
             dims,
             cells,
+            revision: next_voxel_revision(),
         })
+    }
+
+    /// Marks in-place cell edits so the renderer re-uploads the field.
+    pub fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub fn cells(&self) -> &[u32] {
+        &self.cells
+    }
+
+    pub fn set_cells(&mut self, cells: Vec<u32>) {
+        self.cells = cells;
+        self.bump_revision();
     }
 
     /// Cell count.
@@ -2216,6 +2240,7 @@ mod tests {
             cell: 1.0,
             dims: [4, 1, 1],
             cells: vec![0, 1, 0, 0],
+            revision: 0,
         };
         let hit = segment_voxels([0.5, 0.5, 0.5], [3.5, 0.5, 0.5], &field)
             .expect("hits the solid cell");
@@ -2227,7 +2252,7 @@ mod tests {
             hit.1
         );
         // All air: the segment exits without a hit.
-        field.cells = vec![0, 0, 0, 0];
+        field.set_cells(vec![0, 0, 0, 0]);
         assert!(segment_voxels([0.5, 0.5, 0.5], [3.5, 0.5, 0.5], &field).is_none());
     }
 

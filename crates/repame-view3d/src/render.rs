@@ -595,6 +595,20 @@ struct SkinPalette {
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage, read> skin_palette: SkinPalette;
+struct MorphSlot {
+    a: vec4<u32>,
+    b: vec4<u32>,
+};
+struct MorphDelta {
+    pos: vec4<f32>,
+    nrm: vec4<f32>,
+};
+struct MorphData {
+    slots: array<MorphSlot, 64>,
+    weights: array<vec4<f32>, 128>,
+    deltas: array<MorphDelta>,
+};
+@group(0) @binding(2) var<storage, read> morph_data: MorphData;
 
 @vertex
 fn vs_main(
@@ -603,8 +617,29 @@ fn vs_main(
     @location(2) weights: vec4<f32>,
     @location(3) skin_mix: f32,
     @location(4) skin_base: f32,
+    @builtin(vertex_index) vertex_index: u32,
 ) -> @builtin(position) vec4<f32> {
     var p = pos;
+    var morph_pos = pos;
+    if (skin_mix > 0.5) {
+        let morph_index = u32(skin_base + 0.5) / 128u;
+        if (morph_index < 64u) {
+            let slot = morph_data.slots[morph_index];
+            let target_count = slot.a.w;
+            let vertex_count = slot.a.z;
+            let local = vertex_index - slot.a.y;
+            if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+                var delta_pos = vec3<f32>(0.0);
+                for (var k: u32 = 0u; k < target_count; k = k + 1u) {
+                    let w = morph_data.weights[slot.b.x / 4u + k / 4u][k % 4u];
+                    let d = morph_data.deltas[slot.a.x + k * vertex_count + local];
+                    delta_pos = delta_pos + d.pos.xyz * w;
+                }
+                morph_pos = pos + delta_pos;
+            }
+        }
+        p = morph_pos;
+    }
     if (skin_mix > 0.5) {
         let wsum = weights.x + weights.y + weights.z + weights.w;
         if (wsum > 1e-8) {
@@ -620,7 +655,7 @@ fn vs_main(
                 w = w / wsum;
                 if (w > 0.0) {
                     let m = skin_palette.joints[base + slot];
-                    acc = acc + (m * vec4<f32>(pos, 1.0)).xyz * w;
+                    acc = acc + (m * vec4<f32>(morph_pos, 1.0)).xyz * w;
                 }
             }
             p = acc;
@@ -647,12 +682,33 @@ const SHADOW_SKIN_BODY_WGSL: &str = r#"if (skin_mix > 0.5) {
                 w = w / wsum;
                 if (w > 0.0) {
                     let m = skin_palette.joints[base + slot];
-                    acc = acc + (m * vec4<f32>(pos, 1.0)).xyz * w;
+                    acc = acc + (m * vec4<f32>(morph_pos, 1.0)).xyz * w;
                 }
             }
             p = acc;
         }
     }"#;
+
+const SHADOW_MORPH_BODY_WGSL: &str = r#"    if (skin_mix > 0.5) {
+        let morph_index = u32(skin_base + 0.5) / 128u;
+        if (morph_index < 64u) {
+            let slot = morph_data.slots[morph_index];
+            let target_count = slot.a.w;
+            let vertex_count = slot.a.z;
+            let local = vertex_index - slot.a.y;
+            if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+                var delta_pos = vec3<f32>(0.0);
+                for (var k: u32 = 0u; k < target_count; k = k + 1u) {
+                    let w = morph_data.weights[slot.b.x / 4u + k / 4u][k % 4u];
+                    let d = morph_data.deltas[slot.a.x + k * vertex_count + local];
+                    delta_pos = delta_pos + d.pos.xyz * w;
+                }
+                morph_pos = pos + delta_pos;
+            }
+        }
+        p = morph_pos;
+    }
+"#;
 
 /// [`SHADOW_DEPTH_SHADER`] for `skinning`: the supported form is the
 /// constant byte for byte, the unsupported form drops the palette
@@ -662,7 +718,9 @@ fn shadow_depth_shader(skinning: GpuSkinning) -> String {
     let mut source = String::from(SHADOW_DEPTH_SHADER);
     if !skinning.is_supported() {
         strip_skin_palette(&mut source);
-        let stripped = source.replace(SHADOW_SKIN_BODY_WGSL, "");
+        let stripped = source
+            .replace(SHADOW_MORPH_BODY_WGSL, "")
+            .replace(SHADOW_SKIN_BODY_WGSL, "");
         source = stripped;
     }
     source
@@ -698,14 +756,14 @@ fn align256(value: u64) -> u64 {
 }
 
 fn voxel_field_key(voxels: &ParticleVoxels) -> u64 {
-    let mut hash = super::descriptor_table::fnv1a64(bytemuck::cast_slice(&voxels.cells));
+    let mut key = voxels.revision;
     for dim in voxels.dims {
-        for byte in dim.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
+        key = key
+            .wrapping_mul(0x0100_0000_01b3)
+            .wrapping_add(u64::from(dim));
     }
-    hash
+    key.wrapping_mul(0x0100_0000_01b3)
+        .wrapping_add(voxels.cells().len() as u64)
 }
 
 #[repr(C)]
@@ -4101,7 +4159,7 @@ impl SceneBatch {
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
-                    bytemuck::cast_slice(&voxels.cells),
+                    bytemuck::cast_slice(voxels.cells()),
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(voxels.dims[0] * 4),
@@ -8921,10 +8979,10 @@ mod tests {
             "scene_shader(unsupported)",
             &scene_shader(GpuSkinning::Unsupported),
         );
-        parses(
-            "shadow_depth_shader(unsupported)",
-            &shadow_depth_shader(GpuSkinning::Unsupported),
-        );
+        let shadow_unsupported = shadow_depth_shader(GpuSkinning::Unsupported);
+        parses("shadow_depth_shader(unsupported)", &shadow_unsupported);
+        assert!(!shadow_unsupported.contains("morph_data"));
+        assert!(!shadow_unsupported.contains("skin_palette"));
         parses("FULLSCREEN_SHADER", FULLSCREEN_SHADER);
         parses("HIZ_WGSL", HIZ_WGSL);
         parses("HIZ_TEST_WGSL", HIZ_TEST_WGSL);

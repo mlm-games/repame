@@ -138,6 +138,53 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 "#;
 
+#[derive(Clone, Debug)]
+pub struct PickRequest {
+    pub origin: Vec3,
+    pub dir: Vec3,
+    pub triangles: PickTriangles,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PickResult {
+    pub pick_id: u32,
+}
+
+pub struct PickFeed {
+    picker: GpuPicker,
+}
+
+impl PickFeed {
+    pub fn new(device: &wgpu::Device) -> Self {
+        Self {
+            picker: GpuPicker::new(device),
+        }
+    }
+
+    pub fn encode(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &PickRequest,
+    ) {
+        self.picker.encode(
+            device,
+            queue,
+            encoder,
+            &request.triangles.items,
+            request.origin,
+            request.dir,
+        );
+    }
+
+    pub fn take(&mut self, device: &wgpu::Device) -> Option<PickResult> {
+        self.picker
+            .take(device)
+            .map(|pick_id| PickResult { pick_id })
+    }
+}
+
 pub struct GpuPicker {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,

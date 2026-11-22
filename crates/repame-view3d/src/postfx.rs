@@ -43,6 +43,7 @@ use crate::pass::{
     MAX_PASS_TARGETS, PassError, PassKind, RenderPass, RenderTarget, RenderTargetFormat,
     TargetSemantics,
 };
+use crate::morph_gpu::{MORPH_POS_FN_PASSTHROUGH_WGSL, MORPH_POS_FN_WGSL};
 use crate::skin::{GpuSkinning, strip_skin_palette};
 
 /// Kind of screen-space effect one [`PostStage`] runs.
@@ -989,6 +990,20 @@ struct SkinPalette {
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage, read> skin_palette: SkinPalette;
+struct MorphSlot {
+    a: vec4<u32>,
+    b: vec4<u32>,
+};
+struct MorphDelta {
+    pos: vec4<f32>,
+    nrm: vec4<f32>,
+};
+struct MorphData {
+    slots: array<MorphSlot, 64>,
+    weights: array<vec4<f32>, 128>,
+    deltas: array<MorphDelta>,
+};
+@group(0) @binding(2) var<storage, read> morph_data: MorphData;
 @group(1) @binding(0) var<uniform> prev: PrevView;
 
 struct VsOut {
@@ -996,6 +1011,28 @@ struct VsOut {
     @location(0) view_depth: f32,
     @location(1) velocity: vec2<f32>,
 };
+
+fn morph_pose(pos: vec3<f32>, skin_base: f32, vertex_index: u32, skin_mix: f32) -> vec3<f32> {
+    if (skin_mix <= 0.5) { return pos; }
+    let morph_index = u32(skin_base + 0.5) / 128u;
+    var morph_pos = pos;
+    if (morph_index < 64u) {
+        let slot = morph_data.slots[morph_index];
+        let target_count = slot.a.w;
+        let vertex_count = slot.a.z;
+        let local = vertex_index - slot.a.y;
+        if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+            var delta_pos = vec3<f32>(0.0);
+            for (var k: u32 = 0u; k < target_count; k = k + 1u) {
+                let w = morph_data.weights[slot.b.x / 4u + k / 4u][k % 4u];
+                let d = morph_data.deltas[slot.a.x + k * vertex_count + local];
+                delta_pos = delta_pos + d.pos.xyz * w;
+            }
+            morph_pos = pos + delta_pos;
+        }
+    }
+    return morph_pos;
+}
 
 /// Skins a bind-pose position by the palette slots its weights name: the
 /// shared body of both depth vertex stages.
@@ -1038,8 +1075,15 @@ fn vs_main(
     @location(2) weights: vec4<f32>,
     @location(3) skin_mix: f32,
     @location(4) skin_base: f32,
+    @builtin(vertex_index) vertex_index: u32,
 ) -> VsOut {
-    let p = skin(pos, joints, weights, skin_mix, skin_base);
+    let p = skin(
+        morph_pose(pos, skin_base, vertex_index, skin_mix),
+        joints,
+        weights,
+        skin_mix,
+        skin_base,
+    );
     let clip = camera.view_proj * vec4<f32>(p, 1.0);
     let prev_clip = prev.prev_view_proj * vec4<f32>(p, 1.0);
     let ndc = clip.xy / max(clip.w, 1e-6);
@@ -1070,8 +1114,15 @@ fn vs_depth(
     @location(2) weights: vec4<f32>,
     @location(3) skin_mix: f32,
     @location(4) skin_base: f32,
+    @builtin(vertex_index) vertex_index: u32,
 ) -> VsDepthOut {
-    let p = skin(pos, joints, weights, skin_mix, skin_base);
+    let p = skin(
+        morph_pose(pos, skin_base, vertex_index, skin_mix),
+        joints,
+        weights,
+        skin_mix,
+        skin_base,
+    );
     var out: VsDepthOut;
     out.pos = camera.view_proj * vec4<f32>(p, 1.0);
     out.view_depth = dot(p - camera.cam_pos, camera.cam_forward);
@@ -1148,7 +1199,9 @@ pub(crate) fn depth_velocity_shader(skinning: GpuSkinning) -> String {
     let mut source = String::from(DEPTH_VELOCITY_WGSL);
     if !skinning.is_supported() {
         strip_skin_palette(&mut source);
-        let stripped = source.replace(DEPTH_SKIN_FN_WGSL, DEPTH_SKIN_FN_PASSTHROUGH_WGSL);
+        let stripped = source
+            .replace(MORPH_POS_FN_WGSL, MORPH_POS_FN_PASSTHROUGH_WGSL)
+            .replace(DEPTH_SKIN_FN_WGSL, DEPTH_SKIN_FN_PASSTHROUGH_WGSL);
         source = stripped;
     }
     source

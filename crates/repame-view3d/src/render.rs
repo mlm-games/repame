@@ -638,6 +638,9 @@ use repose_render_wgpu::{
     ScreenDescriptor,
 };
 
+use super::buffer_arena::GpuArena;
+use super::descriptor_table::{DescriptorTable, FALLBACK_INDEX};
+use super::gpu_timing::{DEFAULT_STATS, FrameTiming, GpuProfiler, ProfilerSupport};
 use super::mesh::MeshGroup;
 use super::occlusion::{GpuOcclusion, warn_feed_unavailable};
 use super::particles::{
@@ -647,6 +650,10 @@ use super::particles::{
 use super::reflection::ProbeSettings;
 use super::postfx::{PostProcess, PostStage, POST_WGSL, depth_velocity_shader};
 use super::skin::{GpuSkinning, SkinnedDraw, strip_skin_palette};
+
+fn align256(value: u64) -> u64 {
+    value.div_ceil(256) * 256
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -6975,6 +6982,24 @@ impl SceneBatch {
             "fs_depth",
             wgpu::TextureFormat::R32Float,
         );
+        let geometry = GpuArena::new(
+            device,
+            "repame_view3d_geometry",
+            4096,
+            256,
+            wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::INDEX
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
+        )
+        .expect("geometry arena capacity and alignment are valid");
+        let verts = geometry.buffer().clone();
+        let indices = geometry.buffer().clone();
+        let profiler = ProfilerSupport::detect(device)
+            .any()
+            .then(|| GpuProfiler::new(device, 12, DEFAULT_STATS));
+        let pages = DescriptorTable::new(MAX_RESIDENT_PAGES as usize)
+            .expect("resident page capacity is valid");
         let entry = SceneEntry {
             key,
             pipeline_depth: mk("repame_view3d_depth", true, false),
@@ -7024,20 +7049,14 @@ impl SceneBatch {
             point_faces: None,
             skin: self.skinning,
             skin_buffer,
-            verts: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("repame_view3d_verts"),
-                size: 64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            vert_cap: 0,
-            indices: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("repame_view3d_indices"),
-                size: 64,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            index_cap: 0,
+            geometry,
+            verts,
+            indices,
+            vert_base: 0,
+            index_base: 0,
+            profiler,
+            last_timing: None,
+            pages,
             camera,
             cam_bind,
             cam_layout,
@@ -7085,26 +7104,27 @@ impl SceneBatch {
         let Some(res) = all.batches.get_mut(self.id.as_str()) else {
             return;
         };
-        if self.verts.len() > res.vert_cap {
-            let cap = self.verts.len().next_power_of_two().max(256);
-            res.verts = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("repame_view3d_verts"),
-                size: (cap * size_of::<Vert>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            res.vert_cap = cap;
+        let vert_bytes = (self.verts.len() * size_of::<Vert>()) as u64;
+        let index_bytes = (self.indices.len() * size_of::<u32>()) as u64;
+        let needed = align256(vert_bytes) + align256(index_bytes);
+        if needed > res.geometry.capacity() {
+            let cap = needed.next_power_of_two().max(4096);
+            res.geometry = GpuArena::new(
+                device,
+                "repame_view3d_geometry",
+                cap,
+                256,
+                wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::INDEX
+                    | wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST,
+            )
+            .expect("geometry arena capacity and alignment are valid");
+        } else {
+            res.geometry.clear();
         }
-        if self.indices.len() > res.index_cap {
-            let cap = self.indices.len().next_power_of_two().max(256);
-            res.indices = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("repame_view3d_indices"),
-                size: (cap * size_of::<u32>()) as u64,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            res.index_cap = cap;
-        }
+        res.verts = res.geometry.buffer().clone();
+        res.indices = res.geometry.buffer().clone();
         queue.write_buffer(&res.camera, 0, bytemuck::cast_slice(&[self.camera]));
         // The shaders' per-page resident levels: one write covers every
         // textured draw this frame (scene, material and particle paths).
@@ -7148,10 +7168,25 @@ impl SceneBatch {
             queue.write_buffer(skin, 0, bytemuck::cast_slice(&self.palette));
         }
         if !self.verts.is_empty() {
-            queue.write_buffer(&res.verts, 0, bytemuck::cast_slice(&self.verts));
+            let alloc = res
+                .geometry
+                .alloc(vert_bytes)
+                .expect("geometry arena sized for this frame");
+            res.vert_base = alloc.offset;
+            res.geometry.write(queue, alloc, bytemuck::cast_slice(&self.verts));
+        } else {
+            res.vert_base = 0;
         }
         if !self.indices.is_empty() {
-            queue.write_buffer(&res.indices, 0, bytemuck::cast_slice(&self.indices));
+            let alloc = res
+                .geometry
+                .alloc(index_bytes)
+                .expect("geometry arena sized for this frame");
+            res.index_base = alloc.offset;
+            res.geometry
+                .write(queue, alloc, bytemuck::cast_slice(&self.indices));
+        } else {
+            res.index_base = 0;
         }
         // Texture uploads straight into array layers. `desc` lives on the
         // CPU batch (not the GPU entry) so validation matches what the
@@ -7226,6 +7261,11 @@ impl SceneBatch {
                     depth_or_array_layers: 1,
                 },
             );
+        }
+        if let Some(profiler) = res.profiler.as_mut()
+            && let Some(timing) = profiler.read(device, queue)
+        {
+            res.last_timing = Some(timing);
         }
         res.last_ranges = self.ranges.clone();
         res.occlusion_feed_desc = self.armed_feed();
@@ -7401,10 +7441,14 @@ struct SceneEntry {
     /// `VERTEX_STORAGE`: the layout omits binding 1 and skinned draws drop
     /// before any palette exists.
     skin_buffer: Option<wgpu::Buffer>,
+    geometry: GpuArena,
     verts: wgpu::Buffer,
-    vert_cap: usize,
     indices: wgpu::Buffer,
-    index_cap: usize,
+    vert_base: u64,
+    index_base: u64,
+    profiler: Option<GpuProfiler>,
+    last_timing: Option<FrameTiming>,
+    pages: DescriptorTable,
     camera: wgpu::Buffer,
     cam_bind: wgpu::BindGroup,
     /// The camera and texture-array layouts, kept so the particle billboard
@@ -7488,6 +7532,8 @@ pub fn prepare_scene_with_id(
         point_faces: Option<[[[f32; 4]; 4]; 6]>,
         verts: wgpu::Buffer,
         indices: wgpu::Buffer,
+        vert_base: u64,
+        index_base: u64,
         pipeline_depth: [wgpu::RenderPipeline; 3],
         pipeline_flat: [wgpu::RenderPipeline; 3],
         pipeline_transparent: [wgpu::RenderPipeline; 3],
@@ -7665,6 +7711,8 @@ pub fn prepare_scene_with_id(
             point_faces: res.point_faces,
             verts: res.verts.clone(),
             indices: res.indices.clone(),
+            vert_base: res.vert_base,
+            index_base: res.index_base,
             pipeline_depth: res.pipeline_depth.clone(),
             pipeline_flat: res.pipeline_flat.clone(),
             pipeline_transparent: res.pipeline_transparent.clone(),
@@ -7750,6 +7798,10 @@ pub fn prepare_scene_with_id(
         })
     };
     let Some(snap) = snapshot else { return };
+    let mut profiler = resources
+        .get_mut::<SceneResources>()
+        .and_then(|all| all.batches.get_mut(id))
+        .and_then(|res| res.profiler.take());
     if snap.shadows_on {
         queue.write_buffer(
             &snap.shadow_camera_buf,
@@ -7767,7 +7819,7 @@ pub fn prepare_scene_with_id(
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            timestamp_writes: profiler.as_mut().and_then(|p| p.timestamp_writes()),
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -7781,8 +7833,8 @@ pub fn prepare_scene_with_id(
         );
         spass.set_pipeline(&snap.shadow_depth_pipeline);
         spass.set_bind_group(0, &snap.shadow_cam_bind, &[]);
-        spass.set_vertex_buffer(0, snap.verts.slice(..));
-        spass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+        spass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
+        spass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
         for r in &snap.ranges {
             if r.pass == 0 && !r.transparent && r.depth_test {
                 spass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
@@ -7818,7 +7870,7 @@ pub fn prepare_scene_with_id(
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: profiler.as_mut().and_then(|p| p.timestamp_writes()),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -7832,8 +7884,8 @@ pub fn prepare_scene_with_id(
             );
             cpass.set_pipeline(&snap.shadow_depth_pipeline);
             cpass.set_bind_group(0, slice_bind, &[]);
-            cpass.set_vertex_buffer(0, snap.verts.slice(..));
-            cpass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+            cpass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
+            cpass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
             for r in &snap.ranges {
                 if r.pass == 0 && !r.transparent && r.depth_test {
                     cpass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
@@ -7866,7 +7918,7 @@ pub fn prepare_scene_with_id(
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: profiler.as_mut().and_then(|p| p.timestamp_writes()),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -7880,8 +7932,8 @@ pub fn prepare_scene_with_id(
                 );
                 ppass.set_pipeline(&snap.shadow_depth_pipeline);
                 ppass.set_bind_group(0, face_bind, &[]);
-                ppass.set_vertex_buffer(0, snap.verts.slice(..));
-                ppass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+                ppass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
+                ppass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
                 for r in &snap.ranges {
                     if r.pass == 0 && !r.transparent && r.depth_test {
                         ppass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
@@ -7945,7 +7997,7 @@ pub fn prepare_scene_with_id(
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: profiler.as_mut().and_then(|p| p.timestamp_writes()),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -7961,8 +8013,8 @@ pub fn prepare_scene_with_id(
                 pass.set_bind_group(1, &snap.tex_bind, &[]);
                 pass.set_bind_group(2, &captures.capture_bind, &[]);
                 pass.set_bind_group(3, &snap.material_bind, &[]);
-                pass.set_vertex_buffer(0, snap.verts.slice(..));
-                pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
+                pass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
                 let mut bound_material: Option<u32> = None;
                 for r in snap
                     .ranges
@@ -7998,7 +8050,7 @@ pub fn prepare_scene_with_id(
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("repame_view3d_particles"),
-            timestamp_writes: None,
+            timestamp_writes: profiler.as_mut().and_then(|p| p.compute_timestamp_writes()),
         });
         for draw in &particles.draws {
             pass.set_bind_group(0, &draw.sim_bind, &[]);
@@ -8010,7 +8062,9 @@ pub fn prepare_scene_with_id(
     }
     // One declared pass's depth/velocity replay, shared by the phase-two
     // ordering (ahead of the scene pass) and the declaration-order loop.
-    let encode_depth_pass = |encoder: &mut wgpu::CommandEncoder, entry: &PassEntry| {
+    let encode_depth_pass = |encoder: &mut wgpu::CommandEncoder,
+                             entry: &PassEntry,
+                             profiler: &mut Option<GpuProfiler>| {
         // Replay the frame's opaque geometry into an Rgba16Float target:
         // view depth, plus camera velocity for a declared Depth pass (the
         // engine's Occlusion kind runs the depth-only pipeline).
@@ -8044,7 +8098,7 @@ pub fn prepare_scene_with_id(
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            timestamp_writes: profiler.as_mut().and_then(|p| p.timestamp_writes()),
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -8066,8 +8120,8 @@ pub fn prepare_scene_with_id(
         });
         dv.set_bind_group(0, &snap.cam_bind, &[]);
         dv.set_bind_group(1, &snap.depth_velocity_bind, &[]);
-        dv.set_vertex_buffer(0, snap.verts.slice(..));
-        dv.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+        dv.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
+        dv.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
         for r in snap.ranges.iter().filter(|r| r.depth_test && !r.transparent) {
             dv.draw_indexed(r.index_start..r.index_end, 0, 0..1);
         }
@@ -8089,8 +8143,8 @@ pub fn prepare_scene_with_id(
         pass.set_bind_group(1, &snap.tex_bind, &[]);
         pass.set_bind_group(2, &snap.shadow_bind, &[]);
         pass.set_bind_group(3, &snap.material_bind, &[]);
-        pass.set_vertex_buffer(0, snap.verts.slice(..));
-        pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
+        pass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
         let mut bound_material: Option<u32> = None;
         for r in snap.ranges.iter().filter(|r| r.hz_culled.is_some()) {
             let program = snap
@@ -8138,14 +8192,20 @@ pub fn prepare_scene_with_id(
             store_depth: occlusion_indirect,
         };
         let Some(mut pass) = composite.begin_scene_ops(id, encoder, ops) else {
+            if let Some(entry) = resources
+                .get_mut::<SceneResources>()
+                .and_then(|all| all.batches.get_mut(id))
+            {
+                entry.profiler = profiler;
+            }
             return;
         };
         pass.set_bind_group(0, &snap.cam_bind, &[]);
         pass.set_bind_group(1, &snap.tex_bind, &[]);
         pass.set_bind_group(2, &snap.shadow_bind, &[]);
         pass.set_bind_group(3, &snap.material_bind, &[]);
-        pass.set_vertex_buffer(0, snap.verts.slice(..));
-        pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
+        pass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
         let mut bound_material: Option<u32> = None;
         for r in snap.ranges.iter().filter(|r| r.pass == 0) {
             let program = snap
@@ -8201,7 +8261,7 @@ pub fn prepare_scene_with_id(
         let pass_index = spec.index;
         let target = spec.target.clear;
         if matches!(spec.kind, super::pass::PassKind::Depth | super::pass::PassKind::Occlusion) {
-            encode_depth_pass(encoder, entry);
+            encode_depth_pass(encoder, entry, &mut profiler);
             // Phase two: the chain reads this pass's target, so the GPU test
             // and the second scene pass follow it here.
             if occlusion_indirect && !phase_two_done {
@@ -8270,7 +8330,7 @@ pub fn prepare_scene_with_id(
                                 }),
                                 stencil_ops: None,
                             }),
-                            timestamp_writes: None,
+                            timestamp_writes: profiler.as_mut().and_then(|p| p.timestamp_writes()),
                             occlusion_query_set: None,
                             multiview_mask: None,
                         });
@@ -8337,7 +8397,7 @@ pub fn prepare_scene_with_id(
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: profiler.as_mut().and_then(|p| p.timestamp_writes()),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -8372,7 +8432,7 @@ pub fn prepare_scene_with_id(
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: profiler.as_mut().and_then(|p| p.timestamp_writes()),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -8473,16 +8533,19 @@ pub fn prepare_scene_with_id(
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            timestamp_writes: profiler.as_mut().and_then(|p| p.timestamp_writes()),
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some(p) = profiler.as_mut() {
+            p.begin_statistics(&mut pass);
+        }
         pass.set_bind_group(0, &snap.cam_bind, &[]);
         pass.set_bind_group(1, &snap.tex_bind, &[]);
         pass.set_bind_group(2, &snap.shadow_bind, &[]);
         pass.set_bind_group(3, &snap.material_bind, &[]);
-        pass.set_vertex_buffer(0, snap.verts.slice(..));
-        pass.set_index_buffer(snap.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
+        pass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
         pass.set_viewport(
             0.0,
             0.0,
@@ -8530,6 +8593,18 @@ pub fn prepare_scene_with_id(
         if let Some(particles) = snap.particles.as_ref() {
             draw_particle_billboards(&mut pass, particles, pass_index, &snap.cam_bind, &snap.tex_bind);
         }
+        if let Some(p) = profiler.as_ref() {
+            p.end_statistics(&mut pass);
+        }
+    }
+    if let Some(p) = profiler.as_mut() {
+        p.resolve(encoder);
+    }
+    if let Some(entry) = resources
+        .get_mut::<SceneResources>()
+        .and_then(|all| all.batches.get_mut(id))
+    {
+        entry.profiler = profiler;
     }
 }
 
@@ -8627,6 +8702,53 @@ fn draw_particle_billboards(
 /// has already set the viewport to the callback rect, which matches the
 /// offscreen texture 1:1 (both come from the painted frame geometry).
 /// No-op when `id` has no target (call [`prepare_scene_with_id`] first).
+/// Reserves a stable texture page for a caller-owned key. Reuses a released
+/// slot, and returns the fallback page when the table is full.
+pub fn bind_texture_page(
+    id: &str,
+    key: u64,
+    resources: &mut CallbackResources,
+) -> u32 {
+    resources
+        .get_mut::<SceneResources>()
+        .and_then(|all| all.batches.get_mut(id))
+        .and_then(|res| {
+            let page = res.pages.insert(key).ok()?;
+            if page >= res.key.3 {
+                res.pages.remove(key);
+                return None;
+            }
+            Some(page)
+        })
+        .unwrap_or(FALLBACK_INDEX)
+}
+
+/// Looks up a key reserved by [`bind_texture_page`].
+pub fn resolve_texture_page(id: &str, key: u64, resources: &CallbackResources) -> u32 {
+    resources
+        .get::<SceneResources>()
+        .and_then(|all| all.batches.get(id))
+        .map(|res| res.pages.resolve(key))
+        .unwrap_or(FALLBACK_INDEX)
+}
+
+/// Releases a key so a later bind can reuse its page.
+pub fn release_texture_page(id: &str, key: u64, resources: &mut CallbackResources) -> bool {
+    resources
+        .get_mut::<SceneResources>()
+        .and_then(|all| all.batches.get_mut(id))
+        .is_some_and(|res| res.pages.remove(key))
+}
+
+/// GPU timings from the most recent resolved frame, or `None` before the
+/// first frame resolves (or when the device has no query features).
+pub fn last_gpu_timing<'a>(id: &str, resources: &'a CallbackResources) -> Option<&'a FrameTiming> {
+    resources
+        .get::<SceneResources>()
+        .and_then(|all| all.batches.get(id))
+        .and_then(|res| res.last_timing.as_ref())
+}
+
 pub fn paint_scene_with_id(
     id: &str,
     rpass: &mut wgpu::RenderPass<'_>,

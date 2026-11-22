@@ -46,6 +46,7 @@ pub mod chunk;
 pub mod descriptor_table;
 pub mod gizmos;
 pub mod gltf;
+pub mod gpu_timing;
 pub mod lod;
 pub mod material;
 pub mod mesh;
@@ -80,6 +81,9 @@ pub use descriptor_table::{
     DEFAULT_PROBE_LIMIT, FALLBACK_INDEX, DescriptorTable, DescriptorTableError, fnv1a64,
 };
 pub use gizmos::{AXIS_X, AXIS_Y, AXIS_Z, GizmoColor, Gizmos, WHITE, YELLOW};
+pub use gpu_timing::{
+    DEFAULT_STATS, FrameTiming, GpuProfiler, ProfilerSupport,
+};
 pub use gltf::{
     ImportSkip, ImportedMesh, alpha_mode, fan_to_list, flatten_imported, import_slice, material_of,
     strip_to_list,
@@ -121,7 +125,10 @@ pub use render::{
     BatchDesc, LightRig, MAX_RESIDENT_PAGES, MipUpload, SceneBatch, SceneFilter, SceneLight,
     SceneUpload,
 };
-pub use render::{paint_scene_with_id, prepare_scene_with_id};
+pub use render::{
+    bind_texture_page, last_gpu_timing, paint_scene_with_id, prepare_scene_with_id,
+    release_texture_page, resolve_texture_page,
+};
 pub use shading::{ShadedBatch, ShadedGroup, ShaderCache, ShadingUniform, kcolor_view};
 pub use shadow::{
     CascadeDesc, CascadeSlice, PointLight, ShadowDesc, light_view_proj, shadow_extent,

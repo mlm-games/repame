@@ -491,6 +491,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 /// holds albedo and coverage; the three engine-owned attachments hold the
 /// view-space normal (`.w` carries the lit flag), material params (`metallic`,
 /// `roughness`, unused, view depth) and the full emissive RGB.
+const GBUFFER_STRUCT_WGSL: &str = "\
+struct GbufferOut {
+    @location(0) albedo: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+    @location(2) material: vec4<f32>,
+    @location(3) emissive: vec4<f32>,
+};
+";
+
 const GBUFFER_FS: &str = r#"
 struct GbufferOut {
     @location(0) albedo: vec4<f32>,
@@ -964,6 +973,20 @@ fn scene_shader(skinning: GpuSkinning) -> String {
 fn gbuffer_shader(skinning: GpuSkinning) -> String {
     let mut source = scene_prefix(skinning);
     source.push_str(GBUFFER_FS);
+    source
+}
+
+/// G-buffer module for one lowered material program: the shared vertex prefix
+/// with the combinator chain feeding albedo and the MRT fragment stage.
+fn gbuffer_material_shader(
+    skinning: GpuSkinning,
+    model: &super::material::ShadingModel,
+) -> String {
+    let mut source = scene_prefix(skinning);
+    source.push_str(GBUFFER_STRUCT_WGSL);
+    source.push_str(
+        &super::shading::gbuffer_fragment(model).expect("registered materials validate"),
+    );
     source
 }
 
@@ -2860,6 +2883,7 @@ struct MaterialPipelines {
     flat: wgpu::RenderPipeline,
     transparent: wgpu::RenderPipeline,
     transparent_flat: wgpu::RenderPipeline,
+    gbuffer: wgpu::RenderPipeline,
     buffer: wgpu::Buffer,
     bind: wgpu::BindGroup,
 }
@@ -4535,11 +4559,76 @@ impl SceneBatch {
             });
             let uniform = material_uniform_for(&entry.uniform, &pages);
             queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&[uniform]));
+            let gbuffer_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("repame_view3d_gbuffer_material"),
+                source: wgpu::ShaderSource::Wgsl(
+                    gbuffer_material_shader(res.skin, &entry.model).into(),
+                ),
+            });
+            let gbuffer_targets: [Option<wgpu::ColorTargetState>; 4] =
+                std::array::from_fn(|_| {
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })
+                });
+            let gbuffer = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("repame_view3d_gbuffer_material_pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &gbuffer_module,
+                    entry_point: Some("vs_main"),
+                    buffers: &buffers,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &gbuffer_module,
+                    entry_point: Some("fs_main"),
+                    targets: &gbuffer_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: match entry.model.cull_mode {
+                        super::mesh::CullMode::Back => Some(wgpu::Face::Back),
+                        super::mesh::CullMode::Front => Some(wgpu::Face::Front),
+                        super::mesh::CullMode::None => None,
+                    },
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth24PlusStencil8,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState {
+                        front: wgpu::StencilFaceState {
+                            compare: wgpu::CompareFunction::LessEqual,
+                            ..Default::default()
+                        },
+                        back: wgpu::StencilFaceState {
+                            compare: wgpu::CompareFunction::LessEqual,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: SCENE_TARGET_SAMPLE_COUNT,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: res.pipeline_cache.as_ref(),
+            });
             built.push(MaterialPipelines {
                 depth: pipeline(true, false),
                 flat: pipeline(false, false),
                 transparent: pipeline(true, true),
                 transparent_flat: pipeline(false, true),
+                gbuffer,
                 buffer,
                 bind,
                 key: entry.cache_key,
@@ -8714,6 +8803,7 @@ pub fn prepare_scene_with_id(
                     flat: pipes.flat.clone(),
                     transparent: pipes.transparent.clone(),
                     transparent_flat: pipes.transparent_flat.clone(),
+                    gbuffer: pipes.gbuffer.clone(),
                     buffer: pipes.buffer.clone(),
                     bind: pipes.bind.clone(),
                 })
@@ -9539,7 +9629,11 @@ pub fn prepare_scene_with_id(
                     .get(r.material.saturating_sub(1) as usize)
                     .filter(|_| r.material > 0);
                 if let Some(pipes) = program {
+                    gbuffer.set_pipeline(&pipes.gbuffer);
                     gbuffer.set_bind_group(3, &pipes.bind, &[]);
+                } else {
+                    gbuffer.set_pipeline(&snap.gbuffer_pipeline);
+                    gbuffer.set_bind_group(3, &snap.material_bind, &[]);
                 }
                 gbuffer.draw_indexed(r.index_start..r.index_end, 0, 0..1);
             }

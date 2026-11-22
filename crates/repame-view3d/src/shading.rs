@@ -224,6 +224,52 @@ pub fn material_fragment(model: &ShadingModel) -> Result<String, ShadingError> {
     ))
 }
 
+/// Fragment stage that writes a G-buffer, using the material's combinator
+/// chain to produce albedo. Lighting, probes, material fog and tone mapping
+/// are left to the deferred pass, so only the pre-light colour enters the
+/// G-buffer.
+pub fn gbuffer_fragment(model: &ShadingModel) -> Result<String, ShadingError> {
+    model.validate()?;
+    let mut units: Vec<u8> = Vec::new();
+    for stage in &model.stages {
+        if !units.contains(&stage.tex_unit) {
+            units.push(stage.tex_unit);
+        }
+    }
+    let mut body = String::from("    var outColor: vec4<f32>;\n");
+    for unit in &units {
+        body.push_str(&format!("    let page{unit} = i32(page_of({unit}u) + 0.5);\n"));
+        body.push_str(&format!(
+            "    let resident{unit} = repame_resident_level(page_of({unit}u));\n"
+        ));
+        body.push_str(&format!("    var tex{unit}: vec4<f32>;\n"));
+        body.push_str(&format!(
+            "    if (resident{unit} < 0.0) {{\n        tex{unit} = vec4<f32>(1.0);\n    }} else if (resident{unit} > 0.0) {{\n        tex{unit} = textureSampleLevel(scene_tex, scene_smp, in.uv, page{unit}, resident{unit});\n    }} else {{\n        tex{unit} = textureSample(scene_tex, scene_smp, in.uv, page{unit});\n    }}\n"
+        ));
+        body.push_str(&format!("    let lod{unit} = 0.0;\n"));
+    }
+    body.push_str("    let kcolor = material.kcolors;\n");
+    body.push_str("    var lit_in = vec4<f32>(in.color, in.alpha);\n");
+    for line in wgsl_program(model).lines() {
+        if !line.trim().is_empty() {
+            body.push_str(&format!("    {line}\n"));
+        }
+    }
+    body.push_str("    var out: GbufferOut;\n");
+    body.push_str("    out.albedo = outColor;\n");
+    body.push_str("    let world_n = normalize(in.normal);\n");
+    body.push_str("    let forward = normalize(camera.cam_forward);\n");
+    body.push_str("    let axis = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(forward.y) > 0.99);\n");
+    body.push_str("    let right = normalize(cross(axis, forward));\n");
+    body.push_str("    let up = cross(forward, right);\n");
+    body.push_str("    out.normal = vec4<f32>(dot(world_n, right), dot(world_n, up), dot(world_n, forward), in.lit_flag);\n");
+    body.push_str("    out.material = vec4<f32>(in.metallic, in.roughness, 0.0, in.view_depth);\n");
+    body.push_str("    out.emissive = vec4<f32>(in.emissive, 1.0);\n");
+    Ok(format!(
+        "@fragment\nfn fs_main(in: VsOut) -> GbufferOut {{\n{body}    return out;\n}}\n"
+    ))
+}
+
 /// Constant colors a model reads, for uniform packing.
 pub fn kcolor_view(model: &ShadingModel) -> &KColors {
     &model.kcolors

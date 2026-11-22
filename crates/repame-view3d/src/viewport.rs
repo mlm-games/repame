@@ -966,12 +966,30 @@ impl WgpuCallback for GpuViewport3d {
                 .unwrap_or_default();
             if let Ok(mut results) = self.pick.results.lock() {
                 for result in ready {
-                    results.push_back(View3dEvent::GpuPickHit {
-                        pick_id: result.pick_id,
-                        point: (result.origin + result.dir * result.distance).into(),
-                        request_id: result.id,
-                        kind: result.kind,
-                    });
+                    let point: [f32; 3] = (result.origin + result.dir * result.distance).into();
+                    if self.input.gpu_pick_authoritative {
+                        // One authoritative event path: reuse the normal
+                        // game-facing variants so callers need no GPU branch.
+                        let event = match result.kind {
+                            crate::PickKind::Click => View3dEvent::MeshClick {
+                                pick_id: result.pick_id,
+                                point,
+                            },
+                            crate::PickKind::Hover => View3dEvent::HoverMesh {
+                                pick_id: Some(result.pick_id),
+                                x: point[0],
+                                z: point[2],
+                            },
+                        };
+                        results.push_back(event);
+                    } else {
+                        results.push_back(View3dEvent::GpuPickHit {
+                            pick_id: result.pick_id,
+                            point,
+                            request_id: result.id,
+                            kind: result.kind,
+                        });
+                    }
                 }
             }
             let mut pending = 0;

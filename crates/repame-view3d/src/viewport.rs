@@ -940,22 +940,21 @@ impl WgpuCallback for GpuViewport3d {
                 }
                 Err(_) => None,
             };
-            if let Some(request) = request {
-                if let Some(feed) = resources.get_mut::<crate::PickFeed>() {
-                    feed.encode(device, queue, encoder, &request);
-                }
-                if let Some(feed) = resources.get_mut::<crate::PickFeed>()
-                    && let Some(result) = feed.take(device)
-                    && result.pick_id != 0
-                    && let Ok(mut results) = self.pick.results.lock()
-                {
-                    results.push_back(View3dEvent::GpuPickHit {
-                        pick_id: result.pick_id,
-                        point: (result.origin + result.dir * result.distance).into(),
-                        request_id: result.id,
-                        kind: result.kind,
-                    });
-                }
+            if let Some(feed) = resources.get_mut::<crate::PickFeed>()
+                && let Some(result) = feed.take(device)
+                && let Ok(mut results) = self.pick.results.lock()
+            {
+                results.push_back(View3dEvent::GpuPickHit {
+                    pick_id: result.pick_id,
+                    point: (result.origin + result.dir * result.distance).into(),
+                    request_id: result.id,
+                    kind: result.kind,
+                });
+            }
+            if let Some(request) = request
+                && let Some(feed) = resources.get_mut::<crate::PickFeed>()
+            {
+                feed.encode(device, queue, encoder, &request);
             }
         }
         let desc = self.effective_desc();

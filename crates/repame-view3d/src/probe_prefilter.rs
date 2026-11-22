@@ -4,12 +4,15 @@
 //! that cube at increasing roughness, so a fragment can select a mip from its
 //! own roughness instead of reading a sharp reflection at every angle.
 
+const PARAM_SLOTS: usize = 64;
+const PARAM_STRIDE: u32 = 256;
+
 const PREFILTER_WGSL: &str = r#"
 struct Params {
     face: u32,
     roughness: f32,
     samples: u32,
-    _pad: u32,
+    mode: u32,
 };
 
 struct VsOut {
@@ -52,34 +55,45 @@ fn radical_inverse(value: u32) -> f32 {
     return f32(bits) * 2.3283064365386963e-10;
 }
 
+fn basis(n: vec3<f32>) -> mat3x3<f32> {
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n.y) > 0.999);
+    let t = normalize(cross(up, n));
+    return mat3x3<f32>(t, cross(n, t), n);
+}
+
 fn ggx_direction(n: vec3<f32>, roughness: f32, xi: vec2<f32>) -> vec3<f32> {
     let a = roughness * roughness;
     let phi = 6.2831853 * xi.x;
     let cos_theta = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y));
     let sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
     let h_local = vec3<f32>(cos(phi) * sin_theta, sin(phi) * sin_theta, cos_theta);
-    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n.y) > 0.999);
-    let t = normalize(cross(up, n));
-    let b = cross(n, t);
-    let h = normalize(t * h_local.x + b * h_local.y + n * h_local.z);
+    let h = normalize(basis(n) * h_local);
     return normalize(reflect(-n, h));
+}
+
+fn cosine_direction(n: vec3<f32>, xi: vec2<f32>) -> vec3<f32> {
+    let phi = 6.2831853 * xi.x;
+    let r = sqrt(xi.y);
+    let local = vec3<f32>(cos(phi) * r, sin(phi) * r, sqrt(max(1.0 - xi.y, 0.0)));
+    return normalize(basis(n) * local);
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(face_direction(params.face, in.uv));
-    if (params.roughness <= 0.001) {
+    if (params.roughness <= 0.001 && params.mode == 0u) {
         return textureSampleLevel(src, smp, n, 0.0);
     }
     var total = vec3<f32>(0.0);
     var weight = 0.0;
     for (var i: u32 = 0u; i < params.samples; i = i + 1u) {
         let xi = vec2<f32>(radical_inverse(i), radical_inverse(i + 1u));
-        let l = ggx_direction(n, params.roughness, xi);
+        let l = select(ggx_direction(n, params.roughness, xi), cosine_direction(n, xi), params.mode == 1u);
         let ndl = max(dot(n, l), 0.0);
         if (ndl > 0.0) {
-            total += textureSampleLevel(src, smp, l, 0.0).rgb * ndl;
-            weight += ndl;
+            let w = select(ndl, 1.0, params.mode == 1u);
+            total += textureSampleLevel(src, smp, l, 0.0).rgb * w;
+            weight += w;
         }
     }
     return vec4<f32>(total / max(weight, 1e-4), 1.0);
@@ -96,7 +110,7 @@ struct PrefilterParams {
     face: u32,
     roughness: f32,
     samples: u32,
-    _pad: u32,
+    mode: u32,
 }
 
 pub struct ProbePrefilter {
@@ -141,7 +155,7 @@ impl ProbePrefilter {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        has_dynamic_offset: true,
                         min_binding_size: None,
                     },
                     count: None,
@@ -186,7 +200,7 @@ impl ProbePrefilter {
         });
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("repame_view3d_probe_prefilter_params"),
-            size: size_of::<PrefilterParams>() as u64,
+            size: (PARAM_SLOTS as u32 * PARAM_STRIDE) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -217,37 +231,47 @@ impl ProbePrefilter {
             mip_level_count: Some(1),
             ..Default::default()
         });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("repame_view3d_probe_prefilter_bg"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.params,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(size_of::<PrefilterParams>() as u64),
+                    }),
+                },
+            ],
+        });
         for level in 1..levels {
-            let roughness = level as f32 / (levels - 1) as f32;
+            let irradiance = level == levels - 1;
+            let roughness = if irradiance {
+                0.0
+            } else {
+                level as f32 / (levels - 2).max(1) as f32
+            };
             for face in 0..6u32 {
+                let offset = ((level - 1) * 6 + face) * PARAM_STRIDE;
                 queue.write_buffer(
                     &self.params,
-                    0,
+                    offset as u64,
                     bytemuck::bytes_of(&PrefilterParams {
                         face,
                         roughness,
                         samples: self.samples,
-                        _pad: 0,
+                        mode: u32::from(irradiance),
                     }),
                 );
-                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("repame_view3d_probe_prefilter_bg"),
-                    layout: &self.layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&source),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self.params.as_entire_binding(),
-                        },
-                    ],
-                });
                 let target = cube.create_view(&wgpu::TextureViewDescriptor {
                     label: Some("repame_view3d_probe_prefilter_dst"),
                     dimension: Some(wgpu::TextureViewDimension::D2),
@@ -274,7 +298,7 @@ impl ProbePrefilter {
                     multiview_mask: None,
                 });
                 pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &bind, &[]);
+                pass.set_bind_group(0, &bind, &[offset]);
                 pass.draw(0..3, 0..1);
             }
         }

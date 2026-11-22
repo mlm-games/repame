@@ -1000,7 +1000,7 @@ struct MorphDelta {
 };
 struct MorphData {
     slots: array<MorphSlot, 64>,
-    weights: array<vec4<f32>, 128>,
+    weights: array<vec4<f32>, 256>,
     deltas: array<MorphDelta>,
 };
 @group(0) @binding(2) var<storage, read> morph_data: MorphData;
@@ -1021,7 +1021,7 @@ fn morph_pose(pos: vec3<f32>, skin_base: f32, vertex_index: u32, skin_mix: f32) 
         let target_count = slot.a.w;
         let vertex_count = slot.a.z;
         let local = vertex_index - slot.a.y;
-        if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+        if (target_count > 0u && target_count <= 16u && local < vertex_count) {
             var delta_pos = vec3<f32>(0.0);
             for (var k: u32 = 0u; k < target_count; k = k + 1u) {
                 let w = morph_data.weights[slot.b.x / 4u + k / 4u][k % 4u];

@@ -103,7 +103,7 @@ struct MorphDelta {
 };
 struct MorphData {
     slots: array<MorphSlot, 64>,
-    weights: array<vec4<f32>, 128>,
+    weights: array<vec4<f32>, 256>,
     deltas: array<MorphDelta>,
 };
 @group(0) @binding(2) var<storage, read> morph_data: MorphData;
@@ -205,7 +205,7 @@ fn vs_main(
             let target_count = slot.a.w;
             let vertex_count = slot.a.z;
             let local = vertex_index - slot.a.y;
-            if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+            if (target_count > 0u && target_count <= 16u && local < vertex_count) {
                 var delta_pos = vec3<f32>(0.0);
                 var delta_nrm = vec3<f32>(0.0);
                 for (var k: u32 = 0u; k < target_count; k = k + 1u) {
@@ -333,10 +333,12 @@ fn repame_probe(
             max(textureNumLevels(probe_tex2), textureNumLevels(probe_tex3)),
         );
         let max_lod = f32(levels - 1u);
-        let cube = repame_probe_cube(i, reflection, clamp(roughness, 0.0, 1.0) * max_lod);
+        let spec_lod = clamp(roughness, 0.0, 1.0) * (max_lod - 1.0);
+        let cube = repame_probe_cube(i, reflection, spec_lod);
+        let irradiance = repame_probe_cube(i, n, max_lod);
         let fresnel = pow(1.0 - max(dot(n, v), 0.0), 5.0);
         let specular = params.z * mix(0.15, 1.0, fresnel) * (1.0 - clamp(roughness, 0.0, 1.0));
-        acc = acc + cube * (base * (1.0 - metallic) * params.y + vec3<f32>(specular)) * weight;
+        acc = acc + (irradiance * base * (1.0 - metallic) * params.y + cube * vec3<f32>(specular)) * weight;
     }
     return acc;
 }
@@ -610,7 +612,7 @@ struct MorphDelta {
 };
 struct MorphData {
     slots: array<MorphSlot, 64>,
-    weights: array<vec4<f32>, 128>,
+    weights: array<vec4<f32>, 256>,
     deltas: array<MorphDelta>,
 };
 @group(0) @binding(2) var<storage, read> morph_data: MorphData;
@@ -633,7 +635,7 @@ fn vs_main(
             let target_count = slot.a.w;
             let vertex_count = slot.a.z;
             let local = vertex_index - slot.a.y;
-            if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+            if (target_count > 0u && target_count <= 16u && local < vertex_count) {
                 var delta_pos = vec3<f32>(0.0);
                 for (var k: u32 = 0u; k < target_count; k = k + 1u) {
                     let w = morph_data.weights[slot.b.x / 4u + k / 4u][k % 4u];
@@ -701,7 +703,7 @@ const SHADOW_MORPH_BODY_WGSL: &str = r#"    if (skin_mix > 0.5) {
             let target_count = slot.a.w;
             let vertex_count = slot.a.z;
             let local = vertex_index - slot.a.y;
-            if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+            if (target_count > 0u && target_count <= 16u && local < vertex_count) {
                 var delta_pos = vec3<f32>(0.0);
                 for (var k: u32 = 0u; k < target_count; k = k + 1u) {
                     let w = morph_data.weights[slot.b.x / 4u + k / 4u][k % 4u];

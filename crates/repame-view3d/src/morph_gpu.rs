@@ -7,9 +7,9 @@
 use bytemuck::{Pod, Zeroable};
 
 pub const MAX_MORPH_DRAWS: usize = 64;
-pub const MAX_MORPH_TARGETS: usize = 8;
-pub const WEIGHT_SLOTS: usize = MAX_MORPH_DRAWS * 2;
-pub const MAX_MORPH_DELTAS: usize = 8192;
+pub const MAX_MORPH_TARGETS: usize = 16;
+pub const WEIGHT_SLOTS: usize = MAX_MORPH_DRAWS * 4;
+pub const MAX_MORPH_DELTAS: usize = 65536;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -109,7 +109,7 @@ struct MorphDelta {
 };
 struct MorphData {
     slots: array<MorphSlot, 64>,
-    weights: array<vec4<f32>, 128>,
+    weights: array<vec4<f32>, 256>,
     deltas: array<MorphDelta>,
 };
 ";
@@ -124,7 +124,7 @@ pub const MORPH_POS_WGSL: &str = "\
             let target_count = slot.a.w;
             let vertex_count = slot.a.z;
             let local = vertex_index - slot.a.y;
-            if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+            if (target_count > 0u && target_count <= 16u && local < vertex_count) {
                 var delta_pos = vec3<f32>(0.0);
                 for (var k: u32 = 0u; k < target_count; k = k + 1u) {
                     let w = morph_data.weights[slot.b.x / 4u + k / 4u][k % 4u];
@@ -146,7 +146,7 @@ fn morph_pose(pos: vec3<f32>, skin_base: f32, vertex_index: u32, skin_mix: f32) 
         let target_count = slot.a.w;
         let vertex_count = slot.a.z;
         let local = vertex_index - slot.a.y;
-        if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+        if (target_count > 0u && target_count <= 16u && local < vertex_count) {
             var delta_pos = vec3<f32>(0.0);
             for (var k: u32 = 0u; k < target_count; k = k + 1u) {
                 let w = morph_data.weights[slot.b.x / 4u + k / 4u][k % 4u];
@@ -173,7 +173,7 @@ pub const MORPH_BODY_WGSL: &str = "\
             let target_count = slot.a.w;
             let vertex_count = slot.a.z;
             let local = vertex_index - slot.a.y;
-            if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+            if (target_count > 0u && target_count <= 16u && local < vertex_count) {
                 var delta_pos = vec3<f32>(0.0);
                 var delta_nrm = vec3<f32>(0.0);
                 for (var k: u32 = 0u; k < target_count; k = k + 1u) {

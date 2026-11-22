@@ -5,6 +5,7 @@
 //! [`crate::pick`] stays the authoritative synchronous path; this feeds games
 //! that need GPU throughput on dense scenes.
 
+use crate::shader_compat;
 use std::sync::{
     Arc,
     atomic::{AtomicU8, Ordering},
@@ -258,10 +259,7 @@ pub struct GpuPicker {
 
 impl GpuPicker {
     pub fn new(device: &wgpu::Device) -> Self {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_pick"),
-            source: wgpu::ShaderSource::Wgsl(PICK_WGSL.into()),
-        });
+        let module = shader_compat::module(device, "repame_view3d_pick", PICK_WGSL.to_string());
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_pick_bgl"),
             entries: &[

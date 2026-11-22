@@ -127,10 +127,11 @@ impl ProbePrefilter {
         format: wgpu::TextureFormat,
         cache: Option<&wgpu::PipelineCache>,
     ) -> Self {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_probe_prefilter"),
-            source: wgpu::ShaderSource::Wgsl(PREFILTER_WGSL.into()),
-        });
+        let module = shader_compat::module(
+            device,
+            "repame_view3d_probe_prefilter",
+            PREFILTER_WGSL.to_string(),
+        );
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_probe_prefilter_bgl"),
             entries: &[
@@ -327,3 +328,5 @@ mod tests {
         .expect("prefilter WGSL validates");
     }
 }
+
+use crate::shader_compat;

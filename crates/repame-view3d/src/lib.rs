@@ -61,6 +61,7 @@ pub mod postfx;
 pub mod probe_prefilter;
 pub mod reflection;
 pub mod render;
+pub mod shader_compat;
 pub mod shading;
 pub mod shadow;
 pub mod skin;

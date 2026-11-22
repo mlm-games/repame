@@ -1138,6 +1138,7 @@ fn shadow_depth_shader(skinning: GpuSkinning) -> String {
     source
 }
 
+use crate::shader_compat;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -2093,10 +2094,7 @@ impl HizPipeline {
                 },
             ],
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_hiz"),
-            source: wgpu::ShaderSource::Wgsl(HIZ_WGSL.into()),
-        });
+        let module = shader_compat::module(device, "repame_view3d_hiz", HIZ_WGSL.to_string());
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("repame_view3d_hiz_pl"),
             bind_group_layouts: &[Some(&layout)],
@@ -2171,10 +2169,8 @@ impl HizPipeline {
                 },
             ],
         });
-        let test_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_hiz_test"),
-            source: wgpu::ShaderSource::Wgsl(HIZ_TEST_WGSL.into()),
-        });
+        let test_module =
+            shader_compat::module(device, "repame_view3d_hiz_test", HIZ_TEST_WGSL.to_string());
         let test_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("repame_view3d_hiz_test_pl"),
             bind_group_layouts: &[Some(&test_layout)],
@@ -2943,10 +2939,11 @@ impl ParticleGpu {
         tex_layout: &wgpu::BindGroupLayout,
         cache: Option<&wgpu::PipelineCache>,
     ) -> Self {
-        let sim_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_particles"),
-            source: wgpu::ShaderSource::Wgsl(super::particles::PARTICLE_COMPUTE_WGSL.into()),
-        });
+        let sim_module = shader_compat::module(
+            device,
+            "repame_view3d_particles",
+            super::particles::PARTICLE_COMPUTE_WGSL.to_string(),
+        );
         let storage = |binding: u32, read_only: bool, visibility: wgpu::ShaderStages| {
             wgpu::BindGroupLayoutEntry {
                 binding,
@@ -3014,10 +3011,11 @@ impl ParticleGpu {
         };
         let compute_prepare = make_compute("repame_view3d_particle_prepare", "prepare");
         let compute_simulate = make_compute("repame_view3d_particle_simulate", "simulate");
-        let billboard_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_particle_billboard"),
-            source: wgpu::ShaderSource::Wgsl(super::particles::PARTICLE_BILLBOARD_WGSL.into()),
-        });
+        let billboard_module = shader_compat::module(
+            device,
+            "repame_view3d_particle_billboard",
+            super::particles::PARTICLE_BILLBOARD_WGSL.to_string(),
+        );
         let render_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("repame_view3d_particle_render_pl"),
             bind_group_layouts: &[Some(cam_layout), Some(tex_layout), Some(&draw_layout)],
@@ -3997,7 +3995,14 @@ impl SceneBatch {
         cam_view: glam::Mat4,
         cam_inv_view_proj: glam::Mat4,
     ) {
-        self.set_rig_clipped(rig, cam_eye, cam_view, cam_inv_view_proj, super::camera::NEAR, super::camera::FAR);
+        self.set_rig_clipped(
+            rig,
+            cam_eye,
+            cam_view,
+            cam_inv_view_proj,
+            super::camera::NEAR,
+            super::camera::FAR,
+        );
     }
 
     /// Fit cascade splits across `(near, far)`. Pass the frame's clip planes so shadow
@@ -4115,14 +4120,7 @@ impl SceneBatch {
             Some(desc) => {
                 let count = desc.clamped_count();
                 let dir = glam::Vec3::from(self.camera.light_dir);
-                let slices = desc.fit_all(
-                    eye,
-                    cam_view,
-                    cam_inv_view_proj,
-                    dir,
-                    near,
-                    far,
-                );
+                let slices = desc.fit_all(eye, cam_view, cam_inv_view_proj, dir, near, far);
                 let mut vps = [
                     &mut self.camera.cascade_vp0,
                     &mut self.camera.cascade_vp1,
@@ -4490,10 +4488,8 @@ impl SceneBatch {
                 .expect("registered materials validate");
             let mut source = scene_prefix(res.skin);
             source.push_str(&fragment);
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("repame_view3d_material"),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            });
+            let module =
+                shader_compat::module(device, "repame_view3d_material", source.to_string());
             let buffers = [Some(self.vertex_buffer_layout())];
             let pipeline = |depth_test: bool, transparent: bool| {
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -4571,12 +4567,11 @@ impl SceneBatch {
             });
             let uniform = material_uniform_for(&entry.uniform, &pages);
             queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&[uniform]));
-            let gbuffer_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("repame_view3d_gbuffer_material"),
-                source: wgpu::ShaderSource::Wgsl(
-                    gbuffer_material_shader(res.skin, &entry.model).into(),
-                ),
-            });
+            let gbuffer_module = shader_compat::module(
+                device,
+                "repame_view3d_gbuffer_material",
+                gbuffer_material_shader(res.skin, &entry.model),
+            );
             let gbuffer_targets: [Option<wgpu::ColorTargetState>; 4] = std::array::from_fn(|_| {
                 Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba16Float,
@@ -5669,10 +5664,11 @@ impl SceneBatch {
         if res.fullscreen.is_some() {
             return;
         }
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_fullscreen"),
-            source: wgpu::ShaderSource::Wgsl(FULLSCREEN_SHADER.into()),
-        });
+        let module = shader_compat::module(
+            device,
+            "repame_view3d_fullscreen",
+            FULLSCREEN_SHADER.to_string(),
+        );
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_fullscreen_bgl"),
             entries: &[
@@ -5889,10 +5885,11 @@ impl SceneBatch {
         if res.deferred.is_some() {
             return;
         }
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_deferred"),
-            source: wgpu::ShaderSource::Wgsl(DEFERRED_SHADER.into()),
-        });
+        let module = shader_compat::module(
+            device,
+            "repame_view3d_deferred",
+            DEFERRED_SHADER.to_string(),
+        );
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_deferred_bgl"),
             entries: &[
@@ -6066,10 +6063,7 @@ impl SceneBatch {
         if res.copy.is_some() {
             return;
         }
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_copy"),
-            source: wgpu::ShaderSource::Wgsl(COPY_WGSL.into()),
-        });
+        let module = shader_compat::module(device, "repame_view3d_copy", COPY_WGSL.to_string());
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_copy_bgl"),
             entries: &[
@@ -6232,10 +6226,7 @@ impl SceneBatch {
         if res.post.is_some() {
             return;
         }
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_post"),
-            source: wgpu::ShaderSource::Wgsl(POST_WGSL.into()),
-        });
+        let module = shader_compat::module(device, "repame_view3d_post", POST_WGSL.to_string());
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_post_bgl"),
             entries: &[
@@ -7218,10 +7209,11 @@ impl SceneBatch {
                 self.id
             );
         }
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d"),
-            source: wgpu::ShaderSource::Wgsl(scene_shader(self.skinning).into()),
-        });
+        let shader = shader_compat::module(
+            device,
+            "repame_view3d",
+            scene_shader(self.skinning).to_string(),
+        );
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("repame_view3d_camera"),
             size: size_of::<CameraUniform>() as u64,
@@ -7743,10 +7735,11 @@ impl SceneBatch {
                 .0
             })
         };
-        let gbuffer_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_gbuffer"),
-            source: wgpu::ShaderSource::Wgsl(gbuffer_shader(self.skinning).into()),
-        });
+        let gbuffer_shader = shader_compat::module(
+            device,
+            "repame_view3d_gbuffer",
+            gbuffer_shader(self.skinning).to_string(),
+        );
         let gbuffer_targets: [Option<wgpu::ColorTargetState>; 4] = std::array::from_fn(|_| {
             Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba16Float,
@@ -7800,10 +7793,11 @@ impl SceneBatch {
             multiview_mask: None,
             cache,
         });
-        let shadow_depth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_shadow_depth"),
-            source: wgpu::ShaderSource::Wgsl(shadow_depth_shader(self.skinning).into()),
-        });
+        let shadow_depth_shader = shader_compat::module(
+            device,
+            "repame_view3d_shadow_depth",
+            shadow_depth_shader(self.skinning).to_string(),
+        );
         let shadow_depth_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("repame_view3d_shadow_depth_pl"),
             bind_group_layouts: &[Some(&cam_layout)],
@@ -7924,10 +7918,11 @@ impl SceneBatch {
                 count: None,
             }],
         });
-        let dv_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("repame_view3d_depth_velocity"),
-            source: wgpu::ShaderSource::Wgsl(depth_velocity_shader(self.skinning).into()),
-        });
+        let dv_module = shader_compat::module(
+            device,
+            "repame_view3d_depth_velocity",
+            depth_velocity_shader(self.skinning).to_string(),
+        );
         let dv_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("repame_view3d_dv_pl"),
             bind_group_layouts: &[Some(&cam_layout), Some(&dv_layout)],

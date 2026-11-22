@@ -17,16 +17,16 @@ bevy_ecs = "0.20"
 gltf = { version = "1.4", default-features = false, features = ["utils", "import", "names", "KHR_materials_unlit", "KHR_materials_emissive_strength", "KHR_texture_transform"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # Repose UI shell (incl. the `gamepad` backend).
-repose-core = { version = "0.31", features = ["serde"] }
-repose-ui = { version = "0.31" }
-repose-material = { version = "0.31" }
-repose-canvas = { version = "0.31" }
-repose-docking = { version = "0.31" }
-repose-platform = { version = "0.31" }
-repose-render-wgpu = { version = "0.31" }
-repose-text = { version = "0.31" }
-repose-app = { version = "0.31" }
-repose-tree = { version = "0.31" }
+repose-core = { version = "0.35", features = ["serde"] }
+repose-ui = { version = "0.35" }
+repose-material = { version = "0.35" }
+repose-canvas = { version = "0.35" }
+repose-docking = { version = "0.35" }
+repose-platform = { version = "0.35" }
+repose-render-wgpu = { version = "0.35" }
+repose-text = { version = "0.35" }
+repose-app = { version = "0.35" }
+repose-tree = { version = "0.35" }
 wgpu = "30"
 glam = "0.33"
 bytemuck = { version = "1", features = ["derive"] }
@@ -72,23 +72,23 @@ repame-content = { path = "crates/repame-content", version = "0.3.35" }
 
 
 [patch.crates-io]
-# repose-core = { path = "../repose/crates/repose-core" }
-# repose-ui = { path = "../repose/crates/repose-ui" }
-# repose-canvas = { path = "../repose/crates/repose-canvas" }
-# repose-render-wgpu = { path = "../repose/crates/repose-render-wgpu" }
-# repose-text = { path = "../repose/crates/repose-text" }
-# repose-app = { path = "../repose/crates/repose-app" }
-# repose-platform = { path = "../repose/crates/repose-platform" }
-# repose-tree = { path = "../repose/crates/repose-tree" }
-# repose-devtools = { path = "../repose/crates/repose-devtools" }
-# repose-navigation = { path = "../repose/crates/repose-navigation" }
-# repose-material = { path = "../repose/crates/repose-material" }
-# repose-docking = { path = "../repose/crates/repose-docking" }
+repose-core = { path = "../repose/crates/repose-core" }
+repose-ui = { path = "../repose/crates/repose-ui" }
+repose-canvas = { path = "../repose/crates/repose-canvas" }
+repose-render-wgpu = { path = "../repose/crates/repose-render-wgpu" }
+repose-text = { path = "../repose/crates/repose-text" }
+repose-app = { path = "../repose/crates/repose-app" }
+repose-platform = { path = "../repose/crates/repose-platform" }
+repose-tree = { path = "../repose/crates/repose-tree" }
+repose-devtools = { path = "../repose/crates/repose-devtools" }
+repose-navigation = { path = "../repose/crates/repose-navigation" }
+repose-material = { path = "../repose/crates/repose-material" }
+repose-docking = { path = "../repose/crates/repose-docking" }
 # rlobkit-app-events = { path = "../rlobkit/rlobkit-app-events" }
-# repose-macros = { path = "../repose/crates/repose-macros" }
-# renamite-player = { path = "../renamite/crates/renamite-player" }
-# renamite-player-ui = { path = "../renamite/crates/renamite-player-ui" }
-# renamite-render-bridge = { path = "../renamite/crates/renamite-render-bridge" }
-# renamite-model = { path = "../renamite/crates/renamite-model" }
-# renamite-animation = { path = "../renamite/crates/renamite-animation" }
+repose-macros = { path = "../repose/crates/repose-macros" }
+renamite-player = { path = "../renamite/crates/renamite-player" }
+renamite-player-ui = { path = "../renamite/crates/renamite-player-ui" }
+renamite-render-bridge = { path = "../renamite/crates/renamite-render-bridge" }
+renamite-model = { path = "../renamite/crates/renamite-model" }
+renamite-animation = { path = "../renamite/crates/renamite-animation" }
 # game-utils = { path = "../game-utils/crates/game-utils" }

@@ -7196,7 +7196,7 @@ impl SceneBatch {
         let indices = geometry.buffer().clone();
         let profiler = ProfilerSupport::detect(device)
             .any()
-            .then(|| GpuProfiler::new(device, 12, DEFAULT_STATS));
+            .then(|| GpuProfiler::new(device, 64, DEFAULT_STATS));
         let pages = DescriptorTable::new(MAX_RESIDENT_PAGES as usize)
             .expect("resident page capacity is valid");
         let entry = SceneEntry {
@@ -7794,7 +7794,21 @@ pub fn prepare_scene_with_id(
                     .is_none_or(|gpu| !gpu.systems.iter().any(|state| state.is_some()))
         });
     if flat {
-        drop(DepthComposite::get(resources).begin_scene(id, encoder, clear));
+        let mut profiler = resources
+            .get_mut::<SceneResources>()
+            .and_then(|all| all.batches.get_mut(id))
+            .and_then(|res| res.profiler.take());
+        let writes = profiler.as_mut().and_then(|p| p.timestamp_writes());
+        drop(DepthComposite::get(resources).begin_scene_timed(id, encoder, clear, writes));
+        if let Some(profiler) = profiler.as_mut() {
+            profiler.resolve(encoder);
+        }
+        if let Some(entry) = resources
+            .get_mut::<SceneResources>()
+            .and_then(|all| all.batches.get_mut(id))
+        {
+            entry.profiler = profiler;
+        }
         return;
     }
 
@@ -8416,7 +8430,12 @@ pub fn prepare_scene_with_id(
             // what this pass leaves.
             store_depth: occlusion_indirect,
         };
-        let Some(mut pass) = composite.begin_scene_ops(id, encoder, ops) else {
+        let Some(mut pass) = composite.begin_scene_ops_timed(
+            id,
+            encoder,
+            ops,
+            profiler.as_mut().and_then(|p| p.timestamp_writes()),
+        ) else {
             if let Some(entry) = resources
                 .get_mut::<SceneResources>()
                 .and_then(|all| all.batches.get_mut(id))
@@ -8568,15 +8587,18 @@ pub fn prepare_scene_with_id(
                             1.0,
                         );
                         draw_phase_two(&mut pass, &snap);
-                    } else if let Some(mut pass) = DepthComposite::get(resources).begin_scene_ops(
-                        id,
-                        encoder,
-                        ScenePassOps {
-                            clear: None,
-                            load_depth: true,
-                            store_depth: false,
-                        },
-                    ) {
+                    } else if let Some(mut pass) =
+                        DepthComposite::get(resources).begin_scene_ops_timed(
+                            id,
+                            encoder,
+                            ScenePassOps {
+                                clear: None,
+                                load_depth: true,
+                                store_depth: false,
+                            },
+                            profiler.as_mut().and_then(|p| p.timestamp_writes()),
+                        )
+                    {
                         draw_phase_two(&mut pass, &snap);
                     }
                 }

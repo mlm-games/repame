@@ -14,7 +14,7 @@ bytemuck.workspace = true
 repose-core.workspace = true
 repose-ui.workspace = true
 repose-render-wgpu.workspace = true
-repame-save = { path = "../repame-save", version = "0.3.36" }
+repame-save = { path = "../repame-save", version = "0.3.38" }
 log.workspace = true
 gltf = { workspace = true, features = ["KHR_materials_unlit", "KHR_materials_emissive_strength", "KHR_texture_transform"] }
 image.workspace = true

@@ -113,7 +113,10 @@ pub use pass::{
     MAX_PASS_TARGETS, PassError, PassKind, RenderPass, RenderTarget, RenderTargetFormat,
     TargetSemantics, pass_order, validate_passes,
 };
-pub use pipeline_cache_io::{flush as flush_pipeline_cache, prepare as prepare_pipeline_cache};
+pub use pipeline_cache_io::{
+    flush as flush_pipeline_cache, flush_blocking as flush_pipeline_cache_blocking,
+    prepare as prepare_pipeline_cache,
+};
 pub use particles::{
     Attractor, CollisionMode, EmitterShape, MAX_ATTRACTORS, MAX_COLLIDER_BOXES, MAX_CURVE_KEYS,
     MAX_REQUEST_RING, PARTICLE_BILLBOARD_WGSL, PARTICLE_BYTES, PARTICLE_COMPUTE_WGSL, Particle,

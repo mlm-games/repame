@@ -523,13 +523,9 @@ fn fs_main(in: VsOut) -> GbufferOut {
     let axis = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(forward.y) > 0.99);
     let right = normalize(cross(axis, forward));
     let up = cross(forward, right);
-    // The legacy material path blends its fog constant over the shaded pixel.
-    // The G-buffer has no shader-result channel, so fold the same material
-    // fog into albedo; the deferred pass' own camera fog still runs later.
-    let fog_t = clamp((in.view_depth - material.fog_range.x)
-        / max(material.fog_range.y - material.fog_range.x, 1e-6), 0.0, 1.0)
-        * clamp(material.fog.a, 0.0, 1.0);
-    base = mix(base, material.fog.rgb, fog_t);
+    // Material-program fog is applied after shading in the forward path. The
+    // G-buffer carries no post-shading result, so deferred shading applies
+    // only camera fog; material-program fog is intentionally not reproduced.
     out.albedo = vec4<f32>(base, alpha);
     out.normal = vec4<f32>(
         dot(world_n, right), dot(world_n, up), dot(world_n, forward), in.lit_flag);
@@ -764,17 +760,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     let forward = normalize(camera.cam_forward);
     let axis = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(forward.y) > 0.99);
-    let right = normalize(cross(axis, forward));
-    let up = cross(forward, right);
-    let n = normalize(right * g_normal.x + up * g_normal.y + forward * g_normal.z);
+    // Same basis GBUFFER_FS used to encode the normal.
+    let normal_right = normalize(cross(axis, forward));
+    let normal_up = cross(forward, normal_right);
+    let n = normalize(
+        normal_right * g_normal.x + normal_up * g_normal.y + forward * g_normal.z);
 
-    // The projection's xy scale gives the half-FOV tangents; the view axis is
-    // reconstructed from the camera basis so a view depth along it can be
-    // turned back into a world position for view and point-light vectors.
+    // view_proj's first two columns carry the projection scale on the
+    // camera's world-space right/up vectors, so their lengths are the focal
+    // scales for any yaw/pitch.
+    let cam_right = camera.view_proj[0].xyz;
+    let cam_up = camera.view_proj[1].xyz;
+    let tan_x = 1.0 / max(length(cam_right), 1e-6);
+    let tan_y = 1.0 / max(length(cam_up), 1e-6);
     let ndc = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
-    let tan_x = 1.0 / max(abs(camera.view_proj[0][0]), 1e-6);
-    let tan_y = 1.0 / max(abs(camera.view_proj[1][1]), 1e-6);
-    let ray = normalize(forward + right * (ndc.x * tan_x) + up * (ndc.y * tan_y));
+    let ray = normalize(
+        forward + normalize(cam_right) * (ndc.x * tan_x)
+            + normalize(cam_up) * (ndc.y * tan_y));
     let world_pos = camera.cam_pos + ray * (view_depth / max(dot(ray, forward), 1e-4));
     let v = normalize(camera.cam_pos - world_pos);
 
@@ -12008,7 +12010,24 @@ mod tests {
                 batch.set_camera(self.cam.view_proj(1.0));
                 batch.set_camera_pos(self.cam.eye().into());
                 batch.set_camera_forward(self.cam.forward().into());
-                batch.set_light(self.light);
+                let rig = LightRig {
+                    sun: self.light,
+                    points: vec![crate::shadow::PointLight {
+                        position: [2.0, 8.0, 2.0],
+                        color: [1.0, 1.0, 1.0],
+                        intensity: 2.0,
+                        range: 40.0,
+                        size: 64,
+                        bias: 0.005,
+                    }],
+                    ..LightRig::default()
+                };
+                batch.set_rig(
+                    &rig,
+                    self.cam.eye().into(),
+                    self.cam.view_matrix(),
+                    self.cam.view_proj(1.0).inverse(),
+                );
                 let gbuffer = RenderTarget::new(
                     "gbuffer",
                     SIZE,
@@ -12079,7 +12098,7 @@ mod tests {
         let light = SceneLight {
             direction: [0.0, 1.0, 0.0],
             color: [1.0, 1.0, 1.0],
-            diffuse: 1.0,
+            diffuse: 0.2,
             ambient: [0.0, 0.0, 0.0],
             tonemap: TonemapMethod::None,
             ..SceneLight::default()
@@ -12132,8 +12151,24 @@ mod tests {
         let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
         let px = [lit_px[i], lit_px[i + 1], lit_px[i + 2], lit_px[i + 3]];
         assert!(
-            px[0] > 200 && px[1] > 200 && px[2] > 200 && px[3] > 200,
+            px[0] > 20 && px[1] > 20 && px[2] > 20 && px[3] > 200,
             "deferred pass must shade the lit quad, got {px:?}"
+        );
+        let edge = ((SIZE / 2 * SIZE + SIZE / 4) * 4) as usize;
+        let edge_px = [
+            lit_px[edge],
+            lit_px[edge + 1],
+            lit_px[edge + 2],
+            lit_px[edge + 3],
+        ];
+        assert!(
+            edge_px[0] > 20 && edge_px[1] > 20 && edge_px[2] > 20,
+            "off-center pixel must also be lit, got {edge_px:?}"
+        );
+        assert!(
+            u16::from(edge_px[0]) > u16::from(px[0]) + 2
+                || u16::from(px[0]) > u16::from(edge_px[0]) + 2,
+            "point light must vary with reconstructed world position: center {px:?}, edge {edge_px:?}"
         );
     }
 

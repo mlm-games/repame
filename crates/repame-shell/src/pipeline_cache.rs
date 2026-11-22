@@ -12,6 +12,6 @@ pub fn flush_pipeline_caches(
     ids: &[String],
 ) {
     for id in ids {
-        repame_view3d::pipeline_cache_io::flush(id, app, device, resources);
+        repame_view3d::pipeline_cache_io::flush_blocking(id, app, device, resources);
     }
 }

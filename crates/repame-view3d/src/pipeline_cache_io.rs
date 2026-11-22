@@ -35,19 +35,42 @@ pub fn prepare(id: &str, app: AppId, device: &wgpu::Device, resources: &mut Call
     }
 }
 
-/// Persists the current cache on a background thread. Games call this at a
-/// safe point; the disk work never blocks the render thread.
-pub fn flush(id: &str, app: AppId, device: &wgpu::Device, resources: &CallbackResources) {
+fn write_cache(app: AppId, key: String, bytes: Vec<u8>, label: String) {
+    if let Err(err) = PipelineCacheStore::new(app).save(&key, &bytes) {
+        log::warn!("pipeline cache[{label}]: save failed: {err}");
+    }
+}
+
+/// Starts a background save and returns its handle so shutdown can join it.
+/// On wasm there are no threads, so the write is synchronous.
+pub fn flush(
+    id: &str,
+    app: AppId,
+    device: &wgpu::Device,
+    resources: &CallbackResources,
+) -> Option<std::thread::JoinHandle<()>> {
+    let key = cache_key(device, id)?;
+    let bytes = pipeline_cache_data(id, resources)?;
+    let label = id.to_string();
+    #[cfg(target_arch = "wasm32")]
+    {
+        write_cache(app, key, bytes, label);
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(std::thread::spawn(move || write_cache(app, key, bytes, label)))
+    }
+}
+
+/// Synchronous save for shutdown hooks, where process exit would otherwise
+/// kill a detached writer.
+pub fn flush_blocking(id: &str, app: AppId, device: &wgpu::Device, resources: &CallbackResources) {
     let Some(key) = cache_key(device, id) else {
         return;
     };
     let Some(bytes) = pipeline_cache_data(id, resources) else {
         return;
     };
-    let label = id.to_string();
-    std::thread::spawn(move || {
-        if let Err(err) = PipelineCacheStore::new(app).save(&key, &bytes) {
-            log::warn!("pipeline cache[{label}]: save failed: {err}");
-        }
-    });
+    write_cache(app, key, bytes, id.to_string());
 }

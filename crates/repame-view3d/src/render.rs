@@ -93,6 +93,20 @@ struct SkinPalette {
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage, read> skin_palette: SkinPalette;
+struct MorphSlot {
+    a: vec4<u32>,
+    b: vec4<u32>,
+};
+struct MorphDelta {
+    pos: vec4<f32>,
+    nrm: vec4<f32>,
+};
+struct MorphData {
+    slots: array<MorphSlot, 64>,
+    weights: array<vec4<f32>, 128>,
+    deltas: array<MorphDelta>,
+};
+@group(0) @binding(2) var<storage, read> morph_data: MorphData;
 struct Material {
     kcolors: array<vec4<f32>, 4>,
     fog: vec4<f32>,
@@ -179,10 +193,37 @@ fn vs_main(
     @location(13) weights: vec4<f32>,
     @location(14) skin_mix: f32,
     @location(15) skin_base: f32,
+    @builtin(vertex_index) vertex_index: u32,
 ) -> VsOut {
     var out: VsOut;
     var skinned_pos = pos;
     var skinned_nrm = normal;
+    if (skin_mix > 0.5) {
+        let morph_index = u32(skin_base + 0.5) / 128u;
+        if (morph_index < 64u) {
+            let slot = morph_data.slots[morph_index];
+            let target_count = slot.a.w;
+            let vertex_count = slot.a.z;
+            let local = vertex_index - slot.a.y;
+            if (target_count > 0u && target_count <= 8u && local < vertex_count) {
+                var delta_pos = vec3<f32>(0.0);
+                var delta_nrm = vec3<f32>(0.0);
+                for (var k: u32 = 0u; k < target_count; k = k + 1u) {
+                    let w = morph_data.weights[slot.b.x / 4u + k / 4u][k % 4u];
+                    let d = morph_data.deltas[slot.a.x + k * vertex_count + local];
+                    delta_pos = delta_pos + d.pos.xyz * w;
+                    delta_nrm = delta_nrm + d.nrm.xyz * w;
+                }
+                skinned_pos = pos + delta_pos;
+                skinned_nrm = normal + delta_nrm;
+                skinned_nrm = select(
+                    skinned_nrm,
+                    normalize(skinned_nrm),
+                    dot(skinned_nrm, skinned_nrm) > 1e-10,
+                );
+            }
+        }
+    }
     if (skin_mix > 0.5) {
         let wsum = weights.x + weights.y + weights.z + weights.w;
         if (wsum > 1e-8) {
@@ -199,8 +240,8 @@ fn vs_main(
                 w = w / wsum;
                 if (w > 0.0) {
                     let m = skin_palette.joints[base + slot];
-                    acc_pos = acc_pos + (m * vec4<f32>(pos, 1.0)).xyz * w;
-                    acc_nrm = acc_nrm + (m * vec4<f32>(normal, 0.0)).xyz * w;
+                    acc_pos = acc_pos + (m * vec4<f32>(skinned_pos, 1.0)).xyz * w;
+                    acc_nrm = acc_nrm + (m * vec4<f32>(skinned_nrm, 0.0)).xyz * w;
                 }
             }
             skinned_pos = acc_pos;
@@ -489,8 +530,8 @@ const SCENE_SKIN_BODY_WGSL: &str = r#"if (skin_mix > 0.5) {
                 w = w / wsum;
                 if (w > 0.0) {
                     let m = skin_palette.joints[base + slot];
-                    acc_pos = acc_pos + (m * vec4<f32>(pos, 1.0)).xyz * w;
-                    acc_nrm = acc_nrm + (m * vec4<f32>(normal, 0.0)).xyz * w;
+                    acc_pos = acc_pos + (m * vec4<f32>(skinned_pos, 1.0)).xyz * w;
+                    acc_nrm = acc_nrm + (m * vec4<f32>(skinned_nrm, 0.0)).xyz * w;
                 }
             }
             skinned_pos = acc_pos;
@@ -642,10 +683,11 @@ use super::buffer_arena::GpuArena;
 use super::descriptor_table::{DescriptorTable, FALLBACK_INDEX};
 use super::gpu_timing::{DEFAULT_STATS, FrameTiming, GpuProfiler, ProfilerSupport};
 use super::mesh::MeshGroup;
+use super::morph_gpu::{MorphDraw, MorphStore};
 use super::occlusion::{GpuOcclusion, warn_feed_unavailable};
 use super::particles::{
-    GpuColliders, GpuDrawParams, GpuEmitter, GpuSimState, ParticleFrame, SIMULATE_WORKGROUP,
-    pack_colliders, pack_emitter, request_capacity,
+    GpuColliders, GpuDrawParams, GpuEmitter, GpuSimState, ParticleFrame, ParticleVoxels,
+    SIMULATE_WORKGROUP, pack_colliders, pack_emitter, request_capacity,
 };
 use super::reflection::ProbeSettings;
 use super::postfx::{PostProcess, PostStage, POST_WGSL, depth_velocity_shader};
@@ -653,6 +695,17 @@ use super::skin::{GpuSkinning, SkinnedDraw, strip_skin_palette};
 
 fn align256(value: u64) -> u64 {
     value.div_ceil(256) * 256
+}
+
+fn voxel_field_key(voxels: &ParticleVoxels) -> u64 {
+    let mut hash = super::descriptor_table::fnv1a64(bytemuck::cast_slice(&voxels.cells));
+    for dim in voxels.dims {
+        for byte in dim.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 #[repr(C)]
@@ -2309,8 +2362,9 @@ struct ParticleGpu {
     _dummy_voxels: wgpu::Texture,
     dummy_voxels_view: wgpu::TextureView,
     voxels: wgpu::Texture,
-    /// Identity of the uploaded voxel field: (Arc address, cell count).
-    voxels_key: Option<(usize, usize)>,
+    voxels_view: wgpu::TextureView,
+    /// Content hash of the uploaded voxel field.
+    voxels_key: Option<u64>,
     /// Dispatch order resolved by [`SceneBatch::set_particles`].
     order: Vec<u32>,
     /// One slot per staged system, index-aligned with the frame's list.
@@ -2475,6 +2529,7 @@ impl ParticleGpu {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        let voxels_view = voxels.create_view(&wgpu::TextureViewDescriptor::default());
         Self {
             compute_prepare,
             compute_simulate,
@@ -2485,6 +2540,7 @@ impl ParticleGpu {
             _dummy_voxels: dummy_voxels,
             dummy_voxels_view,
             voxels,
+            voxels_view,
             voxels_key: None,
             order: Vec::new(),
             systems: Vec::new(),
@@ -2676,6 +2732,7 @@ struct SkinnedPending {
     joints: Vec<[u16; 4]>,
     weights: Vec<[f32; 4]>,
     palette: Vec<[[f32; 4]; 4]>,
+    morph: Option<MorphDraw>,
     texture_page: u32,
     material: super::mesh::Material,
     /// World-space AABB center of the bind pose (transparent back-to-front
@@ -2859,6 +2916,7 @@ pub struct SceneBatch {
     /// (padded) palette here; ranges record the base offset. One palette
     /// upload per frame, sized to the frame's joint count.
     palette: Vec<[[f32; 4]; 4]>,
+    morph: MorphStore,
     /// Cascade desc staged by [`set_rig`](SceneBatch::set_rig) (`None` =
     /// legacy single map). Sizes the cascade array texture in
     /// `ensure_resources` and drives the per-slice depth passes.
@@ -3079,8 +3137,9 @@ fn camera_bind_group(
     layout: &wgpu::BindGroupLayout,
     camera: &wgpu::Buffer,
     skin: Option<&wgpu::Buffer>,
+    morph: Option<&wgpu::Buffer>,
 ) -> wgpu::BindGroup {
-    let mut entries = Vec::with_capacity(2);
+    let mut entries = Vec::with_capacity(3);
     entries.push(wgpu::BindGroupEntry {
         binding: 0,
         resource: camera.as_entire_binding(),
@@ -3089,6 +3148,12 @@ fn camera_bind_group(
         entries.push(wgpu::BindGroupEntry {
             binding: 1,
             resource: skin.as_entire_binding(),
+        });
+    }
+    if let Some(morph) = morph {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 2,
+            resource: morph.as_entire_binding(),
         });
     }
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3236,6 +3301,7 @@ impl SceneBatch {
             ranges: Vec::new(),
             skinned: Vec::new(),
             palette: Vec::new(),
+            morph: MorphStore::new(),
             cascade_desc: None,
             point_caster: None,
             staged_points: Vec::new(),
@@ -3535,6 +3601,7 @@ impl SceneBatch {
         self.ranges.clear();
         self.skinned.clear();
         self.palette.clear();
+        self.morph.clear();
     }
 
     pub fn len_tris(&self) -> usize {
@@ -4004,7 +4071,7 @@ impl SceneBatch {
             bytemuck::cast_slice(&[pack_colliders(&frame.colliders)]),
         );
         if let Some(voxels) = &frame.colliders.voxels {
-            let key = (std::sync::Arc::as_ptr(voxels) as usize, voxels.cells.len());
+            let key = voxel_field_key(voxels);
             if gpu.voxels_key != Some(key) {
                 let extent = wgpu::Extent3d {
                     width: voxels.dims[0],
@@ -4023,6 +4090,9 @@ impl SceneBatch {
                             | wgpu::TextureUsages::COPY_DST,
                         view_formats: &[],
                     });
+                    gpu.voxels_view = gpu
+                        .voxels
+                        .create_view(&wgpu::TextureViewDescriptor::default());
                 }
                 queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -4045,12 +4115,11 @@ impl SceneBatch {
             gpu.voxels_key = None;
         }
 
-        let voxels_view = frame
-            .colliders
-            .voxels
-            .as_ref()
-            .map(|_| gpu.voxels.create_view(&wgpu::TextureViewDescriptor::default()))
-            .unwrap_or_else(|| gpu.dummy_voxels_view.clone());
+        let voxels_view = if frame.colliders.voxels.is_some() {
+            gpu.voxels_view.clone()
+        } else {
+            gpu.dummy_voxels_view.clone()
+        };
         let blank = |label: &'static str, size: u64, copy_dst: bool| {
             let mut usage = wgpu::BufferUsages::STORAGE;
             if copy_dst {
@@ -4288,6 +4357,7 @@ impl SceneBatch {
         // each face needs its own buffer for the pass it belongs to.
         let cam_layout = res.cam_layout.clone();
         let skin = res.skin_buffer.clone();
+        let morph = res.morph_buffer.clone();
         let probes = self.probes.clone();
         let gpu = res.probes.as_mut().expect("probe state just built");
         gpu.frames = gpu.frames.wrapping_add(1);
@@ -4346,6 +4416,7 @@ impl SceneBatch {
                             &cam_layout,
                             &buffer,
                             skin.as_ref(),
+                            morph.as_ref(),
                         );
                         (buffer, bind)
                     })
@@ -5720,6 +5791,7 @@ impl SceneBatch {
             joints: clamped_joints,
             weights: mesh.weights.clone(),
             palette: draw.palette.iter().map(|m| m.to_cols_array_2d()).collect(),
+            morph: draw.morph.clone(),
             texture_page: mesh.texture_page,
             material: mesh.material,
             center: None,
@@ -5949,6 +6021,7 @@ impl SceneBatch {
             });
         }
         self.palette.clear();
+        self.morph.clear();
         let eye = glam::Vec3::from(self.camera_pos);
         let mut skin_opaque: Vec<SkinnedPending> = Vec::new();
         let mut skin_transparent: Vec<(SkinnedPending, f32)> = Vec::new();
@@ -6009,6 +6082,9 @@ impl SceneBatch {
             }
             let base = self.verts.len() as u32;
             let skin_base = self.palette.len() as f32;
+            let _ = self
+                .morph
+                .add(s.morph.as_ref().unwrap_or(&MorphDraw::default()), base);
             self.palette.extend_from_slice(&s.palette);
             let lit = !s.normals.is_empty();
             let textured = !s.uvs.is_empty();
@@ -6328,6 +6404,16 @@ impl SceneBatch {
                 },
                 count: None,
             });
+            cam_entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            });
         }
         let cam_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_cam_bgl"),
@@ -6341,12 +6427,23 @@ impl SceneBatch {
                 mapped_at_creation: false,
             })
         });
+        let morph_buffer = skin_supported.then(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("repame_view3d_morph"),
+                size: (crate::morph_gpu::MAX_MORPH_DRAWS * 32
+                    + crate::morph_gpu::WEIGHT_SLOTS * 16
+                    + crate::morph_gpu::MAX_MORPH_DELTAS * 32) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
         let cam_bind = camera_bind_group(
             device,
             "repame_view3d_cam_bg",
             &cam_layout,
             &camera,
             skin_buffer.as_ref(),
+            morph_buffer.as_ref(),
         );
         let page_levels = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("repame_view3d_page_levels"),
@@ -6752,6 +6849,7 @@ impl SceneBatch {
             &cam_layout,
             &shadow_camera_buf,
             skin_buffer.as_ref(),
+            morph_buffer.as_ref(),
         );
         // One camera per cascade slice and per cube face: `write_buffer` is
         // applied at the start of the submission, so reusing a single buffer
@@ -6769,6 +6867,7 @@ impl SceneBatch {
                 &cam_layout,
                 &buffer,
                 skin_buffer.as_ref(),
+                morph_buffer.as_ref(),
             );
             (buffer, bind)
         };
@@ -7049,6 +7148,7 @@ impl SceneBatch {
             point_faces: None,
             skin: self.skinning,
             skin_buffer,
+            morph_buffer,
             geometry,
             verts,
             indices,
@@ -7166,6 +7266,11 @@ impl SceneBatch {
             && let Some(skin) = &res.skin_buffer
         {
             queue.write_buffer(skin, 0, bytemuck::cast_slice(&self.palette));
+        }
+        if !self.morph.is_empty()
+            && let Some(morph) = &res.morph_buffer
+        {
+            queue.write_buffer(morph, 0, &self.morph.bytes());
         }
         if !self.verts.is_empty() {
             let alloc = res
@@ -7441,6 +7546,7 @@ struct SceneEntry {
     /// `VERTEX_STORAGE`: the layout omits binding 1 and skinned draws drop
     /// before any palette exists.
     skin_buffer: Option<wgpu::Buffer>,
+    morph_buffer: Option<wgpu::Buffer>,
     geometry: GpuArena,
     verts: wgpu::Buffer,
     indices: wgpu::Buffer,

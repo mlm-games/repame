@@ -77,7 +77,13 @@ pub(crate) const SKIN_PALETTE_BINDING_WGSL: &str =
 /// binding 0 and every other declaration stay untouched, so the result
 /// matches a camera layout whose binding 1 is omitted.
 pub(crate) fn strip_skin_palette(source: &mut String) {
-    for fragment in [SKIN_PALETTE_STRUCT_WGSL, SKIN_PALETTE_BINDING_WGSL] {
+    for fragment in [
+        SKIN_PALETTE_STRUCT_WGSL,
+        SKIN_PALETTE_BINDING_WGSL,
+        crate::morph_gpu::MORPH_STRUCT_WGSL,
+        crate::morph_gpu::MORPH_BINDING_WGSL,
+        crate::morph_gpu::MORPH_BODY_WGSL,
+    ] {
         let stripped = source.replace(fragment, "");
         *source = stripped;
     }
@@ -1643,6 +1649,8 @@ pub struct SkinnedDraw {
     pub palette: Vec<Mat4>,
     /// True joint count (pre-pad, for the shader's loop bound).
     pub joint_count: usize,
+    /// Morph deltas and weights blended in the vertex stage before skinning.
+    pub morph: Option<crate::morph_gpu::MorphDraw>,
 }
 
 impl SkinnedDraw {
@@ -1688,15 +1696,73 @@ impl SkinnedDraw {
             mesh: mesh.clone(),
             palette,
             joint_count: n,
+            morph: None,
         })
+    }
+
+    /// Attaches morph targets blended before the joint palette. Targets past
+    /// [`MAX_MORPH_TARGETS`](crate::morph_gpu::MAX_MORPH_TARGETS) are dropped.
+    pub fn with_morphs(mut self, morphs: &MorphSet, weights: &[f32]) -> Self {
+        use crate::morph_gpu::{MAX_MORPH_TARGETS, MorphDelta, MorphDraw};
+        let count = morphs
+            .target_count()
+            .min(weights.len())
+            .min(MAX_MORPH_TARGETS);
+        if count == 0 {
+            return self;
+        }
+        let vertices = self.mesh.positions.len();
+        let mut deltas = Vec::with_capacity(count * vertices);
+        for target in 0..count {
+            for vertex in 0..vertices {
+                let pos = morphs
+                    .position_deltas
+                    .get(target)
+                    .and_then(|d| d.get(vertex))
+                    .copied()
+                    .unwrap_or([0.0; 3]);
+                let nrm = morphs
+                    .normal_deltas
+                    .get(target)
+                    .and_then(|d| d.get(vertex))
+                    .copied()
+                    .unwrap_or([0.0; 3]);
+                deltas.push(MorphDelta {
+                    pos: [pos[0], pos[1], pos[2], 0.0],
+                    nrm: [nrm[0], nrm[1], nrm[2], 0.0],
+                });
+            }
+        }
+        self.morph = Some(MorphDraw {
+            weights: weights[..count]
+                .iter()
+                .map(|w| w.clamp(0.0, 1.0))
+                .collect(),
+            deltas,
+            vertex_count: vertices as u32,
+        });
+        self
     }
 
     /// CPU reference: blend one bind vertex by the palette. Returns
     /// (position, normal). Matches the vertex stage in `render.rs`: same
     /// per-vertex renormalisation, same zero-length fallback.
     pub fn blend_vertex(&self, index: usize) -> Option<([f32; 3], [f32; 3])> {
-        let pos = Vec3::from(*self.mesh.positions.get(index)?);
-        let nrm = Vec3::from(*self.mesh.normals.get(index).unwrap_or(&[0.0, 1.0, 0.0]));
+        let mut pos = Vec3::from(*self.mesh.positions.get(index)?);
+        let mut nrm = Vec3::from(*self.mesh.normals.get(index).unwrap_or(&[0.0, 1.0, 0.0]));
+        if let Some(morph) = &self.morph {
+            let mut delta_pos = Vec3::ZERO;
+            let mut delta_nrm = Vec3::ZERO;
+            for (target, weight) in morph.weights.iter().enumerate() {
+                let at = target * morph.vertex_count as usize + index;
+                if let Some(delta) = morph.deltas.get(at) {
+                    delta_pos += Vec3::new(delta.pos[0], delta.pos[1], delta.pos[2]) * *weight;
+                    delta_nrm += Vec3::new(delta.nrm[0], delta.nrm[1], delta.nrm[2]) * *weight;
+                }
+            }
+            pos += delta_pos;
+            nrm = (nrm + delta_nrm).try_normalize().unwrap_or(Vec3::Y);
+        }
         let joints = self.mesh.joints.get(index).copied().unwrap_or([0; 4]);
         let weights = self.mesh.weights.get(index).copied().unwrap_or([0.0; 4]);
         let wsum: f32 = weights.iter().sum();

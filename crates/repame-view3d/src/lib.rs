@@ -46,10 +46,12 @@ pub mod chunk;
 pub mod descriptor_table;
 pub mod gizmos;
 pub mod gltf;
+pub mod gpu_pick;
 pub mod gpu_timing;
 pub mod lod;
 pub mod material;
 pub mod mesh;
+pub mod morph_gpu;
 pub mod occlusion;
 pub mod particles;
 pub mod pass;
@@ -81,9 +83,8 @@ pub use descriptor_table::{
     DEFAULT_PROBE_LIMIT, FALLBACK_INDEX, DescriptorTable, DescriptorTableError, fnv1a64,
 };
 pub use gizmos::{AXIS_X, AXIS_Y, AXIS_Z, GizmoColor, Gizmos, WHITE, YELLOW};
-pub use gpu_timing::{
-    DEFAULT_STATS, FrameTiming, GpuProfiler, ProfilerSupport,
-};
+pub use gpu_pick::{GpuPicker, PickTriangle, PickTriangles};
+pub use gpu_timing::{DEFAULT_STATS, FrameTiming, GpuProfiler, ProfilerSupport};
 pub use gltf::{
     ImportSkip, ImportedMesh, alpha_mode, fan_to_list, flatten_imported, import_slice, material_of,
     strip_to_list,
@@ -95,6 +96,10 @@ pub use material::{
     TevScale, TevStage,
 };
 pub use mesh::{CullMode, Material, MeshGroup, Rgb, shade, shade_for_dir};
+pub use morph_gpu::{
+    MAX_MORPH_DELTAS, MAX_MORPH_DRAWS, MAX_MORPH_TARGETS, MORPH_BODY_WGSL, MORPH_BINDING_WGSL,
+    MORPH_STRUCT_WGSL, MorphDelta, MorphDraw, MorphSlot, MorphStore, WEIGHT_SLOTS,
+};
 pub use occlusion::{
     DEFAULT_BIAS, DEFAULT_TILE, DepthPyramid, DepthSource, GpuOcclusion, MAX_TILE, OcclusionCulling,
     OcclusionFeedDesc, aabb_ndc, decode_f16, nearest_view_depth,

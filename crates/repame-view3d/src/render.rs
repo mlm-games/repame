@@ -199,7 +199,7 @@ fn vs_main(
     var skinned_pos = pos;
     var skinned_nrm = normal;
     if (skin_mix > 0.5) {
-        let morph_index = u32(skin_base + 0.5) / 128u;
+        let morph_index = u32(skin_base + 0.5) / 256u;
         if (morph_index < 64u) {
             let slot = morph_data.slots[morph_index];
             let target_count = slot.a.w;
@@ -292,17 +292,17 @@ fn repame_probe_weight(distance: f32, range: f32) -> f32 {
     return 1.0 - t * t * (3.0 - 2.0 * t);
 }
 
-fn repame_probe_cube(index: i32, dir: vec3<f32>) -> vec3<f32> {
+fn repame_probe_cube(index: i32, dir: vec3<f32>, lod: f32) -> vec3<f32> {
     if (index == 0) {
-        return textureSampleLevel(probe_tex0, probe_smp, dir, 0.0).rgb;
+        return textureSampleLevel(probe_tex0, probe_smp, dir, lod).rgb;
     }
     if (index == 1) {
-        return textureSampleLevel(probe_tex1, probe_smp, dir, 0.0).rgb;
+        return textureSampleLevel(probe_tex1, probe_smp, dir, lod).rgb;
     }
     if (index == 2) {
-        return textureSampleLevel(probe_tex2, probe_smp, dir, 0.0).rgb;
+        return textureSampleLevel(probe_tex2, probe_smp, dir, lod).rgb;
     }
-    return textureSampleLevel(probe_tex3, probe_smp, dir, 0.0).rgb;
+    return textureSampleLevel(probe_tex3, probe_smp, dir, lod).rgb;
 }
 
 // Ambient + specular contribution of the frame's reflection probes: the
@@ -328,7 +328,12 @@ fn repame_probe(
         if (weight <= 0.0) {
             continue;
         }
-        let cube = repame_probe_cube(i, reflection);
+        let levels = max(
+            max(textureNumLevels(probe_tex0), textureNumLevels(probe_tex1)),
+            max(textureNumLevels(probe_tex2), textureNumLevels(probe_tex3)),
+        );
+        let max_lod = f32(levels - 1u);
+        let cube = repame_probe_cube(i, reflection, clamp(roughness, 0.0, 1.0) * max_lod);
         let fresnel = pow(1.0 - max(dot(n, v), 0.0), 5.0);
         let specular = params.z * mix(0.15, 1.0, fresnel) * (1.0 - clamp(roughness, 0.0, 1.0));
         acc = acc + cube * (base * (1.0 - metallic) * params.y + vec3<f32>(specular)) * weight;
@@ -622,7 +627,7 @@ fn vs_main(
     var p = pos;
     var morph_pos = pos;
     if (skin_mix > 0.5) {
-        let morph_index = u32(skin_base + 0.5) / 128u;
+        let morph_index = u32(skin_base + 0.5) / 256u;
         if (morph_index < 64u) {
             let slot = morph_data.slots[morph_index];
             let target_count = slot.a.w;
@@ -690,7 +695,7 @@ const SHADOW_SKIN_BODY_WGSL: &str = r#"if (skin_mix > 0.5) {
     }"#;
 
 const SHADOW_MORPH_BODY_WGSL: &str = r#"    if (skin_mix > 0.5) {
-        let morph_index = u32(skin_base + 0.5) / 128u;
+        let morph_index = u32(skin_base + 0.5) / 256u;
         if (morph_index < 64u) {
             let slot = morph_data.slots[morph_index];
             let target_count = slot.a.w;
@@ -749,6 +754,7 @@ use super::particles::{
 };
 use super::reflection::ProbeSettings;
 use super::postfx::{PostProcess, PostStage, POST_WGSL, depth_velocity_shader};
+use super::probe_prefilter::ProbePrefilter;
 use super::skin::{GpuSkinning, SkinnedDraw, strip_skin_palette};
 
 fn align256(value: u64) -> u64 {
@@ -1606,7 +1612,7 @@ struct HizPipeline {
 }
 
 impl HizPipeline {
-    fn new(device: &wgpu::Device) -> Self {
+    fn new(device: &wgpu::Device, cache: Option<&wgpu::PipelineCache>) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_hiz_bgl"),
             entries: &[
@@ -1661,7 +1667,7 @@ impl HizPipeline {
                 module: &module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache,
             })
         };
         let tile_reduce = make("repame_view3d_hiz_tile_reduce", "tile_reduce");
@@ -1738,7 +1744,7 @@ impl HizPipeline {
             module: &test_module,
             entry_point: Some("hz_test"),
             compilation_options: Default::default(),
-            cache: None,
+            cache,
         });
         let levels = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("repame_view3d_hiz_levels"),
@@ -1853,7 +1859,7 @@ impl OcclusionFeed {
             }));
         }
         let (layout, tile_reduce, coarsen, params, uniform_stride, levels) = {
-            let hiz = self.hiz.get_or_insert_with(|| HizPipeline::new(device));
+            let hiz = self.hiz.get_or_insert_with(|| HizPipeline::new(device, None));
             (
                 hiz.layout.clone(),
                 hiz.tile_reduce.clone(),
@@ -2282,6 +2288,7 @@ fn make_post_pipeline(
     module: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
+    cache: Option<&wgpu::PipelineCache>,
 ) -> wgpu::RenderPipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("repame_view3d_post_pl"),
@@ -2321,7 +2328,7 @@ fn make_post_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
-        cache: None,
+        cache,
     })
 }
 
@@ -2332,6 +2339,7 @@ fn make_copy_pipeline(
     module: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
+    cache: Option<&wgpu::PipelineCache>,
 ) -> wgpu::RenderPipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("repame_view3d_copy_pl"),
@@ -2365,7 +2373,7 @@ fn make_copy_pipeline(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
-        cache: None,
+        cache,
     })
 }
 
@@ -2430,7 +2438,13 @@ struct ParticleGpu {
 }
 
 impl ParticleGpu {
-    fn new(device: &wgpu::Device, format: wgpu::TextureFormat, cam_layout: &wgpu::BindGroupLayout, tex_layout: &wgpu::BindGroupLayout) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        cam_layout: &wgpu::BindGroupLayout,
+        tex_layout: &wgpu::BindGroupLayout,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Self {
         let sim_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("repame_view3d_particles"),
             source: wgpu::ShaderSource::Wgsl(super::particles::PARTICLE_COMPUTE_WGSL.into()),
@@ -2497,7 +2511,7 @@ impl ParticleGpu {
                 module: &sim_module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache,
             })
         };
         let compute_prepare = make_compute("repame_view3d_particle_prepare", "prepare");
@@ -2550,7 +2564,7 @@ impl ParticleGpu {
                     alpha_to_coverage_enabled: false,
                 },
                 multiview_mask: None,
-                cache: None,
+                cache,
             });
         let colliders = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("repame_view3d_particle_colliders"),
@@ -2612,6 +2626,7 @@ struct ProbeState {
     settings: ProbeSettings,
     cube: wgpu::Texture,
     view: wgpu::TextureView,
+    levels: u32,
     depth: wgpu::Texture,
     edge: u32,
     /// One capture camera per cube face (buffers written before submission
@@ -2629,6 +2644,7 @@ struct ProbeGpu {
     probes: Vec<ProbeState>,
     /// Group 2 with stand-ins at the probe slots, used by the capture passes.
     capture_bind: wgpu::BindGroup,
+    prefilter: ProbePrefilter,
     frames: u64,
 }
 
@@ -4018,7 +4034,7 @@ impl SceneBatch {
                         alpha_to_coverage_enabled: false,
                     },
                     multiview_mask: None,
-                    cache: None,
+                    cache: res.pipeline_cache.as_ref(),
                 })
             };
             let mut pages: Vec<u32> = vec![0; super::material::MAX_TEX_UNITS];
@@ -4108,6 +4124,7 @@ impl SceneBatch {
                 res.key.0,
                 &res.cam_layout,
                 &res.tex_layout,
+                res.pipeline_cache.as_ref(),
             ));
         }
         let dt = frame.clamped_dt();
@@ -4408,6 +4425,7 @@ impl SceneBatch {
             res.probes = Some(ProbeGpu {
                 probes: Vec::new(),
                 capture_bind,
+                prefilter: ProbePrefilter::new(device, res.key.0, res.pipeline_cache.as_ref()),
                 frames: 0,
             });
         }
@@ -4437,7 +4455,7 @@ impl SceneBatch {
                 let cube = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("repame_view3d_probe_cube"),
                     size,
-                    mip_level_count: 1,
+                    mip_level_count: super::probe_prefilter::mip_count(edge),
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format,
@@ -4487,6 +4505,7 @@ impl SceneBatch {
                     },
                     cube,
                     view,
+                    levels: super::probe_prefilter::mip_count(edge),
                     depth,
                     edge,
                     cam_binds,
@@ -5098,7 +5117,7 @@ impl SceneBatch {
                 }),
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
-                cache: None,
+                cache: res.pipeline_cache.as_ref(),
             })
         };
         let pipeline = make_pipeline(None);
@@ -5358,7 +5377,13 @@ impl SceneBatch {
                 return;
             };
             if !state.pipelines.contains_key(&format) {
-                let pipeline = make_copy_pipeline(device, &state.module, &state.layout, format);
+                let pipeline = make_copy_pipeline(
+                    device,
+                    &state.module,
+                    &state.layout,
+                    format,
+                    res.pipeline_cache.as_ref(),
+                );
                 state.pipelines.insert(format, pipeline);
             }
             let buffer = state.params.entry(spec.index).or_insert_with(|| {
@@ -5483,7 +5508,9 @@ impl SceneBatch {
             let format = pass_format(spec.target.format);
             pipelines
                 .entry(format)
-                .or_insert_with(|| make_post_pipeline(device, &module, &layout, format));
+                .or_insert_with(|| {
+                    make_post_pipeline(device, &module, &layout, format, res.pipeline_cache.as_ref())
+                });
         }
         res.post = Some(PostState {
             layout,
@@ -6793,6 +6820,21 @@ impl SceneBatch {
                 resource: material_buffer.as_entire_binding(),
             }],
         });
+        let seed = resources
+            .get::<SceneResources>()
+            .and_then(|all| all.cache_seed.get(self.id.as_str()))
+            .cloned();
+        let pipeline_cache = device
+            .features()
+            .contains(wgpu::Features::PIPELINE_CACHE)
+            .then(|| unsafe {
+                device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                    label: Some("repame_view3d_pipeline_cache"),
+                    data: seed.as_deref(),
+                    fallback: true,
+                })
+            });
+        let cache = pipeline_cache.as_ref();
         let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("repame_view3d_pl"),
             bind_group_layouts: &[
@@ -6877,7 +6919,7 @@ impl SceneBatch {
                     alpha_to_coverage_enabled: false,
                 },
                 multiview_mask: None,
-                cache: None,
+                cache,
             });
             (pipeline, depth_test)
         };
@@ -6995,7 +7037,7 @@ impl SceneBatch {
                     alpha_to_coverage_enabled: false,
                 },
                 multiview_mask: None,
-                cache: None,
+                cache,
             });
         let dv_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("repame_view3d_dv_bgl"),
@@ -7110,7 +7152,7 @@ impl SceneBatch {
                     alpha_to_coverage_enabled: false,
                 },
                 multiview_mask: None,
-                cache: None,
+                cache,
             })
         };
         // A variant per accepted depth format: the target's format and the
@@ -7207,6 +7249,7 @@ impl SceneBatch {
             skin: self.skinning,
             skin_buffer,
             morph_buffer,
+            pipeline_cache,
             geometry,
             verts,
             indices,
@@ -7237,6 +7280,7 @@ impl SceneBatch {
             None => {
                 let mut all = SceneResources {
                     batches: HashMap::new(),
+                    cache_seed: HashMap::new(),
                 };
                 all.batches.insert(self.id.clone(), entry);
                 resources.insert(all);
@@ -7605,6 +7649,7 @@ struct SceneEntry {
     /// before any palette exists.
     skin_buffer: Option<wgpu::Buffer>,
     morph_buffer: Option<wgpu::Buffer>,
+    pipeline_cache: Option<wgpu::PipelineCache>,
     geometry: GpuArena,
     verts: wgpu::Buffer,
     indices: wgpu::Buffer,
@@ -7638,6 +7683,7 @@ struct SceneEntry {
 
 struct SceneResources {
     batches: HashMap<String, SceneEntry>,
+    cache_seed: HashMap<String, Vec<u8>>,
 }
 
 /// Draw the prepared batch for one id: scene into the shared
@@ -7946,6 +7992,7 @@ pub fn prepare_scene_with_id(
                         ProbeCapture {
                             cube: state.cube.clone(),
                             depth: state.depth.clone(),
+                            levels: state.levels,
                             edge: state.edge,
                             position: state.settings.position,
                             faces,
@@ -8131,6 +8178,8 @@ pub fn prepare_scene_with_id(
                 let layer = probe.cube.create_view(&wgpu::TextureViewDescriptor {
                     label: Some("repame_view3d_probe_face"),
                     dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_mip_level: 0,
+                    mip_level_count: Some(1),
                     base_array_layer: face as u32,
                     array_layer_count: Some(1),
                     ..Default::default()
@@ -8201,6 +8250,18 @@ pub fn prepare_scene_with_id(
                         None => &snap.pipeline_depth[r.cull_mode.index()],
                     });
                     pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
+                }
+            }
+        }
+        if let Some(captures) = snap.probe_captures.as_ref() {
+            let prefilter = resources
+                .get::<SceneResources>()
+                .and_then(|all| all.batches.get(id))
+                .and_then(|res| res.probes.as_ref())
+                .map(|gpu| &gpu.prefilter);
+            if let Some(prefilter) = prefilter {
+                for probe in &captures.probes {
+                    prefilter.encode(device, queue, encoder, &probe.cube, probe.levels);
                 }
             }
         }
@@ -8787,6 +8848,7 @@ struct ParticleDraw {
 struct ProbeCapture {
     cube: wgpu::Texture,
     depth: wgpu::Texture,
+    levels: u32,
     edge: u32,
     position: [f32; 3],
     faces: [[[f32; 4]; 4]; 6],
@@ -8866,6 +8928,30 @@ fn draw_particle_billboards(
 /// has already set the viewport to the callback rect, which matches the
 /// offscreen texture 1:1 (both come from the painted frame geometry).
 /// No-op when `id` has no target (call [`prepare_scene_with_id`] first).
+/// Seeds the driver pipeline cache for `id` from a previous
+/// [`pipeline_cache_data`] snapshot.
+pub fn load_pipeline_cache(id: &str, bytes: Vec<u8>, resources: &mut CallbackResources) {
+    if resources.get::<SceneResources>().is_none() {
+        resources.insert(SceneResources {
+            batches: HashMap::new(),
+            cache_seed: HashMap::new(),
+        });
+    }
+    if let Some(all) = resources.get_mut::<SceneResources>() {
+        all.cache_seed.insert(id.to_string(), bytes);
+    }
+}
+
+/// Current driver pipeline-cache blob for `id`. Persist it through an
+/// application-owned store and feed it back with [`load_pipeline_cache`].
+pub fn pipeline_cache_data(id: &str, resources: &CallbackResources) -> Option<Vec<u8>> {
+    resources
+        .get::<SceneResources>()
+        .and_then(|all| all.batches.get(id))
+        .and_then(|res| res.pipeline_cache.as_ref())
+        .and_then(|cache| cache.get_data())
+}
+
 /// Reserves a stable texture page for a caller-owned key. Reuses a released
 /// slot, and returns the fallback page when the table is full.
 pub fn bind_texture_page(

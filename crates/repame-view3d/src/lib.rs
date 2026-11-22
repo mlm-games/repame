@@ -57,6 +57,7 @@ pub mod particles;
 pub mod pass;
 pub mod pick;
 pub mod postfx;
+pub mod probe_prefilter;
 pub mod reflection;
 pub mod render;
 pub mod shading;
@@ -84,7 +85,7 @@ pub use descriptor_table::{
 };
 pub use gizmos::{AXIS_X, AXIS_Y, AXIS_Z, GizmoColor, Gizmos, WHITE, YELLOW};
 pub use gpu_pick::{
-    GpuPicker, PickFeed, PickRequest, PickResult, PickTriangle, PickTriangles,
+    GpuPicker, PickFeed, PickKind, PickRequest, PickResult, PickTriangle, PickTriangles,
 };
 pub use gpu_timing::{DEFAULT_STATS, FrameTiming, GpuProfiler, ProfilerSupport};
 pub use gltf::{
@@ -134,8 +135,8 @@ pub use render::{
     SceneUpload,
 };
 pub use render::{
-    bind_texture_page, last_gpu_timing, paint_scene_with_id, prepare_scene_with_id,
-    release_texture_page, resolve_texture_page,
+    bind_texture_page, last_gpu_timing, load_pipeline_cache, paint_scene_with_id,
+    pipeline_cache_data, prepare_scene_with_id, release_texture_page, resolve_texture_page,
 };
 pub use shading::{ShadedBatch, ShadedGroup, ShaderCache, ShadingUniform, kcolor_view};
 pub use shadow::{

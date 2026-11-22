@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use glam::{Mat4, Vec2, Vec3};
@@ -224,6 +225,9 @@ pub struct Frame3d {
     /// their normal CPU-derived events; a `GpuPickHit` follows when the
     /// nearest-hit readback lands. Defaults to `false`.
     pub gpu_pick: bool,
+    /// Suppresses the CPU-derived `MeshClick`/`HoverMesh`/`GroundClick`
+    /// events when GPU picking is enabled, making `GpuPickHit` authoritative.
+    pub gpu_pick_authoritative: bool,
 }
 
 impl Default for Frame3d {
@@ -251,6 +255,7 @@ impl Default for Frame3d {
             viewport_px: [1600.0, 900.0],
             gpu_occlusion: None,
             gpu_pick: false,
+            gpu_pick_authoritative: false,
         }
     }
 }
@@ -400,7 +405,12 @@ pub enum View3dEvent {
     /// Nearest `pick_id` from the compute-side pick pass, delivered on the
     /// pointer event after its readback lands. Emitted only when
     /// [`Frame3d::gpu_pick`] is enabled.
-    GpuPickHit { pick_id: u32 },
+    GpuPickHit {
+        pick_id: u32,
+        point: [f32; 3],
+        request_id: u64,
+        kind: crate::PickKind,
+    },
 }
 
 /// Press slop in physical px: pointer-up farther than this from
@@ -635,6 +645,18 @@ pub fn Viewport3d(
             }
             drag_move.set(d);
             for event in events {
+                if hover_input.gpu_pick
+                    && hover_input.gpu_pick_authoritative
+                    && matches!(
+                        event,
+                        View3dEvent::HoverMesh { .. }
+                            | View3dEvent::Hover { .. }
+                            | View3dEvent::MeshClick { .. }
+                            | View3dEvent::GroundClick { .. }
+                    )
+                {
+                    continue;
+                }
                 on_move(event);
             }
             if hover_input.gpu_pick {
@@ -643,6 +665,8 @@ pub fn Viewport3d(
                 let (eye, dir) = hover_input.cam.screen_ray(aspect, vp, Vec2::new(p.x, p.y));
                 if let Ok(mut requests) = hover_pick.requests.lock() {
                     requests.push_back(crate::PickRequest {
+                        id: hover_pick.next_id.fetch_add(1, Ordering::Relaxed),
+                        kind: crate::PickKind::Hover,
                         origin: eye,
                         dir,
                         triangles: crate::PickTriangles::from_groups(&hover_input.groups),
@@ -670,7 +694,15 @@ pub fn Viewport3d(
                     [p.x, p.y],
                     &click_input.groups,
                 ) {
-                    on_up_click(event);
+                    if !(click_input.gpu_pick
+                        && click_input.gpu_pick_authoritative
+                        && matches!(
+                            event,
+                            View3dEvent::MeshClick { .. } | View3dEvent::GroundClick { .. }
+                        ))
+                    {
+                        on_up_click(event);
+                    }
                 }
                 if click_input.gpu_pick {
                     let aspect = Frame3d::aspect(g.viewport_px);
@@ -678,6 +710,8 @@ pub fn Viewport3d(
                     let (eye, dir) = click_input.cam.screen_ray(aspect, vp, Vec2::new(p.x, p.y));
                     if let Ok(mut requests) = click_pick.requests.lock() {
                         requests.push_back(crate::PickRequest {
+                            id: click_pick.next_id.fetch_add(1, Ordering::Relaxed),
+                            kind: crate::PickKind::Click,
                             origin: eye,
                             dir,
                             triangles: crate::PickTriangles::from_groups(&click_input.groups),
@@ -793,6 +827,7 @@ impl GeomHandle {
 struct PickBridge {
     requests: Mutex<VecDeque<crate::PickRequest>>,
     results: Mutex<VecDeque<View3dEvent>>,
+    next_id: std::sync::atomic::AtomicU64,
 }
 
 struct GpuViewport3d {
@@ -905,19 +940,22 @@ impl WgpuCallback for GpuViewport3d {
                 }
                 Err(_) => None,
             };
-            if let Some(request) = request
-                && let Some(feed) = resources.get_mut::<crate::PickFeed>()
-            {
-                feed.encode(device, queue, encoder, &request);
-            }
-            if let Some(feed) = resources.get_mut::<crate::PickFeed>()
-                && let Some(result) = feed.take(device)
-                && result.pick_id != 0
-                && let Ok(mut results) = self.pick.results.lock()
-            {
-                results.push_back(View3dEvent::GpuPickHit {
-                    pick_id: result.pick_id,
-                });
+            if let Some(request) = request {
+                if let Some(feed) = resources.get_mut::<crate::PickFeed>() {
+                    feed.encode(device, queue, encoder, &request);
+                }
+                if let Some(feed) = resources.get_mut::<crate::PickFeed>()
+                    && let Some(result) = feed.take(device)
+                    && result.pick_id != 0
+                    && let Ok(mut results) = self.pick.results.lock()
+                {
+                    results.push_back(View3dEvent::GpuPickHit {
+                        pick_id: result.pick_id,
+                        point: (result.origin + result.dir * result.distance).into(),
+                        request_id: result.id,
+                        kind: result.kind,
+                    });
+                }
             }
         }
         let desc = self.effective_desc();

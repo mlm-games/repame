@@ -158,6 +158,7 @@ mod error;
 mod identity;
 mod keybinds;
 mod migration;
+mod pipeline_cache;
 mod settings;
 mod store;
 mod world;
@@ -171,6 +172,7 @@ pub use settings::{
     AccessibilitySettings, AudioSettings, DisplaySettings, SETTINGS_FILE, SETTINGS_SCHEMA,
     Settings, SettingsStore,
 };
+pub use pipeline_cache::{CACHE_DIR, PipelineCacheStore};
 pub use store::{Loaded, SaveFile};
 pub use world::WorldDoc;
 

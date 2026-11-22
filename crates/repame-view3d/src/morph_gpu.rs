@@ -118,7 +118,7 @@ pub const MORPH_BINDING_WGSL: &str =
     "@group(0) @binding(2) var<storage, read> morph_data: MorphData;\n";
 
 pub const MORPH_POS_WGSL: &str = "\
-        let morph_index = u32(skin_base + 0.5) / 128u;
+        let morph_index = u32(skin_base + 0.5) / 256u;
         if (morph_index < 64u) {
             let slot = morph_data.slots[morph_index];
             let target_count = slot.a.w;
@@ -139,7 +139,7 @@ pub const MORPH_POS_WGSL: &str = "\
 pub const MORPH_POS_FN_WGSL: &str = "\
 fn morph_pose(pos: vec3<f32>, skin_base: f32, vertex_index: u32, skin_mix: f32) -> vec3<f32> {
     if (skin_mix <= 0.5) { return pos; }
-    let morph_index = u32(skin_base + 0.5) / 128u;
+    let morph_index = u32(skin_base + 0.5) / 256u;
     var morph_pos = pos;
     if (morph_index < 64u) {
         let slot = morph_data.slots[morph_index];
@@ -167,7 +167,7 @@ fn morph_pose(pos: vec3<f32>, skin_base: f32, vertex_index: u32, skin_mix: f32) 
 ";
 
 pub const MORPH_BODY_WGSL: &str = "\
-        let morph_index = u32(skin_base + 0.5) / 128u;
+        let morph_index = u32(skin_base + 0.5) / 256u;
         if (morph_index < 64u) {
             let slot = morph_data.slots[morph_index];
             let target_count = slot.a.w;

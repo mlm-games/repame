@@ -124,7 +124,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (v < 0.0 || u + v > 1.0) { return; }
     let distance = dot(e2, q) * inv;
     if (distance <= 0.0) { return; }
-    let key = min(u32(max(distance, 0.0) * 1000000.0), 0xffffffffu);
+    let key = bitcast<u32>(max(distance, 0.0));
     loop {
         if (atomicCompareExchangeWeak(&result.lock, 0u, 1u).exchanged) {
             if (key < atomicLoad(&result.distance)) {
@@ -138,8 +138,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 "#;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickKind {
+    Hover,
+    Click,
+}
+
 #[derive(Clone, Debug)]
 pub struct PickRequest {
+    pub id: u64,
+    pub kind: PickKind,
     pub origin: Vec3,
     pub dir: Vec3,
     pub triangles: PickTriangles,
@@ -147,17 +155,31 @@ pub struct PickRequest {
 
 #[derive(Clone, Copy, Debug)]
 pub struct PickResult {
+    pub id: u64,
+    pub kind: PickKind,
+    pub origin: Vec3,
+    pub dir: Vec3,
     pub pick_id: u32,
+    pub distance: f32,
+}
+
+struct PickMeta {
+    id: u64,
+    kind: PickKind,
+    origin: Vec3,
+    dir: Vec3,
 }
 
 pub struct PickFeed {
     picker: GpuPicker,
+    pending: std::collections::VecDeque<PickMeta>,
 }
 
 impl PickFeed {
     pub fn new(device: &wgpu::Device) -> Self {
         Self {
             picker: GpuPicker::new(device),
+            pending: std::collections::VecDeque::new(),
         }
     }
 
@@ -176,12 +198,25 @@ impl PickFeed {
             request.origin,
             request.dir,
         );
+        self.pending.push_back(PickMeta {
+            id: request.id,
+            kind: request.kind,
+            origin: request.origin,
+            dir: request.dir,
+        });
     }
 
     pub fn take(&mut self, device: &wgpu::Device) -> Option<PickResult> {
-        self.picker
-            .take(device)
-            .map(|pick_id| PickResult { pick_id })
+        let (pick_id, distance) = self.picker.take(device)?;
+        let meta = self.pending.pop_front()?;
+        Some(PickResult {
+            id: meta.id,
+            kind: meta.kind,
+            origin: meta.origin,
+            dir: meta.dir,
+            pick_id,
+            distance,
+        })
     }
 }
 
@@ -330,7 +365,11 @@ impl GpuPicker {
         if !triangles.is_empty() {
             queue.write_buffer(&self.triangles, 0, bytemuck::cast_slice(triangles));
         }
-        encoder.clear_buffer(&self.result, 0, None);
+        queue.write_buffer(
+            &self.result,
+            0,
+            &[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0],
+        );
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("repame_view3d_pick_bg"),
             layout: &self.layout,
@@ -364,8 +403,9 @@ impl GpuPicker {
         }
     }
 
-    /// Returns the nearest `pick_id`, or `None` when no hit or not ready.
-    pub fn take(&mut self, device: &wgpu::Device) -> Option<u32> {
+    /// Returns `(pick_id, distance)` of the nearest hit, or `None` when no
+    /// hit or not ready.
+    pub fn take(&mut self, device: &wgpu::Device) -> Option<(u32, f32)> {
         if self.mapping {
             device.poll(wgpu::PollType::Poll).ok();
             if self.status.load(Ordering::Acquire) == 0 {
@@ -378,7 +418,9 @@ impl GpuPicker {
                     .get_mapped_range()
                     .expect("pick readback is mapped");
                 let words: &[u32] = bytemuck::cast_slice(&view);
-                words.get(1).copied().filter(|id| *id != 0)
+                let id = *words.get(1)?;
+                let distance_bits = *words.get(0)?;
+                (id != 0).then_some((id, f32::from_bits(distance_bits)))
             } else {
                 None
             };

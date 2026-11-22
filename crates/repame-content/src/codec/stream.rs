@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::codec::{
-    BlockCodecRegistry, DecodedImage, DDS_MAGIC, KTX1_IDENTIFIER, KTX2_IDENTIFIER, TextureInfo,
+    BlockCodecRegistry, DDS_MAGIC, DecodedImage, KTX1_IDENTIFIER, KTX2_IDENTIFIER, TextureInfo,
     dds, ktx2, read_u32_le,
 };
 use crate::error::{ContentError, io_error};
@@ -68,9 +68,9 @@ impl ByteRangeSource for [u8] {
         let end = start
             .checked_add(length)
             .ok_or_else(|| ContentError::format("<bytes>", "texture byte range overflows"))?;
-        let bytes = self
-            .get(start..end)
-            .ok_or_else(|| ContentError::format("<bytes>", "texture byte range is out of bounds"))?;
+        let bytes = self.get(start..end).ok_or_else(|| {
+            ContentError::format("<bytes>", "texture byte range is out of bounds")
+        })?;
         Ok(bytes.to_vec())
     }
 }
@@ -135,12 +135,20 @@ impl ByteRangeSource for FileRangeSource {
                 ),
             ));
         }
-        let mut file = self.file.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut file = self
+            .file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         file.seek(SeekFrom::Start(offset))
             .map_err(|error| io_error(&self.path, format!("seek to byte {offset}"), error))?;
         let mut bytes = vec![0u8; length];
-        file.read_exact(&mut bytes)
-            .map_err(|error| io_error(&self.path, format!("read {length} bytes at {offset}"), error))?;
+        file.read_exact(&mut bytes).map_err(|error| {
+            io_error(
+                &self.path,
+                format!("read {length} bytes at {offset}"),
+                error,
+            )
+        })?;
         Ok(bytes)
     }
 }
@@ -219,7 +227,10 @@ impl<S: ByteRangeSource> MipReader<S> {
             .level(level)
             .ok_or_else(|| missing_level(&self.path, level))?;
         let length = usize::try_from(info_level.size).map_err(|_| {
-            ContentError::format(&self.path, format!("texture mip level {level} is too large to read"))
+            ContentError::format(
+                &self.path,
+                format!("texture mip level {level} is too large to read"),
+            )
         })?;
         self.source.read_range(info_level.offset, length)
     }

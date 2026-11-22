@@ -109,11 +109,7 @@ impl HandPose {
     /// read from, spelled the way this crate spells binding paths. This is what
     /// a backend binds its pose actions against.
     pub fn input_path(self, hand: Hand) -> InputPath {
-        InputPath::new(
-            UserPath::Hand(hand),
-            self.input(),
-            Some("pose".to_string()),
-        )
+        InputPath::new(UserPath::Hand(hand), self.input(), Some("pose".to_string()))
     }
 }
 
@@ -376,7 +372,10 @@ mod tests {
         let pose = sample();
         let inverse = pose.inverse();
         assert!(close(inverse.transform(), pose.view_matrix()));
-        assert!(close(pose.transform() * inverse.transform(), Mat4::IDENTITY));
+        assert!(close(
+            pose.transform() * inverse.transform(),
+            Mat4::IDENTITY
+        ));
 
         // Expressing a pose in its own frame is the identity.
         let relative = pose.relative_to(&pose);
@@ -388,7 +387,10 @@ mod tests {
         // child = parent * local, for an arbitrary parent.
         let parent = Pose::new(vec3(-1.0, 0.5, 2.0), Quat::from_rotation_z(0.9));
         let local = pose.relative_to(&parent);
-        assert!(close(parent.transform() * local.transform(), pose.transform()));
+        assert!(close(
+            parent.transform() * local.transform(),
+            pose.transform()
+        ));
     }
 
     #[test]
@@ -397,13 +399,7 @@ mod tests {
         assert!((scaled.orientation.length() - 1.0).abs() < 1e-6);
         assert!(scaled.is_finite());
         assert!(!Pose::new(vec3(f32::NAN, 0.0, 0.0), Quat::IDENTITY).is_finite());
-        assert!(
-            !Pose::new(
-                Vec3::ZERO,
-                Quat::from_xyzw(0.0, f32::INFINITY, 0.0, 1.0)
-            )
-            .is_finite()
-        );
+        assert!(!Pose::new(Vec3::ZERO, Quat::from_xyzw(0.0, f32::INFINITY, 0.0, 1.0)).is_finite());
 
         let zero = Pose::new(Vec3::ZERO, Quat::from_xyzw(0.0, 0.0, 0.0, 0.0));
         assert_eq!(zero.orientation, Quat::IDENTITY);
@@ -445,14 +441,21 @@ mod tests {
         assert!(poses.head().pose.is_none());
         assert!(poses.head_pose().is_err());
 
-        poses.set(TrackedRole::Hand(Hand::Right), TrackedPose::tracked(sample()));
+        poses.set(
+            TrackedRole::Hand(Hand::Right),
+            TrackedPose::tracked(sample()),
+        );
         assert!(poses.hand_pose(Hand::Right).is_ok());
         assert!(poses.hand_pose(Hand::Left).is_err());
         assert_eq!(
             poses.get(TrackedRole::Hand(Hand::Right)).state,
             PoseState::Tracked
         );
-        assert!(TrackedPose::from_valid_flags(sample(), false).pose.is_none());
+        assert!(
+            TrackedPose::from_valid_flags(sample(), false)
+                .pose
+                .is_none()
+        );
         assert!(TrackedPose::from_valid_flags(sample(), true).pose.is_some());
 
         assert_eq!(

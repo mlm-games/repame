@@ -301,12 +301,7 @@ fn pow2(n: u32) -> f32 {
 /// A non-finite ratio keeps the previous level (or level 0); a zero ratio asks
 /// for the finest level. With `hysteresis = 0` the rule is exact except that
 /// reaching the coarsening boundary and standing exactly on it is a change.
-pub fn select_mip_level(
-    ratio: f32,
-    previous: Option<u32>,
-    hysteresis: f32,
-    max_level: u32,
-) -> u32 {
+pub fn select_mip_level(ratio: f32, previous: Option<u32>, hysteresis: f32, max_level: u32) -> u32 {
     let max_level = max_level.min(MAX_MIP_LEVELS - 1);
     if !ratio.is_finite() {
         return previous.unwrap_or(0).min(max_level);
@@ -728,11 +723,10 @@ impl TextureResidency {
             resident.projected_px = projected_px.max(0.0);
         }
         let hysteresis = self.tuning.hysteresis;
-        let level = resident.chain.desired_level(
-            resident.projected_px,
-            Some(resident.policy),
-            hysteresis,
-        );
+        let level =
+            resident
+                .chain
+                .desired_level(resident.projected_px, Some(resident.policy), hysteresis);
         resident.policy = level;
         Some(level)
     }
@@ -1176,9 +1170,10 @@ where
                         .inflight
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if inflight.get(&(dropped.2, dropped.3)).is_none_or(|&generation| {
-                        generation <= dropped.4
-                    }) {
+                    if inflight
+                        .get(&(dropped.2, dropped.3))
+                        .is_none_or(|&generation| generation <= dropped.4)
+                    {
                         inflight.remove(&(dropped.2, dropped.3));
                     }
                     log::warn!(
@@ -1220,10 +1215,7 @@ where
 
     /// Queued + building level count (backpressure readout).
     pub fn pending(&self) -> usize {
-        self.inflight
-            .lock()
-            .map(|map| map.len())
-            .unwrap_or(0)
+        self.inflight.lock().map(|map| map.len()).unwrap_or(0)
     }
 
     /// Finished loads awaiting drain.
@@ -1407,7 +1399,9 @@ fn mip_worker_loop<L>(
             let (lock, condvar) = &*queue;
             let mut queue = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             while queue.is_empty() && !shutdown.load(Ordering::SeqCst) {
-                queue = condvar.wait(queue).unwrap_or_else(|poisoned| poisoned.into_inner());
+                queue = condvar
+                    .wait(queue)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
             if shutdown.load(Ordering::SeqCst) {
                 return;
@@ -1530,12 +1524,15 @@ mod tests {
     fn projected_bounds_track_the_viewport_and_reject_behind_the_camera() {
         let viewport = [100.0, 200.0];
         let ortho = glam::camera::rh::proj::directx::orthographic(-2.0, 2.0, -2.0, 2.0, 0.1, 10.0);
-        let size = project_bounds(ortho, viewport, [-0.5, -0.5, -1.0], [0.5, 0.5, -1.0])
-            .expect("in view");
+        let size =
+            project_bounds(ortho, viewport, [-0.5, -0.5, -1.0], [0.5, 0.5, -1.0]).expect("in view");
         assert!((size.width_px - 25.0).abs() < 1e-3, "{size:?}");
         assert!((size.height_px - 50.0).abs() < 1e-3, "{size:?}");
         assert_eq!(size.max_px(), size.height_px);
-        assert_eq!(project_bounds(ortho, [0.0, 200.0], [-1.0; 3], [1.0; 3]), None);
+        assert_eq!(
+            project_bounds(ortho, [0.0, 200.0], [-1.0; 3], [1.0; 3]),
+            None
+        );
 
         let perspective = glam::camera::rh::proj::directx::perspective(
             std::f32::consts::FRAC_PI_4,
@@ -1624,7 +1621,11 @@ mod tests {
         assert_eq!(residency.wanted_level(0), Some(3));
         assert_eq!(residency.wanted_level(1), Some(2));
         assert_eq!(residency.wanted_level(2), Some(0));
-        assert_eq!(residency.resident_bytes(), 256, "only page 2 level 0 is left");
+        assert_eq!(
+            residency.resident_bytes(),
+            256,
+            "only page 2 level 0 is left"
+        );
 
         // The loads left to issue cover each texture's wanted range, in
         // priority (all equal here), then page, then level order.
@@ -1633,11 +1634,12 @@ mod tests {
             .iter()
             .map(|request| (request.page, request.level))
             .collect();
-        assert_eq!(
-            levels,
-            vec![(0, 3), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3)]
+        assert_eq!(levels, vec![(0, 3), (1, 2), (1, 3), (2, 1), (2, 2), (2, 3)]);
+        assert!(
+            plan.requests
+                .iter()
+                .all(|request| request.priority.0 == 100.0)
         );
-        assert!(plan.requests.iter().all(|request| request.priority.0 == 100.0));
         assert!(plan.requests.iter().all(|request| request.generation > 0));
     }
 
@@ -1660,7 +1662,10 @@ mod tests {
         );
         assert_eq!(residency.wanted_level(7), Some(3));
         assert_eq!(
-            plan.requests.iter().map(|request| request.level).collect::<Vec<_>>(),
+            plan.requests
+                .iter()
+                .map(|request| request.level)
+                .collect::<Vec<_>>(),
             vec![3],
             "only the smallest level is still wanted"
         );
@@ -1776,7 +1781,8 @@ mod tests {
             "an arrival for an undeclared page drops"
         );
         assert_eq!(residency.resident_bytes(), 0);
-        assert!(residency.take_uploads().is_empty());    }
+        assert!(residency.take_uploads().is_empty());
+    }
 
     #[test]
     fn declaring_a_bad_chain_is_a_typed_error() {

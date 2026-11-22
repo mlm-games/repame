@@ -192,7 +192,8 @@ pub fn encode_packet(records: &[Record]) -> Result<Vec<u8>, CodecError> {
             max: u8::MAX as usize,
         });
     }
-    let mut writer = Writer::with_capacity(2 + records.iter().map(Record::encoded_len).sum::<usize>());
+    let mut writer =
+        Writer::with_capacity(2 + records.iter().map(Record::encoded_len).sum::<usize>());
     writer.put_u8(WIRE_VERSION);
     writer.put_u8(records.len() as u8);
     for record in records {

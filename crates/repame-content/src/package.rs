@@ -160,7 +160,10 @@ impl Package {
         if directory_end > bytes.len() as u64
             || eocd as u64 + ZIP_END_OF_CENTRAL_DIRECTORY_BYTES as u64 > bytes.len() as u64
         {
-            return Err(ContentError::format(source, "ZIP central directory is out of range"));
+            return Err(ContentError::format(
+                source,
+                "ZIP central directory is out of range",
+            ));
         }
 
         let mut entries = BTreeMap::new();
@@ -200,7 +203,9 @@ impl Package {
                 .get(name_start..name_end)
                 .ok_or_else(|| ContentError::format(source, "ZIP entry name is truncated"))?;
             let name = std::str::from_utf8(name_bytes)
-                .map_err(|error| ContentError::format(source, format!("ZIP entry name is not UTF-8: {error}")))?
+                .map_err(|error| {
+                    ContentError::format(source, format!("ZIP entry name is not UTF-8: {error}"))
+                })?
                 .to_string();
 
             let header = header_offset as usize;
@@ -212,8 +217,10 @@ impl Package {
             }
             let local_name_length = u16_at(&bytes, header + 26, source)? as usize;
             let local_extra_length = u16_at(&bytes, header + 28, source)? as usize;
-            let data_offset =
-                header_offset + ZIP_LOCAL_HEADER_BYTES + local_name_length as u64 + local_extra_length as u64;
+            let data_offset = header_offset
+                + ZIP_LOCAL_HEADER_BYTES
+                + local_name_length as u64
+                + local_extra_length as u64;
             let data_end = data_offset + compressed_size;
             if data_end > bytes.len() as u64 {
                 return Err(ContentError::format(
@@ -280,9 +287,10 @@ impl Package {
         name: &str,
         source: &Path,
     ) -> Result<PackageRangeSource<'a>, ContentError> {
-        let entry = self.entries.get(name).ok_or_else(|| {
-            ContentError::new(source, format!("package has no entry `{name}`"))
-        })?;
+        let entry = self
+            .entries
+            .get(name)
+            .ok_or_else(|| ContentError::new(source, format!("package has no entry `{name}`")))?;
         Ok(PackageRangeSource {
             package: self,
             entry,
@@ -304,7 +312,10 @@ impl Package {
         let start = entry.data_offset as usize;
         let end = start + entry.compressed_size as usize;
         let stored = self.bytes.get(start..end).ok_or_else(|| {
-            ContentError::format(source, format!("package entry `{}` is truncated", entry.name))
+            ContentError::format(
+                source,
+                format!("package entry `{}` is truncated", entry.name),
+            )
         })?;
         let data = match entry.compression {
             Compression::Stored => stored.to_vec(),
@@ -397,12 +408,14 @@ impl<'a> PackageRangeSource<'a> {
                 })?;
                 let compressed = self.entry.compressed_size as usize;
                 let bytes = self.package.bytes.get(base..base + compressed);
-                let bytes = bytes.and_then(|bytes| bytes.get(start..end)).ok_or_else(|| {
-                    ContentError::format(
-                        &self.source,
-                        format!("package entry `{}` is truncated", self.entry.name),
-                    )
-                })?;
+                let bytes = bytes
+                    .and_then(|bytes| bytes.get(start..end))
+                    .ok_or_else(|| {
+                        ContentError::format(
+                            &self.source,
+                            format!("package entry `{}` is truncated", self.entry.name),
+                        )
+                    })?;
                 Ok(bytes.to_vec())
             }
             Compression::Deflated => {
@@ -413,13 +426,14 @@ impl<'a> PackageRangeSource<'a> {
                 if cache.is_none() {
                     *cache = Some(self.package.read_entry(self.entry, &self.source)?);
                 }
-                let data = cache
-                    .as_ref()
-                    .expect("the decoded entry was just inflated");
+                let data = cache.as_ref().expect("the decoded entry was just inflated");
                 let bytes = data.get(start..end).ok_or_else(|| {
                     ContentError::format(
                         &self.source,
-                        format!("package entry `{}` is shorter than declared", self.entry.name),
+                        format!(
+                            "package entry `{}` is shorter than declared",
+                            self.entry.name
+                        ),
                     )
                 })?;
                 Ok(bytes.to_vec())
@@ -493,13 +507,18 @@ impl PackageWriter {
             let payload = match compression {
                 Compression::Stored => data.clone(),
                 Compression::Deflated => {
-                    let mut encoder =
-                        DeflateEncoder::new(Vec::new(), FlateCompression::default());
+                    let mut encoder = DeflateEncoder::new(Vec::new(), FlateCompression::default());
                     encoder.write_all(data).map_err(|error| {
-                        ContentError::new(source, format!("deflate package entry `{name}`: {error}"))
+                        ContentError::new(
+                            source,
+                            format!("deflate package entry `{name}`: {error}"),
+                        )
                     })?;
                     encoder.finish().map_err(|error| {
-                        ContentError::new(source, format!("deflate package entry `{name}`: {error}"))
+                        ContentError::new(
+                            source,
+                            format!("deflate package entry `{name}`: {error}"),
+                        )
                     })?
                 }
             };
@@ -661,8 +680,9 @@ impl PckDirectory {
         let index = bytes
             .get(16..16 + length)
             .ok_or_else(|| ContentError::format(source, "PCK index body is truncated"))?;
-        let text = std::str::from_utf8(index)
-            .map_err(|error| ContentError::format(source, format!("PCK index is not UTF-8: {error}")))?;
+        let text = std::str::from_utf8(index).map_err(|error| {
+            ContentError::format(source, format!("PCK index is not UTF-8: {error}"))
+        })?;
         let directory: Self = ron::from_str(text)
             .map_err(|error| ContentError::format(source, format!("invalid RON: {error}")))?;
         if directory.entries.len() != count {
@@ -754,13 +774,21 @@ mod tests {
         let nested = b"(name: \"deep\")".to_vec();
         let mut writer = PackageWriter::new();
         writer
-            .add("scenes/main.ron", b"(format: 1)".to_vec(), Compression::Stored)
+            .add(
+                "scenes/main.ron",
+                b"(format: 1)".to_vec(),
+                Compression::Stored,
+            )
             .expect("add stored");
         writer
             .add("assets/notes.txt", text.clone(), Compression::Deflated)
             .expect("add deflated");
         writer
-            .add("assets/levels/deep/level.ron", nested.clone(), Compression::Stored)
+            .add(
+                "assets/levels/deep/level.ron",
+                nested.clone(),
+                Compression::Stored,
+            )
             .expect("add nested");
         let archive = writer.finish(path).expect("finish");
 
@@ -769,14 +797,22 @@ mod tests {
         let names: Vec<&str> = package.entries().map(|entry| entry.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["scenes/main.ron", "assets/notes.txt", "assets/levels/deep/level.ron"]
+            vec![
+                "scenes/main.ron",
+                "assets/notes.txt",
+                "assets/levels/deep/level.ron"
+            ]
         );
         assert_eq!(
-            package.entry("scenes/main.ron").map(|entry| entry.compression),
+            package
+                .entry("scenes/main.ron")
+                .map(|entry| entry.compression),
             Some(Compression::Stored)
         );
         assert_eq!(
-            package.entry("assets/notes.txt").map(|entry| entry.compression),
+            package
+                .entry("assets/notes.txt")
+                .map(|entry| entry.compression),
             Some(Compression::Deflated)
         );
         assert_eq!(
@@ -784,7 +820,9 @@ mod tests {
             b"(format: 1)"
         );
         assert_eq!(
-            package.read_file("assets/notes.txt", path).expect("deflated"),
+            package
+                .read_file("assets/notes.txt", path)
+                .expect("deflated"),
             text
         );
         assert_eq!(
@@ -793,7 +831,13 @@ mod tests {
                 .expect("nested"),
             nested
         );
-        assert!(package.entry("assets/notes.txt").expect("entry").compressed_size < text.len() as u64);
+        assert!(
+            package
+                .entry("assets/notes.txt")
+                .expect("entry")
+                .compressed_size
+                < text.len() as u64
+        );
         assert_eq!(
             package.entry("assets/notes.txt").map(|entry| entry.crc32),
             Some(crc32(&text))
@@ -802,10 +846,14 @@ mod tests {
         // Byte ranges out of both kinds of entry: stored bytes are read
         // straight out of the archive, deflated bytes come from the one
         // verified inflate.
-        let stored = package.range_source("scenes/main.ron", path).expect("stored range");
+        let stored = package
+            .range_source("scenes/main.ron", path)
+            .expect("stored range");
         assert_eq!(stored.byte_len().expect("len"), 11);
         assert_eq!(stored.read_range(4, 5).expect("range"), b"mat: ");
-        let deflated = package.range_source("assets/notes.txt", path).expect("deflated range");
+        let deflated = package
+            .range_source("assets/notes.txt", path)
+            .expect("deflated range");
         assert_eq!(deflated.byte_len().expect("len"), text.len() as u64);
         assert_eq!(deflated.read_range(6, 14).expect("range"), &text[6..20]);
         assert_eq!(deflated.read_range(0, text.len()).expect("whole"), text);
@@ -821,7 +869,11 @@ mod tests {
             multi[eocd + field..eocd + field + 2].copy_from_slice(&1u16.to_le_bytes());
             let error = Package::read(multi, path).expect_err("multi-disk");
             assert!(error.is_unsupported(), "{error}");
-            assert!(error.message().contains("multi-disk"), "{}", error.message());
+            assert!(
+                error.message().contains("multi-disk"),
+                "{}",
+                error.message()
+            );
         }
 
         let directory = PckDirectory::from_package(&package);

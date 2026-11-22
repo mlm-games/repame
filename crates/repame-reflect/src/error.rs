@@ -69,7 +69,9 @@ impl fmt::Display for ReflectError {
             Self::AlreadyRegistered { name } => {
                 write!(f, "reflect component `{name}` is already registered")
             }
-            Self::NotRegistered { name } => write!(f, "reflect component `{name}` is not registered"),
+            Self::NotRegistered { name } => {
+                write!(f, "reflect component `{name}` is not registered")
+            }
             Self::MissingComponent { entity, name } => {
                 write!(f, "reflect entity {entity:?} has no component `{name}`")
             }

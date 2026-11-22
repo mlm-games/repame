@@ -45,7 +45,11 @@ pub trait NavVec: Copy + PartialEq + core::fmt::Debug + Send + Sync + 'static {
     /// Unit vector, or [`Self::ZERO`] when the length underflows.
     fn normalized(self) -> Self {
         let len = self.length();
-        if len > 1e-20 { self.mul(1.0 / len) } else { Self::ZERO }
+        if len > 1e-20 {
+            self.mul(1.0 / len)
+        } else {
+            Self::ZERO
+        }
     }
 }
 

@@ -335,7 +335,11 @@ impl NavMap {
         let mut registry = self.registry.borrow_mut();
         let frame = registry.frame;
         let key = requester_key(requester);
-        let rect = match registry.pending.iter().position(|pending| pending.key == key) {
+        let rect = match registry
+            .pending
+            .iter()
+            .position(|pending| pending.key == key)
+        {
             Some(index) => Some(registry.pending.remove(index).rect),
             None => None,
         };
@@ -406,7 +410,11 @@ impl NavMap {
         let frame = registry.frame;
         let Some(id) = *requester.target.borrow() else {
             let key = requester_key(requester);
-            match registry.pending.iter_mut().find(|pending| pending.key == key) {
+            match registry
+                .pending
+                .iter_mut()
+                .find(|pending| pending.key == key)
+            {
                 Some(pending) => pending.rect = rect,
                 None => {
                     if registry.pending.len() >= PENDING_CAP {
@@ -510,7 +518,11 @@ impl NavMap {
     /// would otherwise pin focus to an id nothing can request again.
     pub fn release(&self, id: u64) -> bool {
         let mut registry = self.registry.borrow_mut();
-        if registry.capture.as_ref().is_some_and(|capture| capture.id == id) {
+        if registry
+            .capture
+            .as_ref()
+            .is_some_and(|capture| capture.id == id)
+        {
             let capture = registry.capture.take();
             if let Some(capture) = capture {
                 capture.requester.free_focus();
@@ -579,7 +591,8 @@ impl NavMap {
                 NavStep::Moved(next)
             }
         };
-        if let Some(next) = spatial_focus_next(&chain, &regions, Some(current), dir.focus_direction())
+        if let Some(next) =
+            spatial_focus_next(&chain, &regions, Some(current), dir.focus_direction())
         {
             return step(next);
         }
@@ -590,7 +603,9 @@ impl NavMap {
         }
         match wrap {
             Wrap::Stay => NavStep::Edge,
-            Wrap::Cycle => self.wrapped(&entries, current, dir).map_or(NavStep::Edge, step),
+            Wrap::Cycle => self
+                .wrapped(&entries, current, dir)
+                .map_or(NavStep::Edge, step),
         }
     }
 
@@ -628,14 +643,20 @@ impl NavMap {
     fn span(&self, entries: &[NavEntry], axis: Axis) -> f32 {
         let (min, max) = match axis {
             Axis::X => (
-                entries.iter().map(|entry| entry.rect.x).fold(f32::INFINITY, f32::min),
+                entries
+                    .iter()
+                    .map(|entry| entry.rect.x)
+                    .fold(f32::INFINITY, f32::min),
                 entries
                     .iter()
                     .map(|entry| entry.rect.x + entry.rect.w)
                     .fold(f32::NEG_INFINITY, f32::max),
             ),
             Axis::Y => (
-                entries.iter().map(|entry| entry.rect.y).fold(f32::INFINITY, f32::min),
+                entries
+                    .iter()
+                    .map(|entry| entry.rect.y)
+                    .fold(f32::INFINITY, f32::min),
                 entries
                     .iter()
                     .map(|entry| entry.rect.y + entry.rect.h)
@@ -847,9 +868,17 @@ fn direction_of(stick: Vec2, threshold: f32) -> Option<NavDir> {
         return None;
     }
     if stick.x.abs() >= stick.y.abs() {
-        Some(if stick.x > 0.0 { NavDir::Right } else { NavDir::Left })
+        Some(if stick.x > 0.0 {
+            NavDir::Right
+        } else {
+            NavDir::Left
+        })
     } else {
-        Some(if stick.y > 0.0 { NavDir::Down } else { NavDir::Up })
+        Some(if stick.y > 0.0 {
+            NavDir::Down
+        } else {
+            NavDir::Up
+        })
     }
 }
 
@@ -888,8 +917,12 @@ pub fn chain_of(map: &NavMap) -> Vec<u64> {
 /// Whether `id` is inside the same focus group as `anchor`.
 pub fn same_group(map: &NavMap, anchor: u64, id: u64) -> bool {
     let entries = map.active();
-    let group_of =
-        |id: u64| entries.iter().find(|entry| entry.id == id).and_then(NavEntry::group);
+    let group_of = |id: u64| {
+        entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .and_then(NavEntry::group)
+    };
     match (group_of(anchor), group_of(id)) {
         (Some(a), Some(b)) => a == b,
         _ => false,
@@ -964,9 +997,18 @@ mod tests {
     #[test]
     fn nothing_focused_enters_at_the_first_control() {
         let map = grid();
-        assert_eq!(map.resolve(None, NavDir::Right, Wrap::Stay), NavStep::Entered(1));
-        assert_eq!(map.resolve(None, NavDir::Next, Wrap::Stay), NavStep::Entered(1));
-        assert_eq!(map.resolve(None, NavDir::Up, Wrap::Stay), NavStep::Entered(1));
+        assert_eq!(
+            map.resolve(None, NavDir::Right, Wrap::Stay),
+            NavStep::Entered(1)
+        );
+        assert_eq!(
+            map.resolve(None, NavDir::Next, Wrap::Stay),
+            NavStep::Entered(1)
+        );
+        assert_eq!(
+            map.resolve(None, NavDir::Up, Wrap::Stay),
+            NavStep::Entered(1)
+        );
     }
 
     #[test]
@@ -983,42 +1025,96 @@ mod tests {
     #[test]
     fn spatial_moves_follow_the_layout() {
         let map = grid();
-        assert_eq!(map.resolve(Some(1), NavDir::Right, Wrap::Stay), NavStep::Moved(2));
-        assert_eq!(map.resolve(Some(2), NavDir::Right, Wrap::Stay), NavStep::Moved(3));
-        assert_eq!(map.resolve(Some(1), NavDir::Down, Wrap::Stay), NavStep::Moved(11));
-        assert_eq!(map.resolve(Some(12), NavDir::Up, Wrap::Stay), NavStep::Moved(2));
-        assert_eq!(map.resolve(Some(3), NavDir::Left, Wrap::Stay), NavStep::Moved(2));
-        assert_eq!(map.resolve(Some(11), NavDir::Right, Wrap::Stay), NavStep::Moved(12));
+        assert_eq!(
+            map.resolve(Some(1), NavDir::Right, Wrap::Stay),
+            NavStep::Moved(2)
+        );
+        assert_eq!(
+            map.resolve(Some(2), NavDir::Right, Wrap::Stay),
+            NavStep::Moved(3)
+        );
+        assert_eq!(
+            map.resolve(Some(1), NavDir::Down, Wrap::Stay),
+            NavStep::Moved(11)
+        );
+        assert_eq!(
+            map.resolve(Some(12), NavDir::Up, Wrap::Stay),
+            NavStep::Moved(2)
+        );
+        assert_eq!(
+            map.resolve(Some(3), NavDir::Left, Wrap::Stay),
+            NavStep::Moved(2)
+        );
+        assert_eq!(
+            map.resolve(Some(11), NavDir::Right, Wrap::Stay),
+            NavStep::Moved(12)
+        );
     }
 
     #[test]
     fn the_layout_edge_stays_put_when_wrap_is_stay() {
         let map = grid();
-        assert_eq!(map.resolve(Some(3), NavDir::Right, Wrap::Stay), NavStep::Edge);
-        assert_eq!(map.resolve(Some(1), NavDir::Left, Wrap::Stay), NavStep::Edge);
+        assert_eq!(
+            map.resolve(Some(3), NavDir::Right, Wrap::Stay),
+            NavStep::Edge
+        );
+        assert_eq!(
+            map.resolve(Some(1), NavDir::Left, Wrap::Stay),
+            NavStep::Edge
+        );
         assert_eq!(map.resolve(Some(1), NavDir::Up, Wrap::Stay), NavStep::Edge);
-        assert_eq!(map.resolve(Some(11), NavDir::Down, Wrap::Stay), NavStep::Edge);
+        assert_eq!(
+            map.resolve(Some(11), NavDir::Down, Wrap::Stay),
+            NavStep::Edge
+        );
     }
 
     #[test]
     fn horizontal_wrap_stays_in_the_nearest_row() {
         let map = grid();
-        assert_eq!(map.resolve(Some(3), NavDir::Right, Wrap::Cycle), NavStep::Moved(1));
-        assert_eq!(map.resolve(Some(1), NavDir::Left, Wrap::Cycle), NavStep::Moved(3));
-        assert_eq!(map.resolve(Some(13), NavDir::Right, Wrap::Cycle), NavStep::Moved(11));
-        assert_eq!(map.resolve(Some(11), NavDir::Left, Wrap::Cycle), NavStep::Moved(13));
+        assert_eq!(
+            map.resolve(Some(3), NavDir::Right, Wrap::Cycle),
+            NavStep::Moved(1)
+        );
+        assert_eq!(
+            map.resolve(Some(1), NavDir::Left, Wrap::Cycle),
+            NavStep::Moved(3)
+        );
+        assert_eq!(
+            map.resolve(Some(13), NavDir::Right, Wrap::Cycle),
+            NavStep::Moved(11)
+        );
+        assert_eq!(
+            map.resolve(Some(11), NavDir::Left, Wrap::Cycle),
+            NavStep::Moved(13)
+        );
         // From the middle of a row the wrapped pass is not reached: the
         // neighbours are there.
-        assert_eq!(map.resolve(Some(2), NavDir::Left, Wrap::Cycle), NavStep::Moved(1));
+        assert_eq!(
+            map.resolve(Some(2), NavDir::Left, Wrap::Cycle),
+            NavStep::Moved(1)
+        );
     }
 
     #[test]
     fn vertical_wrap_stays_in_the_column() {
         let map = grid();
-        assert_eq!(map.resolve(Some(1), NavDir::Up, Wrap::Cycle), NavStep::Moved(11));
-        assert_eq!(map.resolve(Some(11), NavDir::Down, Wrap::Cycle), NavStep::Moved(1));
-        assert_eq!(map.resolve(Some(13), NavDir::Down, Wrap::Cycle), NavStep::Moved(3));
-        assert_eq!(map.resolve(Some(3), NavDir::Up, Wrap::Cycle), NavStep::Moved(13));
+        assert_eq!(
+            map.resolve(Some(1), NavDir::Up, Wrap::Cycle),
+            NavStep::Moved(11)
+        );
+        assert_eq!(
+            map.resolve(Some(11), NavDir::Down, Wrap::Cycle),
+            NavStep::Moved(1)
+        );
+        assert_eq!(
+            map.resolve(Some(13), NavDir::Down, Wrap::Cycle),
+            NavStep::Moved(3)
+        );
+        assert_eq!(
+            map.resolve(Some(3), NavDir::Up, Wrap::Cycle),
+            NavStep::Moved(13)
+        );
     }
 
     #[test]
@@ -1028,20 +1124,53 @@ mod tests {
         let requester = FocusRequester::new();
         *requester.target.borrow_mut() = Some(7);
         map.mark(7, None, requester.clone());
-        map.place(&requester, Rect { x: 0.0, y: 0.0, w: 100.0, h: 40.0 }, None);
-        assert_eq!(map.resolve(Some(7), NavDir::Right, Wrap::Cycle), NavStep::Edge);
-        assert_eq!(map.resolve(Some(7), NavDir::Down, Wrap::Cycle), NavStep::Edge);
-        assert_eq!(map.resolve(Some(7), NavDir::Next, Wrap::Cycle), NavStep::Edge);
-        assert_eq!(map.resolve(Some(7), NavDir::Previous, Wrap::Cycle), NavStep::Edge);
+        map.place(
+            &requester,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 40.0,
+            },
+            None,
+        );
+        assert_eq!(
+            map.resolve(Some(7), NavDir::Right, Wrap::Cycle),
+            NavStep::Edge
+        );
+        assert_eq!(
+            map.resolve(Some(7), NavDir::Down, Wrap::Cycle),
+            NavStep::Edge
+        );
+        assert_eq!(
+            map.resolve(Some(7), NavDir::Next, Wrap::Cycle),
+            NavStep::Edge
+        );
+        assert_eq!(
+            map.resolve(Some(7), NavDir::Previous, Wrap::Cycle),
+            NavStep::Edge
+        );
     }
 
     #[test]
     fn chain_order_wraps_for_tab_and_shift_tab() {
         let map = grid();
-        assert_eq!(map.resolve(Some(1), NavDir::Next, Wrap::Stay), NavStep::Moved(2));
-        assert_eq!(map.resolve(Some(13), NavDir::Next, Wrap::Stay), NavStep::Moved(1));
-        assert_eq!(map.resolve(Some(1), NavDir::Previous, Wrap::Stay), NavStep::Moved(13));
-        assert_eq!(map.resolve(Some(2), NavDir::Previous, Wrap::Stay), NavStep::Moved(1));
+        assert_eq!(
+            map.resolve(Some(1), NavDir::Next, Wrap::Stay),
+            NavStep::Moved(2)
+        );
+        assert_eq!(
+            map.resolve(Some(13), NavDir::Next, Wrap::Stay),
+            NavStep::Moved(1)
+        );
+        assert_eq!(
+            map.resolve(Some(1), NavDir::Previous, Wrap::Stay),
+            NavStep::Moved(13)
+        );
+        assert_eq!(
+            map.resolve(Some(2), NavDir::Previous, Wrap::Stay),
+            NavStep::Moved(1)
+        );
     }
 
     #[test]
@@ -1058,15 +1187,30 @@ mod tests {
             let requester = FocusRequester::new();
             *requester.target.borrow_mut() = Some(id);
             map.mark(id, group, requester.clone());
-            map.place(&requester, Rect { x, y: 0.0, w: 200.0, h: 100.0 }, group);
+            map.place(
+                &requester,
+                Rect {
+                    x,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 100.0,
+                },
+                group,
+            );
         }
-        assert_eq!(map.resolve(Some(2), NavDir::Right, Wrap::Stay), NavStep::Moved(3));
+        assert_eq!(
+            map.resolve(Some(2), NavDir::Right, Wrap::Stay),
+            NavStep::Moved(3)
+        );
         assert_eq!(
             map.resolve(Some(3), NavDir::Right, Wrap::Stay),
             NavStep::Edge,
             "focus does not escape the modal group"
         );
-        assert_eq!(map.resolve(Some(3), NavDir::Next, Wrap::Stay), NavStep::Moved(2));
+        assert_eq!(
+            map.resolve(Some(3), NavDir::Next, Wrap::Stay),
+            NavStep::Moved(2)
+        );
         assert!(same_group(&map, 2, 3));
         assert!(!same_group(&map, 1, 2));
     }
@@ -1080,8 +1224,20 @@ mod tests {
         let requester = FocusRequester::new();
         *requester.target.borrow_mut() = Some(50);
         map.mark(50, None, requester.clone());
-        map.place(&requester, Rect { x: 0.0, y: 0.0, w: 40.0, h: 40.0 }, None);
-        assert!(ids(&map).contains(&1), "the previous layout is still resolvable");
+        map.place(
+            &requester,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 40.0,
+                h: 40.0,
+            },
+            None,
+        );
+        assert!(
+            ids(&map).contains(&1),
+            "the previous layout is still resolvable"
+        );
 
         // A frame later the grid is two frames old and leaves the map.
         map.begin_frame();
@@ -1110,7 +1266,16 @@ mod tests {
         map.begin_frame();
         let requester = FocusRequester::new();
         assert!(!map.register(&requester, None), "no view id yet");
-        assert!(!map.place(&requester, Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }, None));
+        assert!(!map.place(
+            &requester,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 10.0
+            },
+            None
+        ));
         assert!(map.is_empty(), "an unbound rectangle is not a control yet");
     }
 
@@ -1118,7 +1283,12 @@ mod tests {
     fn the_first_rectangle_is_bound_when_the_view_id_arrives() {
         let map = NavMap::new();
         let requester = FocusRequester::new();
-        let rect = Rect { x: 30.0, y: 40.0, w: 200.0, h: 60.0 };
+        let rect = Rect {
+            x: 30.0,
+            y: 40.0,
+            w: 200.0,
+            h: 60.0,
+        };
 
         // Frame 1: layout reports the rectangle before paint assigns the id.
         map.begin_frame();
@@ -1138,7 +1308,12 @@ mod tests {
         map.begin_frame();
         assert!(map.register(&requester, None));
         assert_eq!(map.active()[0].rect(), rect);
-        let moved = Rect { x: 60.0, y: 40.0, w: 200.0, h: 60.0 };
+        let moved = Rect {
+            x: 60.0,
+            y: 40.0,
+            w: 200.0,
+            h: 60.0,
+        };
         assert!(map.place(&requester, moved, None));
         assert_eq!(map.active()[0].rect(), moved);
     }
@@ -1147,7 +1322,12 @@ mod tests {
     fn a_pending_rectangle_survives_the_frames_a_panel_skips() {
         let map = NavMap::new();
         let requester = FocusRequester::new();
-        let rect = Rect { x: 10.0, y: 20.0, w: 30.0, h: 40.0 };
+        let rect = Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 30.0,
+            h: 40.0,
+        };
         map.begin_frame();
         assert!(!map.place(&requester, rect, None));
         // Two frames without the control, then its id: the rectangle observed
@@ -1169,7 +1349,16 @@ mod tests {
         let requester = FocusRequester::new();
         *requester.target.borrow_mut() = Some(5);
         map.mark(5, Some(pause), requester.clone());
-        map.place(&requester, Rect { x: 0.0, y: 0.0, w: 200.0, h: 40.0 }, None);
+        map.place(
+            &requester,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 40.0,
+            },
+            None,
+        );
         assert_eq!(
             map.active()[0].group(),
             Some(pause),
@@ -1196,7 +1385,10 @@ mod tests {
         drain_requests();
         let map = grid();
         assert!(map.capture(2));
-        assert_eq!(map.resolve(Some(2), NavDir::Left, Wrap::Stay), NavStep::Moved(1));
+        assert_eq!(
+            map.resolve(Some(2), NavDir::Left, Wrap::Stay),
+            NavStep::Moved(1)
+        );
         let driver = NavDriver::new(map.clone());
         assert_eq!(
             driver.drive(&scheduler_focused_on(2), NavDir::Left),
@@ -1215,7 +1407,16 @@ mod tests {
         let modal = FocusRequester::new();
         *modal.target.borrow_mut() = Some(2);
         map.mark(2, None, modal.clone());
-        map.place(&modal, Rect { x: 0.0, y: 0.0, w: 200.0, h: 40.0 }, None);
+        map.place(
+            &modal,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 40.0,
+            },
+            None,
+        );
         assert!(map.capture(2));
         assert_eq!(repose_core::runtime::focus_capture(), Some(2));
 
@@ -1242,7 +1443,16 @@ mod tests {
         let modal = FocusRequester::new();
         *modal.target.borrow_mut() = Some(2);
         map.mark(2, None, modal.clone());
-        map.place(&modal, Rect { x: 0.0, y: 0.0, w: 200.0, h: 40.0 }, None);
+        map.place(
+            &modal,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 40.0,
+            },
+            None,
+        );
         assert!(map.capture(2));
 
         map.begin_frame();
@@ -1250,7 +1460,16 @@ mod tests {
         let menu = FocusRequester::new();
         *menu.target.borrow_mut() = Some(7);
         map.mark(7, None, menu.clone());
-        map.place(&menu, Rect { x: 300.0, y: 0.0, w: 200.0, h: 40.0 }, None);
+        map.place(
+            &menu,
+            Rect {
+                x: 300.0,
+                y: 0.0,
+                w: 200.0,
+                h: 40.0,
+            },
+            None,
+        );
 
         // The pause menu asks for focus: without clearing the stale lock every
         // request would be refused Held for the rest of the session.
@@ -1298,8 +1517,16 @@ mod tests {
     fn stick_nav_ignores_rest_and_small_deflection() {
         let mut nav = StickNav::new();
         assert_eq!(nav.step(Vec2::ZERO, 0.1), None);
-        assert_eq!(nav.step(Vec2::new(0.15, 0.0), 0.1), None, "inside the dead zone");
-        assert_eq!(nav.step(Vec2::new(0.35, 0.0), 0.1), None, "below the press threshold");
+        assert_eq!(
+            nav.step(Vec2::new(0.15, 0.0), 0.1),
+            None,
+            "inside the dead zone"
+        );
+        assert_eq!(
+            nav.step(Vec2::new(0.35, 0.0), 0.1),
+            None,
+            "below the press threshold"
+        );
         assert_eq!(nav.held(), None);
     }
 
@@ -1407,7 +1634,10 @@ mod tests {
                 ..HitRegion::default()
             })
             .collect();
-        assert_eq!(resolve_in(&chain, &regions, Some(1), NavDir::Right), Some(2));
+        assert_eq!(
+            resolve_in(&chain, &regions, Some(1), NavDir::Right),
+            Some(2)
+        );
         assert_eq!(chain_step(&chain, Some(1), NavDir::Next), Some(2));
         assert_eq!(chain_step(&chain, Some(3), NavDir::Next), Some(1));
         assert_eq!(chain_step(&[], Some(1), NavDir::Next), None);

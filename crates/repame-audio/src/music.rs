@@ -451,7 +451,8 @@ impl Music {
     }
 
     /// Hard stop with a fade-out. Also cancels a deferred play.
-    pub fn stop(&mut self, fade_secs: f32) {        self.desired = None;
+    pub fn stop(&mut self, fade_secs: f32) {
+        self.desired = None;
         if let (Some(tx), Some(old)) = (&self.tx, self.current.take()) {
             for (voice, _) in old.voices {
                 let _ = tx.send_spin(RealtimeCommand::Fade {
@@ -514,11 +515,7 @@ impl Music {
                 },
                 DecodeDone::TrackFailed { name, error } => {
                     self.pending.remove(&name);
-                    if self
-                        .desired
-                        .as_ref()
-                        .is_some_and(|(n, _, _)| n == &name)
-                    {
+                    if self.desired.as_ref().is_some_and(|(n, _, _)| n == &name) {
                         self.desired = None;
                     }
                     log::warn!("music track `{name}` failed to load: {error}");

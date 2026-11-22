@@ -161,9 +161,12 @@ fn validate_path(value: &str) -> Result<(), String> {
         return Err("content path is empty".to_string());
     }
     if value.chars().any(char::is_control) {
-        return Err(format!("content path `{value}` contains a control character"));
+        return Err(format!(
+            "content path `{value}` contains a control character"
+        ));
     }
-    if value.starts_with('/') || value.ends_with('/') || value.contains('\\') || value.contains(':') {
+    if value.starts_with('/') || value.ends_with('/') || value.contains('\\') || value.contains(':')
+    {
         return Err(format!(
             "content path `{value}` must be relative and use `/` separators"
         ));
@@ -222,7 +225,8 @@ impl std::str::FromStr for AssetPath {
 impl<'de> Deserialize<'de> for AssetPath {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
-        Self::parse(&value).map_err(|error| de::Error::custom(format!("{}: {}", value, error.message())))
+        Self::parse(&value)
+            .map_err(|error| de::Error::custom(format!("{}: {}", value, error.message())))
     }
 }
 
@@ -376,8 +380,9 @@ impl ContentManifest {
     /// Serialize for writing: pretty RON plus a trailing newline, byte-stable
     /// for the same entries.
     pub fn to_ron(&self) -> Result<String, ContentError> {
-        let mut text = ron::ser::to_string_pretty(self, Default::default())
-            .map_err(|error| ContentError::format(ASSET_MANIFEST_FILE, format!("serialize manifest: {error}")))?;
+        let mut text = ron::ser::to_string_pretty(self, Default::default()).map_err(|error| {
+            ContentError::format(ASSET_MANIFEST_FILE, format!("serialize manifest: {error}"))
+        })?;
         text.push('\n');
         Ok(text)
     }
@@ -420,7 +425,10 @@ impl ContentManifest {
                     if self.entries[index - 1].path == entry.path {
                         format!("manifest repeats entry `{}`", entry.path)
                     } else {
-                        format!("manifest entries are not sorted by path at `{}`", entry.path)
+                        format!(
+                            "manifest entries are not sorted by path at `{}`",
+                            entry.path
+                        )
                     },
                 ));
             }
@@ -573,7 +581,12 @@ impl AtlasPlan {
                 .entries
                 .iter()
                 .filter(|entry| entry.kind == AssetKind::Image)
-                .filter(|entry| entry.image.as_ref().is_some_and(|image| !image.is_texture()))
+                .filter(|entry| {
+                    entry
+                        .image
+                        .as_ref()
+                        .is_some_and(|image| !image.is_texture())
+                })
                 .map(|entry| entry.path.clone())
                 .collect(),
             AtlasSelection::Sprites(paths) => paths.clone(),
@@ -623,10 +636,9 @@ impl AtlasPlan {
                             desc.max_pages
                         ),
                     ),
-                    AllocError::Duplicate => ContentError::new(
-                        path.as_str(),
-                        "atlas plan lists a sprite twice",
-                    ),
+                    AllocError::Duplicate => {
+                        ContentError::new(path.as_str(), "atlas plan lists a sprite twice")
+                    }
                 })?;
         }
 
@@ -652,7 +664,12 @@ impl AtlasPlan {
                 y: write.y,
                 w: write.w,
                 h: write.h,
-                uv: [write.uv.min[0], write.uv.min[1], write.uv.max[0], write.uv.max[1]],
+                uv: [
+                    write.uv.min[0],
+                    write.uv.min[1],
+                    write.uv.max[0],
+                    write.uv.max[1],
+                ],
             })
             .collect();
         Ok(Self {
@@ -729,8 +746,14 @@ impl AtlasPlan {
             }
             if sprite.w == 0
                 || sprite.h == 0
-                || sprite.x.checked_add(sprite.w).is_none_or(|end| end > self.page_size)
-                || sprite.y.checked_add(sprite.h).is_none_or(|end| end > self.page_size)
+                || sprite
+                    .x
+                    .checked_add(sprite.w)
+                    .is_none_or(|end| end > self.page_size)
+                || sprite
+                    .y
+                    .checked_add(sprite.h)
+                    .is_none_or(|end| end > self.page_size)
             {
                 return Err(ContentError::format(
                     source,
@@ -768,7 +791,10 @@ impl AtlasPlan {
                 (sprite.x + sprite.w) as f32 / scale,
                 (sprite.y + sprite.h) as f32 / scale,
             ];
-            if !sprite.uv.iter().all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+            if !sprite
+                .uv
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
                 || sprite
                     .uv
                     .iter()
@@ -777,12 +803,17 @@ impl AtlasPlan {
             {
                 return Err(ContentError::format(
                     source,
-                    format!("atlas placement `{}` has UVs that leave its rect", sprite.path),
+                    format!(
+                        "atlas placement `{}` has UVs that leave its rect",
+                        sprite.path
+                    ),
                 ));
             }
-            rows.entry((sprite.page, sprite.y))
-                .or_default()
-                .push((sprite.x, sprite.x + sprite.w, &sprite.path));
+            rows.entry((sprite.page, sprite.y)).or_default().push((
+                sprite.x,
+                sprite.x + sprite.w,
+                &sprite.path,
+            ));
         }
         for ((page, y), mut row) in rows {
             row.sort_by_key(|entry| entry.0);
@@ -822,7 +853,10 @@ mod tests {
             assert!(AssetPath::parse(bad).is_err(), "`{bad}` must be refused");
         }
         let path = AssetPath::parse("gfx/ui/cursor.png").expect("valid");
-        assert_eq!(path.dev_path("root").to_string_lossy(), "root/gfx/ui/cursor.png");
+        assert_eq!(
+            path.dev_path("root").to_string_lossy(),
+            "root/gfx/ui/cursor.png"
+        );
         assert_eq!(path.entry_name(), path.as_str());
         assert_eq!(path.file_name(), Some("cursor.png"));
         assert_eq!(path.extension().as_deref(), Some("png"));

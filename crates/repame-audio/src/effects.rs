@@ -231,7 +231,9 @@ impl EffectSpec {
 
     fn prepare(&self, rate: u32) -> EffectDsp {
         match *self {
-            Self::Gain { db } => EffectDsp::Gain(GainDsp { lin: db_to_linear(db) }),
+            Self::Gain { db } => EffectDsp::Gain(GainDsp {
+                lin: db_to_linear(db),
+            }),
             Self::Filter { .. } => EffectDsp::Filter(FilterDsp::new(self, rate)),
             Self::Delay { .. } => EffectDsp::Delay(DelayDsp::new(self, rate)),
             Self::Reverb { .. } => EffectDsp::Reverb(ReverbDsp::new(self, rate)),

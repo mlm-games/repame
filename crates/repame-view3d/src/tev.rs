@@ -6,8 +6,8 @@
 //! emitting it in WGSL.
 
 use crate::material::{
-    AlphaCompare, AlphaTest, AlphaTestOp, FogCurve, KColors, Light, MaterialFog, Rgba, ShadingModel,
-    TevArg, TevBias, TevDest, TevOp, TevScale, TevStage,
+    AlphaCompare, AlphaTest, AlphaTestOp, FogCurve, KColors, Light, MaterialFog, Rgba,
+    ShadingModel, TevArg, TevBias, TevDest, TevOp, TevScale, TevStage,
 };
 
 /// Sampled texel for one texture unit.
@@ -628,10 +628,7 @@ mod tests {
         assert_eq!(out[3], 0.25, "ras_sel must pick the raster green");
 
         let wgsl = wgsl_program(&model);
-        assert!(
-            wgsl.contains("lit_in.g"),
-            "swap must re-point RASA: {wgsl}"
-        );
+        assert!(wgsl.contains("lit_in.g"), "swap must re-point RASA: {wgsl}");
     }
 
     /// `A0`/`A1`/`A2` read an output register's alpha into the color channel.
@@ -642,7 +639,12 @@ mod tests {
         writer.alpha_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::One];
         writer.alpha_dest = TevDest::Reg0;
         let mut reader = TevStage::with_mode(0, TevMode::Modulate);
-        reader.color_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::RegAlpha(0)];
+        reader.color_arg = [
+            TevArg::Zero,
+            TevArg::Zero,
+            TevArg::Zero,
+            TevArg::RegAlpha(0),
+        ];
         model.stages = vec![writer, reader];
 
         let out = evaluate_stages(&model, [0.5, 0.5, 0.5, 0.5], &[]);

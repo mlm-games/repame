@@ -48,9 +48,15 @@ impl BlockCodec for Bc3 {
     }
 
     fn decode_block(&self, block: &[u8]) -> Result<[[u8; 4]; 16], ContentError> {
-        let alpha = alpha_block(block.get(0..8).ok_or_else(|| short_block("bc3", 16, block.len()))?)?;
+        let alpha = alpha_block(
+            block
+                .get(0..8)
+                .ok_or_else(|| short_block("bc3", 16, block.len()))?,
+        )?;
         let (c0, c1, indices) = color_block(
-            block.get(8..16).ok_or_else(|| short_block("bc3", 16, block.len()))?,
+            block
+                .get(8..16)
+                .ok_or_else(|| short_block("bc3", 16, block.len()))?,
         )?;
         let palette = color_palette(c0, c1, true);
         let colors = expand_indices(&palette, indices);
@@ -73,7 +79,11 @@ impl BlockCodec for Bc4 {
     }
 
     fn decode_block(&self, block: &[u8]) -> Result<[[u8; 4]; 16], ContentError> {
-        let alpha = alpha_block(block.get(0..8).ok_or_else(|| short_block("bc4", 8, block.len()))?)?;
+        let alpha = alpha_block(
+            block
+                .get(0..8)
+                .ok_or_else(|| short_block("bc4", 8, block.len()))?,
+        )?;
         let mut texels = [[0u8; 4]; 16];
         for (index, texel) in texels.iter_mut().enumerate() {
             let value = alpha[index];
@@ -97,8 +107,16 @@ impl BlockCodec for Bc5 {
     }
 
     fn decode_block(&self, block: &[u8]) -> Result<[[u8; 4]; 16], ContentError> {
-        let r = alpha_block(block.get(0..8).ok_or_else(|| short_block("bc5", 16, block.len()))?)?;
-        let g = alpha_block(block.get(8..16).ok_or_else(|| short_block("bc5", 16, block.len()))?)?;
+        let r = alpha_block(
+            block
+                .get(0..8)
+                .ok_or_else(|| short_block("bc5", 16, block.len()))?,
+        )?;
+        let g = alpha_block(
+            block
+                .get(8..16)
+                .ok_or_else(|| short_block("bc5", 16, block.len()))?,
+        )?;
         let mut texels = [[0u8; 4]; 16];
         for (index, texel) in texels.iter_mut().enumerate() {
             *texel = [r[index], g[index], 0, 255];

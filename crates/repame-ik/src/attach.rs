@@ -106,11 +106,19 @@ mod tests {
         locals.insert(0, root);
 
         let muzzle = BoneAttachment::translated(1, Vec3::new(1.0, 0.0, 0.0));
-        let point = muzzle.point(&skeleton, &locals, Vec3::ZERO).expect("resolves");
-        assert!(point.distance(Vec3::new(-2.0, 2.0, 0.0)) < 1e-4, "{point:?}");
+        let point = muzzle
+            .point(&skeleton, &locals, Vec3::ZERO)
+            .expect("resolves");
+        assert!(
+            point.distance(Vec3::new(-2.0, 2.0, 0.0)) < 1e-4,
+            "{point:?}"
+        );
         let forward = muzzle
             .direction(&skeleton, &locals, Vec3::Y)
             .expect("resolves");
-        assert!(forward.distance(Vec3::new(-1.0, 0.0, 0.0)) < 1e-4, "{forward:?}");
+        assert!(
+            forward.distance(Vec3::new(-1.0, 0.0, 0.0)) < 1e-4,
+            "{forward:?}"
+        );
     }
 }

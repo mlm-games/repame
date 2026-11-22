@@ -46,7 +46,9 @@ impl Audio {
         let mut music = Music::new();
         music.attach(game.tx.clone(), game.state.clone());
         let tree = BusTree::new();
-        let _ = game.tx.send_spin(RealtimeCommand::SetBusTree(Arc::new(tree.clone())));
+        let _ = game
+            .tx
+            .send_spin(RealtimeCommand::SetBusTree(Arc::new(tree.clone())));
         Ok(Self {
             link: Some(game),
             engine: Some(engine),
@@ -454,7 +456,9 @@ impl Audio {
     /// and commands the audio thread.
     pub fn set_channel(&mut self, channel: AudioChannel, gain: f32) {
         self.channels.set(channel, gain);
-        let _ = self.tree.set_gain(BusId::channel(channel), self.channels.get(channel));
+        let _ = self
+            .tree
+            .set_gain(BusId::channel(channel), self.channels.get(channel));
         if let Some(link) = &self.link {
             let _ = link.tx.send_spin(RealtimeCommand::SetBus {
                 bus: channel,
@@ -507,10 +511,7 @@ mod tests {
         audio
             .set_bus_effects(
                 sfx,
-                vec![
-                    EffectSpec::low_pass(4000.0, 2),
-                    EffectSpec::limiter(-1.0),
-                ],
+                vec![EffectSpec::low_pass(4000.0, 2), EffectSpec::limiter(-1.0)],
             )
             .expect("effects");
         assert_eq!(audio.bus_tree().effects(sfx).len(), 2);

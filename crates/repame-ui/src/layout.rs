@@ -12,8 +12,8 @@
 //! clamped into the viewport. The left edge is not clamped, matching the copies,
 //! so an off-screen panel stays off-screen.
 
-use repose_core::prelude::{Color, Modifier, View};
 use repose_core::Dp;
+use repose_core::prelude::{Color, Modifier, View};
 use repose_ui::{Box as RBox, Spacer, ViewExt as _};
 
 /// The design box the template line draws at (960 x 540, 16:9).
@@ -244,14 +244,26 @@ mod tests {
 
     #[test]
     fn a_zero_sized_viewport_is_rejected_until_it_is_measured() {
-        assert_eq!(Scale::new([0.0, 720.0], DESIGN), Err(ScaleError::NotPositive));
-        assert_eq!(Scale::new([1280.0, -1.0], DESIGN), Err(ScaleError::NotPositive));
-        assert_eq!(Scale::new([1280.0, 720.0], [960.0, 0.0]), Err(ScaleError::NotPositive));
+        assert_eq!(
+            Scale::new([0.0, 720.0], DESIGN),
+            Err(ScaleError::NotPositive)
+        );
+        assert_eq!(
+            Scale::new([1280.0, -1.0], DESIGN),
+            Err(ScaleError::NotPositive)
+        );
+        assert_eq!(
+            Scale::new([1280.0, 720.0], [960.0, 0.0]),
+            Err(ScaleError::NotPositive)
+        );
     }
 
     #[test]
     fn a_non_finite_viewport_is_rejected() {
-        assert_eq!(Scale::new([f32::NAN, 720.0], DESIGN), Err(ScaleError::NotFinite));
+        assert_eq!(
+            Scale::new([f32::NAN, 720.0], DESIGN),
+            Err(ScaleError::NotFinite)
+        );
         assert_eq!(
             Scale::new([1280.0, 720.0], [f32::INFINITY, 540.0]),
             Err(ScaleError::NotFinite)
@@ -260,7 +272,12 @@ mod tests {
 
     #[test]
     fn anchor_edges_follow_the_viewport_fractions_and_offsets() {
-        let edges = anchor_edges([1000.0, 500.0], 2.0, [0.5, 0.5, 0.5, 0.5], [-100.0, -50.0, 100.0, 50.0]);
+        let edges = anchor_edges(
+            [1000.0, 500.0],
+            2.0,
+            [0.5, 0.5, 0.5, 0.5],
+            [-100.0, -50.0, 100.0, 50.0],
+        );
         assert_eq!(edges.left, 500.0 - 200.0);
         assert_eq!(edges.top, 250.0 - 100.0);
         assert_eq!(edges.right, 1000.0 - 700.0);
@@ -269,8 +286,16 @@ mod tests {
 
     #[test]
     fn right_and_bottom_edges_clamp_into_the_viewport_left_does_not() {
-        let edges = anchor_edges([1000.0, 500.0], 1.0, [0.0, 0.0, 2.0, 2.0], [-40.0, 0.0, 0.0, 0.0]);
-        assert_eq!(edges.left, -40.0, "an off-screen left edge stays off-screen");
+        let edges = anchor_edges(
+            [1000.0, 500.0],
+            1.0,
+            [0.0, 0.0, 2.0, 2.0],
+            [-40.0, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            edges.left, -40.0,
+            "an off-screen left edge stays off-screen"
+        );
         assert_eq!(edges.right, 0.0);
         assert_eq!(edges.bottom, 0.0);
     }

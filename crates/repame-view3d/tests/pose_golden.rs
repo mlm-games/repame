@@ -39,8 +39,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use glam::{Vec3, Vec4};
-use repame_view3d::render::{BatchDesc, SceneFilter};
 use repame_view3d::render::TonemapMethod;
+use repame_view3d::render::{BatchDesc, SceneFilter};
 use repame_view3d::{Frame3d, GeomHandle, MeshGroup, OrbitCamera, SceneLight, Viewport3d};
 use repose_core::RenderContext;
 use repose_render_wgpu::apply_render_commands;
@@ -113,27 +113,57 @@ fn push_box(g: &mut MeshGroup, centre: Vec3, half: Vec3, colour: [f32; 3]) {
     // from outside, outward normal).
     let faces: [([Vec3; 4], Vec3); 6] = [
         (
-            [v(-1., 1., 1.), v(1., 1., 1.), v(1., 1., -1.), v(-1., 1., -1.)],
+            [
+                v(-1., 1., 1.),
+                v(1., 1., 1.),
+                v(1., 1., -1.),
+                v(-1., 1., -1.),
+            ],
             Vec3::Y,
         ),
         (
-            [v(-1., -1., -1.), v(1., -1., -1.), v(1., -1., 1.), v(-1., -1., 1.)],
+            [
+                v(-1., -1., -1.),
+                v(1., -1., -1.),
+                v(1., -1., 1.),
+                v(-1., -1., 1.),
+            ],
             -Vec3::Y,
         ),
         (
-            [v(1., -1., 1.), v(1., -1., -1.), v(1., 1., -1.), v(1., 1., 1.)],
+            [
+                v(1., -1., 1.),
+                v(1., -1., -1.),
+                v(1., 1., -1.),
+                v(1., 1., 1.),
+            ],
             Vec3::X,
         ),
         (
-            [v(-1., -1., -1.), v(-1., -1., 1.), v(-1., 1., 1.), v(-1., 1., -1.)],
+            [
+                v(-1., -1., -1.),
+                v(-1., -1., 1.),
+                v(-1., 1., 1.),
+                v(-1., 1., -1.),
+            ],
             -Vec3::X,
         ),
         (
-            [v(-1., -1., 1.), v(1., -1., 1.), v(1., 1., 1.), v(-1., 1., 1.)],
+            [
+                v(-1., -1., 1.),
+                v(1., -1., 1.),
+                v(1., 1., 1.),
+                v(-1., 1., 1.),
+            ],
             Vec3::Z,
         ),
         (
-            [v(1., -1., -1.), v(-1., -1., -1.), v(-1., 1., -1.), v(1., 1., -1.)],
+            [
+                v(1., -1., -1.),
+                v(-1., -1., -1.),
+                v(-1., 1., -1.),
+                v(1., 1., -1.),
+            ],
             -Vec3::Z,
         ),
     ];
@@ -308,8 +338,7 @@ fn render_empty(gpu: &mut OffscreenRenderer, cam: OrbitCamera) -> Vec<u8> {
     let geom = GeomHandle::new();
     let view = Viewport3d(frame, geom, "pose-sweep-empty", desc, |_| {});
     let states: HashMap<u64, Rc<RefCell<TextFieldState>>> = HashMap::new();
-    let (scene, _h, _s) =
-        layout_and_paint(&view, (W, H), &states, &Interactions::default(), None);
+    let (scene, _h, _s) = layout_and_paint(&view, (W, H), &states, &Interactions::default(), None);
     apply_render_commands(gpu.renderer_mut(), ctx.drain()).log_failures();
     gpu.render_rgba(&scene, Some(CLEAR)).expect("renders")
 }
@@ -353,8 +382,6 @@ fn pixel(rgba: &[u8], x: u32, y: u32) -> [u8; 3] {
     [rgba[i], rgba[i + 1], rgba[i + 2]]
 }
 
-
-
 fn is_background(a: [u8; 3], background: [u8; 3]) -> bool {
     (0..3).all(|i| (a[i] as i32 - background[i] as i32).abs() <= 6)
 }
@@ -367,12 +394,10 @@ fn is_ground(a: [u8; 3]) -> bool {
     g > r + 14 && g > b + 14
 }
 
-
 fn is_red(a: [u8; 3]) -> bool {
     let (r, g, b) = (a[0] as i32, a[1] as i32, a[2] as i32);
     r > g + 14 && r > b + 14
 }
-
 
 /// Share of a rectangle's pixels matching a predicate, inset so silhouette
 /// edges never decide the answer.
@@ -743,9 +768,11 @@ fn check_sheet(width: u32, height: u32, rgba: &[u8]) {
     let total = (width * height) as f64;
     let mut differing = 0usize;
     for (g, a) in golden.pixels().zip(rgba.chunks_exact(4)) {
-        if g.0.iter().zip(a.iter()).any(|(&gc, &ac)| {
-            (gc as i16 - ac as i16).abs() > CHANNEL_TOL
-        }) {
+        if g.0
+            .iter()
+            .zip(a.iter())
+            .any(|(&gc, &ac)| (gc as i16 - ac as i16).abs() > CHANNEL_TOL)
+        {
             differing += 1;
         }
     }
@@ -796,10 +823,7 @@ fn pose_sweep_invariants_and_sheet() {
             // instead of guessed about.
             let dir = PathBuf::from(dir);
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(
-                dir.join(format!("{label}.png")),
-                png_bytes(W, H, &rgba),
-            );
+            let _ = std::fs::write(dir.join(format!("{label}.png")), png_bytes(W, H, &rgba));
         }
         if check_pose(&rgba, &cam, background, &label) {
             solid_checked += 1;

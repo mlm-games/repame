@@ -259,17 +259,17 @@ impl OpenXrBackend {
             queue_family_index: binding.queue_family_index,
             queue_index: binding.queue_index,
         };
-        let (session, waiter, stream) =
-            unsafe { instance.create_session::<Vulkan>(system, &create_info) }.map_err(|code| {
-                XrError::Runtime {
-                    backend: NAME,
-                    code: code.into_raw() as i64,
-                    detail: format!(
-                        "xrCreateSession refused the render layer's Vulkan handles, which the \
+        let (session, waiter, stream) = unsafe {
+            instance.create_session::<Vulkan>(system, &create_info)
+        }
+        .map_err(|code| XrError::Runtime {
+            backend: NAME,
+            code: code.into_raw() as i64,
+            detail: format!(
+                "xrCreateSession refused the render layer's Vulkan handles, which the \
                          runtime will do when they do not carry the extensions it asked for: {code}"
-                    ),
-                }
-            })?;
+            ),
+        })?;
 
         let mut eyes = Vec::with_capacity(views.len());
         for (index, view) in views.iter().enumerate() {
@@ -420,7 +420,9 @@ impl OpenXrBackend {
                 Err(code) => Err(runtime_error(&self.instance, code)),
             },
             state if state.can_end() => match self.session.request_exit() {
-                Ok(()) => Err(XrError::NotReady { what: "session stop" }),
+                Ok(()) => Err(XrError::NotReady {
+                    what: "session stop",
+                }),
                 Err(code) => Err(runtime_error(&self.instance, code)),
             },
             state => Err(XrError::WrongState {
@@ -1117,10 +1119,7 @@ impl OpenXrBackend {
                 .instance
                 .suggest_interaction_profile_bindings(profile_path, &bindings)
             {
-                Ok(()) => log::debug!(
-                    "openxr: suggested {} binding(s) for {text}",
-                    bindings.len()
-                ),
+                Ok(()) => log::debug!("openxr: suggested {} binding(s) for {text}", bindings.len()),
                 Err(code) => registration.refused(
                     &format!("{text}'s {} binding(s)", bindings.len()),
                     code,
@@ -1378,9 +1377,7 @@ impl Registration {
             Registration::Declared => {
                 log::warn!("openxr: the runtime refused {what}: {detail}");
             }
-            Registration::BestEffort
-                if code == sys::Result::ERROR_ACTIONSETS_ALREADY_ATTACHED =>
-            {
+            Registration::BestEffort if code == sys::Result::ERROR_ACTIONSETS_ALREADY_ATTACHED => {
                 log::debug!(
                     "openxr: {what} was not re-registered: action sets are immutable once \
                      attached, so the bindings suggested before the attach are the ones in use"
@@ -1456,10 +1453,12 @@ fn vulkan_extensions() -> ExtensionSet {
 /// Refuse a runtime that cannot render with the app's Vulkan device before
 /// creating an instance that would only fail later.
 fn require_vulkan(entry: &Entry) -> XrResult<()> {
-    let extensions = entry.enumerate_extensions().map_err(|code| XrError::Unavailable {
-        backend: NAME,
-        detail: format!("the OpenXR loader could not list extensions: {code}"),
-    })?;
+    let extensions = entry
+        .enumerate_extensions()
+        .map_err(|code| XrError::Unavailable {
+            backend: NAME,
+            detail: format!("the OpenXR loader could not list extensions: {code}"),
+        })?;
     if !extensions.khr_vulkan_enable2 {
         return Err(XrError::Unsupported {
             backend: NAME,
@@ -1607,8 +1606,9 @@ fn reported_devices(sets: &[ActionSet]) -> Vec<UserPath> {
 
 /// The same mapping for a space location, whose flags mean the same thing.
 fn location_pose(pose: Pose, flags: sys::SpaceLocationFlags) -> TrackedPose {
-    let valid = flags
-        .contains(sys::SpaceLocationFlags::ORIENTATION_VALID | sys::SpaceLocationFlags::POSITION_VALID);
+    let valid = flags.contains(
+        sys::SpaceLocationFlags::ORIENTATION_VALID | sys::SpaceLocationFlags::POSITION_VALID,
+    );
     let tracked = valid
         && flags.contains(
             sys::SpaceLocationFlags::ORIENTATION_TRACKED

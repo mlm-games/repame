@@ -1,7 +1,7 @@
 //! [`NavigationAgent`]: path following with seek plus arrival, and an
 //! avoidance hook that resolves the desired velocity against nearby agents.
 
-use crate::avoid::{resolve, AvoidanceConfig, Neighbor2};
+use crate::avoid::{AvoidanceConfig, Neighbor2, resolve};
 use crate::vec::NavVec;
 
 /// Another agent seen by the avoidance resolver.

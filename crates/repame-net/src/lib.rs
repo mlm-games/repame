@@ -73,8 +73,9 @@ pub use rpc::{
     RpcDispatcher, RpcEffect, RpcHandler, RpcId, RpcMessage, RpcMode, RpcSpec, RpcTable,
 };
 pub use transport::tcp::TcpTransport;
-pub use transport::udp::{DEFAULT_MAX_RETRIES, DEFAULT_RETRANSMIT_MS, Inbound, ReliableEndpoint,
-    UdpTransport};
+pub use transport::udp::{
+    DEFAULT_MAX_RETRIES, DEFAULT_RETRANSMIT_MS, Inbound, ReliableEndpoint, UdpTransport,
+};
 pub use transport::{DisconnectReason, PeerId, Transport, TransportEvent};
 
 /// Wire format version, the first byte of every packet and frame.

@@ -359,11 +359,7 @@ impl BusTree {
     }
 
     /// Replace a bus effect chain.
-    pub fn set_effects(
-        &mut self,
-        bus: BusId,
-        effects: Vec<EffectSpec>,
-    ) -> Result<(), BusError> {
+    pub fn set_effects(&mut self, bus: BusId, effects: Vec<EffectSpec>) -> Result<(), BusError> {
         let name = self.name_of(bus);
         if self.def(bus).is_none() {
             return Err(BusError::UnknownBus(name));

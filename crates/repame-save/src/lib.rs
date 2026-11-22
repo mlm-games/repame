@@ -168,11 +168,11 @@ pub use error::{DocError, MigrationError, SaveError};
 pub use identity::AppId;
 pub use keybinds::{KEYBINDS_FILE, KEYBINDS_SCHEMA, KeybindStore, Keybinds, keybind_row};
 pub use migration::{MigrationChain, MigrationFn, rewrite};
+pub use pipeline_cache::{CACHE_DIR, PipelineCacheStore};
 pub use settings::{
     AccessibilitySettings, AudioSettings, DisplaySettings, SETTINGS_FILE, SETTINGS_SCHEMA,
     Settings, SettingsStore,
 };
-pub use pipeline_cache::{CACHE_DIR, PipelineCacheStore};
 pub use store::{Loaded, SaveFile};
 pub use world::WorldDoc;
 

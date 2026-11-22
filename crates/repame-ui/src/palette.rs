@@ -129,9 +129,7 @@ impl Default for Tokens {
 /// and `1` is `b`.
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
-    let blend = |from: u8, to: u8| -> u8 {
-        (from as f32 + (to as f32 - from as f32) * t) as u8
-    };
+    let blend = |from: u8, to: u8| -> u8 { (from as f32 + (to as f32 - from as f32) * t) as u8 };
     Color(
         blend(a.0, b.0),
         blend(a.1, b.1),

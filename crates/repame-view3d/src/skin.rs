@@ -1756,10 +1756,7 @@ impl SkinnedDraw {
             }
         }
         self.morph = Some(MorphDraw {
-            weights: weights[..count]
-                .iter()
-                .map(|w| w.clamp(0.0, 1.0))
-                .collect(),
+            weights: weights[..count].iter().map(|w| w.clamp(0.0, 1.0)).collect(),
             deltas,
             vertex_count: vertices as u32,
         });

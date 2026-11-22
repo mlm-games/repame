@@ -144,7 +144,14 @@ impl SpringBoneChain {
             let to = next - origin;
             if to.length_squared() > 1e-12 {
                 let delta = pose::rotation_between(rest_dir, to);
-                chain::rotate_joint(skeleton, locals, joint, self.chain.axes()[i], delta, JointLimits::FREE)?;
+                chain::rotate_joint(
+                    skeleton,
+                    locals,
+                    joint,
+                    self.chain.axes()[i],
+                    delta,
+                    JointLimits::FREE,
+                )?;
             }
         }
         Ok(())
@@ -157,7 +164,8 @@ impl SpringBoneChain {
         index: usize,
     ) -> Result<Vec3, IkError> {
         let joint = self.chain.joints()[index];
-        let world = pose::world_matrix(skeleton, locals, joint).ok_or(IkError::UnknownJoint(joint))?;
+        let world =
+            pose::world_matrix(skeleton, locals, joint).ok_or(IkError::UnknownJoint(joint))?;
         let offset = self.chain.axes()[index] * self.chain.lengths()[index];
         Ok(world.transform_point3(offset))
     }

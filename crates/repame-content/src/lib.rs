@@ -38,14 +38,14 @@ mod watch;
 pub const PROJECT_FORMAT: u32 = 1;
 pub const PROJECT_FILE: &str = "project.ron";
 
-pub use codec::{
-    BlockCodec, BlockCodecRegistry, DecodedImage, TextureFormat, TextureInfo, TextureKind,
-    TextureLevel, parse_container,
-};
 pub use codec::rarc::{Archive as RarcArchive, RARC_MAGIC};
 pub use codec::rel::{Rel, RelSection};
 pub use codec::stream::{ByteRangeSource, FileRangeSource, MipReader};
 pub use codec::yaz0::{YAZ0_MAGIC, decode as decode_yaz0, is_yaz0};
+pub use codec::{
+    BlockCodec, BlockCodecRegistry, DecodedImage, TextureFormat, TextureInfo, TextureKind,
+    TextureLevel, parse_container,
+};
 pub use error::{ContentError, ContentErrorKind};
 pub use import::{
     AssetKind, AudioImporter, BinaryImporter, GltfImporter, IMPORT_FORMAT, IMPORTER_VERSION,
@@ -53,9 +53,9 @@ pub use import::{
     ImporterRegistry, RonImporter, TextImporter,
 };
 pub use manifest::{
-    ASSET_GENERATOR_VERSION, ASSET_MANIFEST_FILE, ASSET_MANIFEST_FORMAT, ASSET_PACK_FILE, AssetPath,
-    AtlasPlacement, AtlasPlan, AtlasPlanRequest, AtlasSelection, AudioInfo, ContentEntry,
-    ContentManifest, ImageInfo, TextureMeta,
+    ASSET_GENERATOR_VERSION, ASSET_MANIFEST_FILE, ASSET_MANIFEST_FORMAT, ASSET_PACK_FILE,
+    AssetPath, AtlasPlacement, AtlasPlan, AtlasPlanRequest, AtlasSelection, AudioInfo,
+    ContentEntry, ContentManifest, ImageInfo, TextureMeta,
 };
 pub use model::{
     AssetEntry, ProjectManifest, ResourceEntry, SceneDocument, SceneEntity, SceneEntityData,

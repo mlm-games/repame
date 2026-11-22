@@ -73,12 +73,12 @@ pub use space::ReferenceSpace;
 pub use stereo::{
     BlendMode, Eye, Fov, PixelFormat, ViewConfig, ViewConfiguration, ViewSetup, projection_from_fov,
 };
-#[cfg(all(target_arch = "wasm32", feature = "webxr"))]
-pub use webxr::XrFrame;
 pub use swapchain::{
     EyeImage, FrameError, FrameOutcome, GraphicsApi, GraphicsBinding, StereoFrame, StereoSubmit,
     SwapchainFormat, SwapchainImageHandle, VulkanBinding,
 };
+#[cfg(all(target_arch = "wasm32", feature = "webxr"))]
+pub use webxr::XrFrame;
 
 /// Result of a runtime call.
 pub type XrResult<T> = Result<T, XrError>;
@@ -358,7 +358,8 @@ impl XrSession {
             backend::Backend::WebXr(backend) => backend.set_frame_callback(callback),
             _ => Err(XrError::Unsupported {
                 backend: self.backend.name(),
-                detail: "an animation frame callback; this session has no WebXR runtime".to_string(),
+                detail: "an animation frame callback; this session has no WebXR runtime"
+                    .to_string(),
             }),
         }
     }
@@ -479,6 +480,10 @@ mod tests {
         session.set_hand_pose_source(HandPose::Grip);
         session.set_fallback_profiles([InteractionProfile::new("oculus", "touch_controller")]);
         assert!(session.action_states().is_empty());
-        assert!(session.interaction_profile(&UserPath::Hand(Hand::Left)).is_none());
+        assert!(
+            session
+                .interaction_profile(&UserPath::Hand(Hand::Left))
+                .is_none()
+        );
     }
 }

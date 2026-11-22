@@ -294,9 +294,7 @@ impl ParticleGradient {
     }
 
     /// A gradient through `keys`, sorted and clamped like [`ParticleCurve`].
-    pub fn new(
-        keys: impl IntoIterator<Item = (f32, [f32; 4])>,
-    ) -> Result<Self, ParticleError> {
+    pub fn new(keys: impl IntoIterator<Item = (f32, [f32; 4])>) -> Result<Self, ParticleError> {
         let mut keys: Vec<(f32, [f32; 4])> = keys.into_iter().collect();
         if keys.is_empty() {
             return Err(ParticleError::InvalidRange("gradient"));
@@ -699,16 +697,8 @@ impl ParticleColliders {
     /// Adds one box, normalizing corners and dropping degenerate or
     /// non-finite input.
     pub fn push_box(&mut self, min: [f32; 3], max: [f32; 3]) {
-        let lo = [
-            min[0].min(max[0]),
-            min[1].min(max[1]),
-            min[2].min(max[2]),
-        ];
-        let hi = [
-            min[0].max(max[0]),
-            min[1].max(max[1]),
-            min[2].max(max[2]),
-        ];
+        let lo = [min[0].min(max[0]), min[1].min(max[1]), min[2].min(max[2])];
+        let hi = [min[0].max(max[0]), min[1].max(max[1]), min[2].max(max[2])];
         if !lo.iter().chain(hi.iter()).all(|v| v.is_finite()) {
             log::warn!("particle collider box dropped (non-finite)");
             return;
@@ -835,14 +825,11 @@ impl ParticleVoxels {
 
     /// Occupancy at a cell coordinate, `false` outside the field.
     pub fn solid(&self, cell: [i32; 3]) -> bool {
-        if cell.iter().any(|c| *c < 0)
-            || (0..3).any(|a| cell[a] as u32 >= self.dims[a])
-        {
+        if cell.iter().any(|c| *c < 0) || (0..3).any(|a| cell[a] as u32 >= self.dims[a]) {
             return false;
         }
         let index = cell[0] as usize
-            + self.dims[0] as usize
-                * (cell[1] as usize + self.dims[1] as usize * cell[2] as usize);
+            + self.dims[0] as usize * (cell[1] as usize + self.dims[1] as usize * cell[2] as usize);
         self.cells[index] != 0
     }
 }
@@ -1021,11 +1008,7 @@ pub fn segment_box(
     min: [f32; 3],
     max: [f32; 3],
 ) -> Option<([f32; 3], f32, u32)> {
-    let d = [
-        end[0] - start[0],
-        end[1] - start[1],
-        end[2] - start[2],
-    ];
+    let d = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
     let mut t_min = 0.0f32;
     let mut t_max = 1.0f32;
     let mut axis = 0u32;
@@ -1274,15 +1257,11 @@ pub(crate) fn pack_emitter(
         None => (0, 0.0, 0.0),
     };
     let page = system.display.page.map_or(0, |p| p + 1);
-    GpuEmitter {        transform: system.transform.to_cols_array_2d(),
+    GpuEmitter {
+        transform: system.transform.to_cols_array_2d(),
         shape: [kind as f32, radius, height, 0.0],
         extents: [extents[0], extents[1], extents[2], 0.0],
-        motion: [
-            system.speed[0],
-            system.speed[1],
-            system.spread,
-            system.drag,
-        ],
+        motion: [system.speed[0], system.speed[1], system.spread, system.drag],
         life: [
             system.lifetime[0],
             system.lifetime[1],
@@ -2060,7 +2039,8 @@ mod tests {
             assert_eq!(p, [0.0, 0.0, 0.0]);
 
             let sphere = EmitterShape::Sphere { radius: 2.0 }.sample(&r);
-            let len = (sphere[0] * sphere[0] + sphere[1] * sphere[1] + sphere[2] * sphere[2]).sqrt();
+            let len =
+                (sphere[0] * sphere[0] + sphere[1] * sphere[1] + sphere[2] * sphere[2]).sqrt();
             assert!(len <= 2.0 + 1e-4, "sphere radius: {len}");
 
             let cube = EmitterShape::Box {
@@ -2139,7 +2119,11 @@ mod tests {
             ..p
         };
         integrate_step(&mut d, 0.25, [0.0; 3], 2.0, &[]);
-        assert!((d.vel[0] - 5.0).abs() < 1e-4, "v *= 1 - drag dt: {}", d.vel[0]);
+        assert!(
+            (d.vel[0] - 5.0).abs() < 1e-4,
+            "v *= 1 - drag dt: {}",
+            d.vel[0]
+        );
 
         // An attractor inside its radius pulls toward its center and stops
         // pulling outside it.
@@ -2181,7 +2165,10 @@ mod tests {
             max_tilt = max_tilt.max(d[0].hypot(d[2]));
         }
         assert!(max_tilt > 0.6, "cone reaches its rim: {max_tilt}");
-        assert!((min_up - spread.cos()).abs() < 0.05, "cone reaches its axis wall");
+        assert!(
+            (min_up - spread.cos()).abs() < 0.05,
+            "cone reaches its axis wall"
+        );
         // Zero spread is a straight line along +Y.
         let straight = sample_cone(0.0, 0.5, 0.25);
         assert!(straight[0].abs() < 1e-5 && straight[2].abs() < 1e-5);
@@ -2198,12 +2185,12 @@ mod tests {
         assert!((curve.sample(0.75) - 2.0).abs() < 1e-6);
         assert_eq!(curve.sample(2.0), 4.0);
         // Insertion order does not matter; duplicate times are rejected.
-        let sorted =
-            ParticleCurve::new([(0.5, 0.0), (1.0, 4.0), (0.0, 2.0)]).expect("valid");
+        let sorted = ParticleCurve::new([(0.5, 0.0), (1.0, 4.0), (0.0, 2.0)]).expect("valid");
         assert_eq!(sorted.sample(0.25), curve.sample(0.25));
         assert!(ParticleCurve::new([(0.2, 1.0), (0.2, 2.0)]).is_err());
-        let gradient = ParticleGradient::new([(0.0, [1.0, 1.0, 1.0, 1.0]), (1.0, [0.0, 0.0, 0.0, 0.0])])
-            .expect("valid");
+        let gradient =
+            ParticleGradient::new([(0.0, [1.0, 1.0, 1.0, 1.0]), (1.0, [0.0, 0.0, 0.0, 0.0])])
+                .expect("valid");
         assert_eq!(gradient.sample(0.0), [1.0; 4]);
         assert!((gradient.sample(0.5)[3] - 0.5).abs() < 1e-6);
     }
@@ -2242,8 +2229,8 @@ mod tests {
             cells: vec![0, 1, 0, 0],
             revision: 0,
         };
-        let hit = segment_voxels([0.5, 0.5, 0.5], [3.5, 0.5, 0.5], &field)
-            .expect("hits the solid cell");
+        let hit =
+            segment_voxels([0.5, 0.5, 0.5], [3.5, 0.5, 0.5], &field).expect("hits the solid cell");
         assert_eq!(hit.0, [-1.0, 0.0, 0.0], "entered the -x face");
         // The x = 1 boundary is one third of the way into the segment.
         assert!(
@@ -2262,8 +2249,8 @@ mod tests {
         let mut grid: HashMap<[i32; 3], Cell> = HashMap::new();
         grid.insert([0, 0, 0], Cell::full(1));
         grid.insert([1, 0, 0], Cell::full(1));
-        let field = ParticleVoxels::build(&grid, [0.0; 3], 1.0, [2, 1, 1], |_| true)
-            .expect("valid field");
+        let field =
+            ParticleVoxels::build(&grid, [0.0; 3], 1.0, [2, 1, 1], |_| true).expect("valid field");
         assert_eq!(field.len(), 2);
         assert!(field.solid([0, 0, 0]));
         assert!(field.solid([1, 0, 0]));
@@ -2279,12 +2266,22 @@ mod tests {
         assert_eq!(system.validate(), Err(ParticleError::ZeroCapacity));
         system.capacity = 4;
         system.lifetime = [2.0, 1.0];
-        assert_eq!(system.validate(), Err(ParticleError::InvalidRange("lifetime")));
+        assert_eq!(
+            system.validate(),
+            Err(ParticleError::InvalidRange("lifetime"))
+        );
         system.lifetime = [0.5, 1.0];
         system.speed = [f32::NAN, 1.0];
         assert_eq!(system.validate(), Err(ParticleError::NonFinite("speed")));
         system.speed = [1.0, 2.0];
-        system.attractors = vec![Attractor { position: [0.0; 3], strength: 1.0, radius: 1.0 }; MAX_ATTRACTORS + 1];
+        system.attractors = vec![
+            Attractor {
+                position: [0.0; 3],
+                strength: 1.0,
+                radius: 1.0
+            };
+            MAX_ATTRACTORS + 1
+        ];
         assert!(matches!(
             system.validate(),
             Err(ParticleError::TooManyAttractors(_))

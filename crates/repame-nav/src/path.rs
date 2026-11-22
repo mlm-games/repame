@@ -1,7 +1,7 @@
 //! A* over the polygon graph, then a funnel pass to straighten the corridor.
 
 use crate::funnel::{dedup, funnel};
-use crate::mesh::{closest_on_segment, NavMesh};
+use crate::mesh::{NavMesh, closest_on_segment};
 use crate::vec::NavVec;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -37,7 +37,9 @@ impl PartialOrd for OpenNode {
 }
 impl Ord for OpenNode {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.f.total_cmp(&other.f).then(self.polygon.cmp(&other.polygon))
+        self.f
+            .total_cmp(&other.f)
+            .then(self.polygon.cmp(&other.polygon))
     }
 }
 
@@ -123,7 +125,11 @@ pub(crate) fn astar_with<V: NavVec>(
 
         for link in links {
             let (q, portal, cost) = if link.from == polygon {
-                (link.to, link.portal, entry_point.distance(link.portal[0]) + link.cost)
+                (
+                    link.to,
+                    link.portal,
+                    entry_point.distance(link.portal[0]) + link.cost,
+                )
             } else if link.bidirectional && link.to == polygon {
                 (
                     link.from,
@@ -178,8 +184,16 @@ impl<V: NavVec> NavMesh<V> {
         if start_polygon == end_polygon {
             return Some(vec![start, end]);
         }
-        let (_, portals) =
-            astar_with(self, start_polygon, end_polygon, start, end, |_| false, |_| false, &[])?;
+        let (_, portals) = astar_with(
+            self,
+            start_polygon,
+            end_polygon,
+            start,
+            end,
+            |_| false,
+            |_| false,
+            &[],
+        )?;
         let mut path = funnel(start, end, &portals);
         dedup(&mut path);
         Some(path)

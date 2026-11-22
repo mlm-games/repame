@@ -138,8 +138,8 @@ impl Ccd {
             for i in (0..count).rev() {
                 let effector = chain.effector(skeleton, locals)?;
                 let joint = chain.joints()[i];
-                let world =
-                    pose::world_matrix(skeleton, locals, joint).ok_or(IkError::UnknownJoint(joint))?;
+                let world = pose::world_matrix(skeleton, locals, joint)
+                    .ok_or(IkError::UnknownJoint(joint))?;
                 let origin = world.transform_point3(Vec3::ZERO);
                 let from = effector - origin;
                 let to = target - origin;
@@ -228,7 +228,13 @@ mod tests {
         let mut locals = HashMap::new();
         let limits = [JointLimits::cone(0.3), JointLimits::FREE, JointLimits::FREE];
         Fabrik::default()
-            .solve(&skeleton, &mut locals, &chain, Vec3::new(10.0, 0.0, 0.0), &limits)
+            .solve(
+                &skeleton,
+                &mut locals,
+                &chain,
+                Vec3::new(10.0, 0.0, 0.0),
+                &limits,
+            )
             .expect("solves");
         let points = chain.points(&skeleton, &locals).expect("points");
         let bone = (points[1] - points[0]).normalize();

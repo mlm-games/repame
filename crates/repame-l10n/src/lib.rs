@@ -133,7 +133,10 @@ mod tests {
             substitute("{count} items for {name}", &named, None, "k").unwrap(),
             "3 items for Bo"
         );
-        assert_eq!(substitute("{{literal}} {0}", &positional, None, "k").unwrap(), "{literal} Ana");
+        assert_eq!(
+            substitute("{{literal}} {0}", &positional, None, "k").unwrap(),
+            "{literal} Ana"
+        );
         assert_eq!(
             substitute("{n} apples", &Args::new(), Some(3), "k").unwrap(),
             "3 apples"
@@ -175,7 +178,10 @@ msgstr[2] \"{n} яблок\"
         let catalog = Catalog::from_po(source).expect("parses");
         assert_eq!(catalog.locale(), "ru");
         assert_eq!(catalog.get("menu.play").unwrap().singular(), Some("Играть"));
-        assert!(catalog.get("menu.quit").is_none(), "empty translation is untranslated");
+        assert!(
+            catalog.get("menu.quit").is_none(),
+            "empty translation is untranslated"
+        );
         let apple = catalog.get(&context_key("item", "apple")).unwrap();
         let plural = apple.plural().unwrap();
         assert_eq!(plural.select("ru", 1), Some("{n} яблоко"));
@@ -199,7 +205,10 @@ apple,apples,\"{n} apple\",
             catalogs[0].get("GOOD_MORNING").unwrap().singular(),
             Some("Good Morning")
         );
-        assert!(catalogs[1].get("GOOD_EVENING").is_none(), "empty cell is untranslated");
+        assert!(
+            catalogs[1].get("GOOD_EVENING").is_none(),
+            "empty cell is untranslated"
+        );
         let apple = catalogs[0].get("apple").unwrap().plural().unwrap();
         assert_eq!(apple.select("en", 1), Some("{n} apple"));
         assert_eq!(apple.select("en", 2), Some("{n} apples"));
@@ -266,8 +275,14 @@ apple,apples,\"{n} apple\",
         translator.add_catalog(Catalog::from_ron(ron).expect("parses"));
         let greet = Args::new().named("name", "Ada");
         assert_eq!(translator.tr("greet", &greet).unwrap(), "Hello Ada!");
-        assert_eq!(translator.trn("apples", 1, &Args::new()).unwrap(), "1 apple");
-        assert_eq!(translator.trn("apples", 4, &Args::new()).unwrap(), "4 apples");
+        assert_eq!(
+            translator.trn("apples", 1, &Args::new()).unwrap(),
+            "1 apple"
+        );
+        assert_eq!(
+            translator.trn("apples", 4, &Args::new()).unwrap(),
+            "4 apples"
+        );
     }
 
     #[test]

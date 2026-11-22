@@ -741,9 +741,7 @@ where
         for dz in 0..self.stride {
             for dy in 0..self.stride {
                 for dx in 0..self.stride {
-                    let Some(block) = self
-                        .source
-                        .get([base[0] + dx, base[1] + dy, base[2] + dz])
+                    let Some(block) = self.source.get([base[0] + dx, base[1] + dy, base[2] + dz])
                     else {
                         continue;
                     };
@@ -1136,9 +1134,21 @@ mod tests {
                 .map(|p| p[axis])
                 .fold(f32::MIN, f32::max)
         };
-        assert!((max(0) - 2.0).abs() < 1e-6, "x scaled to 2 units: {}", max(0));
-        assert!((max(1) - 2.0).abs() < 1e-6, "y scaled to 2 units: {}", max(1));
-        assert!((max(2) - 2.0).abs() < 1e-6, "z scaled to 2 units: {}", max(2));
+        assert!(
+            (max(0) - 2.0).abs() < 1e-6,
+            "x scaled to 2 units: {}",
+            max(0)
+        );
+        assert!(
+            (max(1) - 2.0).abs() < 1e-6,
+            "y scaled to 2 units: {}",
+            max(1)
+        );
+        assert!(
+            (max(2) - 2.0).abs() < 1e-6,
+            "z scaled to 2 units: {}",
+            max(2)
+        );
         assert!(super::super::chunk::validate_group(mesh));
     }
 

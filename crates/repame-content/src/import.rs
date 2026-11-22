@@ -154,7 +154,10 @@ impl ImporterRegistry {
             .iter()
             .any(|existing| existing.name() == importer.name())
         {
-            return Err(format!("importer `{}` is already registered", importer.name()));
+            return Err(format!(
+                "importer `{}` is already registered",
+                importer.name()
+            ));
         }
         self.importers.push(importer);
         Ok(())
@@ -221,15 +224,16 @@ impl ImporterRegistry {
                         return Ok(importer);
                     }
                 }
-                if let Some(importer) = candidates.iter().copied().find(|importer| importer.matches(bytes)) {
+                if let Some(importer) = candidates
+                    .iter()
+                    .copied()
+                    .find(|importer| importer.matches(bytes))
+                {
                     return Ok(importer);
                 }
                 Err(ContentError::format(
                     path,
-                    format!(
-                        "ambiguous importers for asset kind `{}`",
-                        kind.as_str()
-                    ),
+                    format!("ambiguous importers for asset kind `{}`", kind.as_str()),
                 ))
             }
         }
@@ -300,7 +304,9 @@ impl Importer for AudioImporter {
     }
 
     fn extensions(&self) -> &'static [&'static str] {
-        &["wav", "flac", "mp3", "ogg", "oga", "m4a", "mp4", "mkv", "caf"]
+        &[
+            "wav", "flac", "mp3", "ogg", "oga", "m4a", "mp4", "mkv", "caf",
+        ]
     }
 
     fn matches(&self, bytes: &[u8]) -> bool {
@@ -314,8 +320,10 @@ impl Importer for AudioImporter {
 
     fn import(&self, context: &ImportContext<'_>) -> Result<ImportOutput, ContentError> {
         let path = context.path;
-        let stream =
-            MediaSourceStream::new(Box::new(Cursor::new(context.bytes.to_vec())), Default::default());
+        let stream = MediaSourceStream::new(
+            Box::new(Cursor::new(context.bytes.to_vec())),
+            Default::default(),
+        );
         let format = symphonia::default::get_probe()
             .probe(
                 &Hint::new(),

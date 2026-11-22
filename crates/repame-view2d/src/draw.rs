@@ -27,9 +27,7 @@ use renamite_model::{Scene, ScenePaint};
 use renamite_render_bridge::{PreparedDraw, PreparedScene};
 use repose_core::input::{PointerButton, PointerEvent, PointerEventKind, PointerKind};
 use repose_core::locals::effective_density_scale;
-use repose_core::{
-    BlendMode, ClipOp, Modifier, Px, Rect, RenderContext, SceneNode, View,
-};
+use repose_core::{BlendMode, ClipOp, Modifier, Px, Rect, RenderContext, SceneNode, View};
 use repose_ui::{Box as UiBox, ViewExt, ZStack};
 
 use crate::actors::{PlayerHost, PlayerHostRef, ViewTransform};

@@ -69,9 +69,7 @@ pub mod touch;
 
 pub use flow::{Flow, FlowState, InputOwner, Suspension, Transition, panel_owns_input, run_live};
 pub use kit::{Button, Kit, overlay_root};
-pub use layout::{
-    DESIGN, Scale, ScaleError, anchor_edges, anchor_rect, design_units, disc, ring,
-};
+pub use layout::{DESIGN, Scale, ScaleError, anchor_edges, anchor_rect, design_units, disc, ring};
 pub use nav::{
     GroupId, NavDir, NavDriver, NavEntry, NavMap, NavStep, StickNav, Wrap, chain_of, dpad_dirs,
     pad_confirm,

@@ -177,9 +177,9 @@ impl RpcMessage {
     /// Call id this message belongs to, for routing.
     pub fn call_id(&self) -> u32 {
         match self {
-            Self::Call { call_id, .. } | Self::Reply { call_id, .. } | Self::Failure { call_id, .. } => {
-                *call_id
-            }
+            Self::Call { call_id, .. }
+            | Self::Reply { call_id, .. }
+            | Self::Failure { call_id, .. } => *call_id,
         }
     }
 }
@@ -316,7 +316,10 @@ impl RpcDispatcher {
     pub fn begin_call(&mut self, name: &str, args: &[u8]) -> Result<(RpcId, RpcMessage), NetError> {
         let id = self.table.id(name)?;
         let call_id = self.next_call;
-        self.next_call = self.next_call.checked_add(1).ok_or(RpcCallError::TooManyCalls)?;
+        self.next_call = self
+            .next_call
+            .checked_add(1)
+            .ok_or(RpcCallError::TooManyCalls)?;
         if self.pending.insert(call_id, id).is_some() {
             return Err(RpcCallError::UnknownCall(call_id).into());
         }
@@ -360,10 +363,7 @@ impl RpcDispatcher {
                         )));
                     }
                 }
-                let Some(handler) = self
-                    .handlers
-                    .get_mut(*id as usize)
-                    .and_then(Option::as_mut)
+                let Some(handler) = self.handlers.get_mut(*id as usize).and_then(Option::as_mut)
                 else {
                     return Ok(RpcEffect::Respond(RpcMessage::Failure {
                         call_id: *call_id,
@@ -432,8 +432,12 @@ mod tests {
                 id,
                 Box::new(|_world, _peer, args| {
                     let mut reader = Reader::new(args);
-                    let a = reader.get_i32().map_err(|error| RpcError::new(3, error.to_string()))?;
-                    let b = reader.get_i32().map_err(|error| RpcError::new(3, error.to_string()))?;
+                    let a = reader
+                        .get_i32()
+                        .map_err(|error| RpcError::new(3, error.to_string()))?;
+                    let b = reader
+                        .get_i32()
+                        .map_err(|error| RpcError::new(3, error.to_string()))?;
                     let mut writer = Writer::new();
                     writer.put_i32(a + b);
                     Ok(writer.finish())
@@ -461,7 +465,10 @@ mod tests {
         let wire = encode_to_vec(&reply).unwrap();
         let decoded: RpcMessage = decode_from_slice(&wire).unwrap();
         match dispatcher.dispatch(&mut world, 7, &decoded).unwrap() {
-            RpcEffect::Resolved { result: Ok(payload), call_id } => {
+            RpcEffect::Resolved {
+                result: Ok(payload),
+                call_id,
+            } => {
                 assert_eq!(call_id, call.call_id());
                 assert_eq!(decode_from_slice::<i32>(&payload).unwrap(), 7);
             }

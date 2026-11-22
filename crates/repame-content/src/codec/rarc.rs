@@ -104,7 +104,10 @@ impl Archive {
         if file_length != data.len() {
             return Err(ContentError::format(
                 source,
-                format!("archive is {} bytes, its header says {file_length}", data.len()),
+                format!(
+                    "archive is {} bytes, its header says {file_length}",
+                    data.len()
+                ),
             ));
         }
         let relative = |at: usize| -> Result<usize, ContentError> {
@@ -134,15 +137,17 @@ impl Archive {
             ));
         }
         if dir_count == 0 {
-            return Err(ContentError::format(source, "archive has no root directory"));
+            return Err(ContentError::format(
+                source,
+                "archive has no root directory",
+            ));
         }
-        let dir_end = dir_offset
-            .checked_add(
-                dir_count
-                    .checked_mul(DIR_ENTRY_BYTES)
-                    .ok_or_else(|| ContentError::format(source, "archive directory table overflows"))?,
-            )
-            .ok_or_else(|| ContentError::format(source, "archive directory table overflows"))?;
+        let dir_end =
+            dir_offset
+                .checked_add(dir_count.checked_mul(DIR_ENTRY_BYTES).ok_or_else(|| {
+                    ContentError::format(source, "archive directory table overflows")
+                })?)
+                .ok_or_else(|| ContentError::format(source, "archive directory table overflows"))?;
         if dir_end > data.len() {
             return Err(ContentError::format(
                 source,
@@ -167,7 +172,9 @@ impl Archive {
             let start = string_offset
                 .checked_add(at)
                 .filter(|&start| start < data_start)
-                .ok_or_else(|| ContentError::format(source, "archive name offset is out of range"))?;
+                .ok_or_else(|| {
+                    ContentError::format(source, "archive name offset is out of range")
+                })?;
             let end = data[start..data_start]
                 .iter()
                 .position(|&byte| byte == 0)
@@ -182,7 +189,10 @@ impl Archive {
         for index in 0..dir_count {
             let at = dir_offset + index * DIR_ENTRY_BYTES;
             if index == 0 && &data[at..at + 4] != b"ROOT" {
-                return Err(ContentError::format(source, "archive root marker is missing"));
+                return Err(ContentError::format(
+                    source,
+                    "archive root marker is missing",
+                ));
             }
             let name = string_at(read_u32(&data, at + 4, source)? as usize)?;
             let hash = read_u16(&data, at + 8, source)?;
@@ -243,9 +253,9 @@ impl Archive {
                     ));
                 }
             } else {
-                let start = data_start
-                    .checked_add(offset as usize)
-                    .ok_or_else(|| ContentError::format(source, "archive entry offset overflows"))?;
+                let start = data_start.checked_add(offset as usize).ok_or_else(|| {
+                    ContentError::format(source, "archive entry offset overflows")
+                })?;
                 let end = start
                     .checked_add(size as usize)
                     .ok_or_else(|| ContentError::format(source, "archive entry range overflows"))?;
@@ -294,10 +304,7 @@ impl Archive {
         let mut parts = name.split('/').peekable();
         loop {
             let part = parts.next().ok_or_else(|| self.missing(name))?;
-            let dir = self
-                .dirs
-                .get(dir_index)
-                .ok_or_else(|| self.missing(name))?;
+            let dir = self.dirs.get(dir_index).ok_or_else(|| self.missing(name))?;
             let found = (dir.first..dir.first + dir.count)
                 .filter_map(|index| self.files.get(index))
                 .find(|entry| entry.name == part)
@@ -359,7 +366,10 @@ impl Archive {
         self.data.get(start..end).ok_or_else(|| {
             ContentError::format(
                 &self.source,
-                format!("archive entry `{}` runs past the end of the archive", entry.name),
+                format!(
+                    "archive entry `{}` runs past the end of the archive",
+                    entry.name
+                ),
             )
         })
     }

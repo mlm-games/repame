@@ -708,10 +708,7 @@ impl Light2dPass {
             Self::warn_once(
                 resources,
                 &self.id,
-                format!(
-                    "occluder {} rejected: {:?}",
-                    reject.index, reject.reason
-                ),
+                format!("occluder {} rejected: {:?}", reject.index, reject.reason),
             );
         }
 
@@ -1224,9 +1221,7 @@ fn build_vertices(
             let start = vertices.len() as u32;
             for wedge in &light.wedges {
                 let quad = wedge.quad;
-                for corner in [
-                    quad[0], quad[1], quad[2], quad[0], quad[2], quad[3],
-                ] {
+                for corner in [quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]] {
                     vertices.push(LightVertex {
                         clip: mask_clip(corner, light.center, light.half_extent),
                         world: [corner.x, corner.y],
@@ -1272,12 +1267,7 @@ fn build_uniforms(plan: &LightingPlan, stride: usize) -> (Vec<u8>, usize) {
                 1.0 / light.half_extent.x,
                 1.0 / light.half_extent.y,
             ],
-            color_energy: [
-                light.color[0],
-                light.color[1],
-                light.color[2],
-                light.energy,
-            ],
+            color_energy: [light.color[0], light.color[1], light.color[2], light.energy],
             params: [
                 if light.stop_count == 0 { 1.0 } else { 0.0 },
                 light.stop_count as f32,
@@ -1379,7 +1369,11 @@ fn record_frame(
             };
             let mut pass = begin_pass_load(encoder, "light2d_light", view, scissor);
             pass.set_pipeline(&entry.pipelines[blend_index(light.blend)]);
-            pass.set_bind_group(0, &entry.uniform_bind, &[slot as u32 * entry.uniform_stride]);
+            pass.set_bind_group(
+                0,
+                &entry.uniform_bind,
+                &[slot as u32 * entry.uniform_stride],
+            );
             pass.set_bind_group(1, mask_bind, &[]);
             pass.set_bind_group(2, ramp_bind, &[]);
             pass.set_vertex_buffer(0, entry.vertices.slice(..));
@@ -1590,11 +1584,7 @@ mod tests {
         assert_eq!(wedge.weights, [1.0, 0.0, 0.0, 0.0], "one hard tap");
         assert_eq!(
             wedge.clip,
-            mask_clip(
-                Vec2::from_array(wedge.world),
-                Vec2::ZERO,
-                Vec2::splat(10.0)
-            )
+            mask_clip(Vec2::from_array(wedge.world), Vec2::ZERO, Vec2::splat(10.0))
         );
     }
 
@@ -1688,7 +1678,9 @@ mod tests {
             let cpu = stops_at(&stops, t);
             let gpu = shader_ramp(t);
             assert!(
-                cpu.iter().zip(gpu.iter()).all(|(a, b)| (a - b).abs() < 1e-5),
+                cpu.iter()
+                    .zip(gpu.iter())
+                    .all(|(a, b)| (a - b).abs() < 1e-5),
                 "t={t}: cpu {cpu:?} vs shader {gpu:?}"
             );
         }
@@ -1709,7 +1701,8 @@ mod tests {
         assert_eq!(packed.params[0], 1.0, "texture mode");
         // `light_disc.wgsl`'s uv: (world - centre - offset) * tex.zw * 0.5 + 0.5.
         let shader_uv = |world: Vec2| {
-            let d = world - Vec2::new(packed.center_half[0], packed.center_half[1])
+            let d = world
+                - Vec2::new(packed.center_half[0], packed.center_half[1])
                 - Vec2::new(packed.tex[0], packed.tex[1]);
             Vec2::new(d.x * packed.tex[2], d.y * packed.tex[3]) * 0.5 + Vec2::splat(0.5)
         };

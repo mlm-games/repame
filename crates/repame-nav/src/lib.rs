@@ -47,8 +47,8 @@ mod path;
 mod vec;
 
 pub use agent::{AgentNeighbor, NavigationAgent};
-pub use avoid::{resolve, AvoidanceConfig, Neighbor2};
-pub use bake::{bake_2d, bake_3d, Bake2d, Bake3d, Source2d, Source3d, VOXEL};
+pub use avoid::{AvoidanceConfig, Neighbor2, resolve};
+pub use bake::{Bake2d, Bake3d, Source2d, Source3d, VOXEL, bake_2d, bake_3d};
 pub use funnel::funnel;
 pub use map::{NavLink, NavMap, NavObstacle};
 pub use mesh::{NavMesh, Neighbor, Polygon};
@@ -100,13 +100,20 @@ mod tests {
     }
 
     fn walled_corridor() -> Grid {
-        Grid { solid: vec![[2, 0], [2, 1]] }
+        Grid {
+            solid: vec![[2, 0], [2, 1]],
+        }
     }
 
     fn corridor() -> NavMesh<Vec2> {
         bake_2d(
             &walled_corridor(),
-            &Bake2d { min: [0, 0], max: [5, 3], cell_size: 1.0, agent_radius: 0.0 },
+            &Bake2d {
+                min: [0, 0],
+                max: [5, 3],
+                cell_size: 1.0,
+                agent_radius: 0.0,
+            },
         )
         .expect("corridor bakes")
     }
@@ -118,10 +125,20 @@ mod tests {
     #[test]
     fn two_d_path_hugs_the_wall_corners() {
         let mesh = corridor();
-        let path = mesh.find_path(Vec2::new(0.5, 1.5), Vec2::new(4.5, 1.5)).expect("connected");
+        let path = mesh
+            .find_path(Vec2::new(0.5, 1.5), Vec2::new(4.5, 1.5))
+            .expect("connected");
         assert_eq!(path.len(), 4, "start, two corners, end: {path:?}");
-        assert!((path[1].x - 2.0).abs() < 1e-4 && (path[1].y - 2.0).abs() < 1e-4, "corner {}", path[1]);
-        assert!((path[2].x - 3.0).abs() < 1e-4 && (path[2].y - 2.0).abs() < 1e-4, "corner {}", path[2]);
+        assert!(
+            (path[1].x - 2.0).abs() < 1e-4 && (path[1].y - 2.0).abs() < 1e-4,
+            "corner {}",
+            path[1]
+        );
+        assert!(
+            (path[2].x - 3.0).abs() < 1e-4 && (path[2].y - 2.0).abs() < 1e-4,
+            "corner {}",
+            path[2]
+        );
         let expected = 2.0 * 2.5f32.sqrt() + 1.0;
         assert!(
             (path_length(&path) - expected).abs() < 1e-3,
@@ -148,8 +165,16 @@ mod tests {
         let from = Vec2::new(0.5, 1.5);
         let to = Vec2::new(4.5, 1.5);
         assert!(map.find_path(from, to).is_some(), "open gap");
-        map.add_obstacle(NavObstacle::new(vec![[2.0, 2.0], [3.0, 2.0], [3.0, 3.0], [2.0, 3.0]]));
-        assert!(map.find_path(from, to).is_none(), "carved gap blocks the route");
+        map.add_obstacle(NavObstacle::new(vec![
+            [2.0, 2.0],
+            [3.0, 2.0],
+            [3.0, 3.0],
+            [2.0, 3.0],
+        ]));
+        assert!(
+            map.find_path(from, to).is_none(),
+            "carved gap blocks the route"
+        );
     }
 
     #[test]
@@ -181,17 +206,32 @@ mod tests {
     fn three_d_path_follows_a_slope() {
         let mesh = bake_3d(
             &Ramp,
-            &Bake3d { min: [0, 0, 0], max: [4, 1, 2], ..Bake3d::default() },
+            &Bake3d {
+                min: [0, 0, 0],
+                max: [4, 1, 2],
+                ..Bake3d::default()
+            },
         )
         .expect("ramp bakes");
         let from = Vec3::new(0.5, 0.0, 0.5);
         let to = Vec3::new(3.5, 0.0, 0.5);
         let path = mesh.find_path(from, to).expect("connected");
-        assert!((path[0].y - 0.25).abs() < 1e-3, "start lifted to the surface: {}", path[0].y);
-        assert!((path[path.len() - 1].y - 1.75).abs() < 1e-3, "end lifted: {}", path[path.len() - 1].y);
+        assert!(
+            (path[0].y - 0.25).abs() < 1e-3,
+            "start lifted to the surface: {}",
+            path[0].y
+        );
+        assert!(
+            (path[path.len() - 1].y - 1.75).abs() < 1e-3,
+            "end lifted: {}",
+            path[path.len() - 1].y
+        );
         let length: f32 = path.windows(2).map(|w| w[0].distance(w[1])).sum();
         let expected = (3.0f32 * 3.0 + 1.5 * 1.5).sqrt();
-        assert!((length - expected).abs() < 0.02, "slope length {length} expected {expected}");
+        assert!(
+            (length - expected).abs() < 0.02,
+            "slope length {length} expected {expected}"
+        );
     }
 
     #[test]
@@ -199,7 +239,10 @@ mod tests {
         let mesh = corridor();
         let mut agent = NavigationAgent::<Vec2>::new(2.0);
         agent.arrival_radius = 0.25;
-        agent.set_path(mesh.find_path(Vec2::new(0.5, 1.5), Vec2::new(4.5, 1.5)).expect("connected"));
+        agent.set_path(
+            mesh.find_path(Vec2::new(0.5, 1.5), Vec2::new(4.5, 1.5))
+                .expect("connected"),
+        );
 
         let mut position = Vec2::new(0.5, 1.5);
         for _ in 0..600 {
@@ -226,6 +269,9 @@ mod tests {
         let first = agent.avoidance_velocity(Vec2::ZERO, &neighbor);
         let second = agent.avoidance_velocity(Vec2::ZERO, &neighbor);
         assert_eq!(first, second, "avoidance must be deterministic");
-        assert!(first.y.abs() > 1e-3 || first.x < 1.0, "avoidance steers off a head-on course: {first}");
+        assert!(
+            first.y.abs() > 1e-3 || first.x < 1.0,
+            "avoidance steers off a head-on course: {first}"
+        );
     }
 }

@@ -43,14 +43,13 @@ pub fn solve_two_bone(
     let root_world = pose::rest_matrix(skeleton, root).ok_or(IkError::UnknownJoint(root))?;
     let middle_world = pose::rest_matrix(skeleton, middle).ok_or(IkError::UnknownJoint(middle))?;
     let end_world = pose::rest_matrix(skeleton, end).ok_or(IkError::UnknownJoint(end))?;
-    let l1 = (middle_world.transform_point3(Vec3::ZERO)
-        - root_world.transform_point3(Vec3::ZERO))
-    .length();
-    let l2 = (end_world.transform_point3(Vec3::ZERO)
-        - middle_world.transform_point3(Vec3::ZERO))
-    .length();
+    let l1 = (middle_world.transform_point3(Vec3::ZERO) - root_world.transform_point3(Vec3::ZERO))
+        .length();
+    let l2 = (end_world.transform_point3(Vec3::ZERO) - middle_world.transform_point3(Vec3::ZERO))
+        .length();
 
-    let root_world = pose::world_matrix(skeleton, locals, root).ok_or(IkError::UnknownJoint(root))?;
+    let root_world =
+        pose::world_matrix(skeleton, locals, root).ok_or(IkError::UnknownJoint(root))?;
     let root_pos = root_world.transform_point3(Vec3::ZERO);
     let to_target = target - root_pos;
     let distance = to_target.length();
@@ -192,13 +191,23 @@ mod tests {
         let skeleton = limb_skeleton();
         let mut locals = HashMap::new();
         let target = Vec3::new(0.0, 10.0, 0.0);
-        let result =
-            solve_two_bone(&skeleton, &mut locals, 0, 1, 2, target, Vec3::new(1.0, 0.0, 0.0))
-                .expect("solves");
+        let result = solve_two_bone(
+            &skeleton,
+            &mut locals,
+            0,
+            1,
+            2,
+            target,
+            Vec3::new(1.0, 0.0, 0.0),
+        )
+        .expect("solves");
         assert!(!result.reached);
         let end = pose::world_matrix(&skeleton, &locals, 2)
             .unwrap()
             .transform_point3(Vec3::ZERO);
-        assert!((end - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-4, "end {end:?}");
+        assert!(
+            (end - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-4,
+            "end {end:?}"
+        );
     }
 }

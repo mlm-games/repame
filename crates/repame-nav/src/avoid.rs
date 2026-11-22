@@ -75,7 +75,11 @@ fn earliest_collision(
         return f32::INFINITY;
     }
     let t = (-b - discriminant.sqrt()) / (2.0 * a);
-    if t >= 0.0 && t <= horizon { t } else { f32::INFINITY }
+    if t >= 0.0 && t <= horizon {
+        t
+    } else {
+        f32::INFINITY
+    }
 }
 
 /// Score one candidate against the neighbour set and fold it into `best`.
@@ -102,7 +106,11 @@ fn consider(
         }
     }
     let feasible = earliest.is_infinite();
-    let key = if feasible { (candidate - desired).length() } else { -earliest };
+    let key = if feasible {
+        (candidate - desired).length()
+    } else {
+        -earliest
+    };
     let better = match *best {
         None => true,
         Some((best_feasible, best_key, best_index, _)) => {
@@ -117,10 +125,17 @@ fn consider(
 }
 
 /// Resolve `desired` against nearby agents. Returns the chosen velocity.
-pub fn resolve(desired: Vec2, position: Vec2, neighbors: &[Neighbor2], config: &AvoidanceConfig) -> Vec2 {
+pub fn resolve(
+    desired: Vec2,
+    position: Vec2,
+    neighbors: &[Neighbor2],
+    config: &AvoidanceConfig,
+) -> Vec2 {
     let mut near: Vec<(f32, Neighbor2)> = neighbors
         .iter()
-        .filter(|n| position.distance(n.position) - n.radius - config.radius <= config.neighbor_distance)
+        .filter(|n| {
+            position.distance(n.position) - n.radius - config.radius <= config.neighbor_distance
+        })
         .map(|n| (position.distance(n.position), *n))
         .collect();
     near.sort_by(|a, b| {
@@ -149,11 +164,27 @@ pub fn resolve(desired: Vec2, position: Vec2, neighbors: &[Neighbor2], config: &
         let (sin, cos) = angle.sin_cos();
         let rotated = Vec2::new(base.x * cos - base.y * sin, base.x * sin + base.y * cos);
         for scale in speeds {
-            consider(rotated * (speed * scale), index, desired, position, &near, config, &mut best);
+            consider(
+                rotated * (speed * scale),
+                index,
+                desired,
+                position,
+                &near,
+                config,
+                &mut best,
+            );
             index += 1;
         }
     }
-    consider(Vec2::ZERO, index, desired, position, &near, config, &mut best);
+    consider(
+        Vec2::ZERO,
+        index,
+        desired,
+        position,
+        &near,
+        config,
+        &mut best,
+    );
 
     best.map(|(_, _, _, velocity)| velocity).unwrap_or(desired)
 }

@@ -381,8 +381,7 @@ impl SpriteBatch {
     /// `0..` and a non-finite channel falls back to `1.0`, so one bad frame
     /// cannot blacken or NaN the whole batch.
     pub fn set_light_modulate(&mut self, rgb: [f32; 3]) {
-        self.light_modulate =
-            rgb.map(|c| if c.is_finite() { c.max(0.0) } else { 1.0 });
+        self.light_modulate = rgb.map(|c| if c.is_finite() { c.max(0.0) } else { 1.0 });
     }
 
     /// Push one textured quad.
@@ -468,8 +467,7 @@ impl SpriteBatch {
         blend: SpriteBlend,
     ) {
         self.push_blended_masked(
-            center, size, rotation, anchor, flip_x, flip_y, uv_min, uv_max, tint, page, z, blend,
-            1,
+            center, size, rotation, anchor, flip_x, flip_y, uv_min, uv_max, tint, page, z, blend, 1,
         );
     }
 
@@ -781,7 +779,8 @@ fn create_identity_lightmap(
     (texture, Arc::new(bind))
 }
 
-fn create_atlas_layout(device: &wgpu::Device, filter: TextureFilter, layers: u32) -> AtlasLayout {    let (dimension, _) = atlas_shape(layers);
+fn create_atlas_layout(device: &wgpu::Device, filter: TextureFilter, layers: u32) -> AtlasLayout {
+    let (dimension, _) = atlas_shape(layers);
     let sampler = device.create_sampler(&sampler_desc(filter));
     let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("sprite_batch_tex_bgl"),

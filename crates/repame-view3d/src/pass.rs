@@ -619,11 +619,7 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
     while remaining > 0 {
         let mut progressed = false;
         for index in 0..passes.len() {
-            if placed[index]
-                || dependencies(passes, index)
-                    .iter()
-                    .any(|dep| !placed[*dep])
-            {
+            if placed[index] || dependencies(passes, index).iter().any(|dep| !placed[*dep]) {
                 continue;
             }
             placed[index] = true;
@@ -658,11 +654,7 @@ pub fn pass_order(passes: &[RenderPass]) -> Vec<usize> {
     while order.len() < passes.len() {
         let mut progressed = false;
         for index in 0..passes.len() {
-            if placed[index]
-                || dependencies(passes, index)
-                    .iter()
-                    .any(|dep| !placed[*dep])
-            {
+            if placed[index] || dependencies(passes, index).iter().any(|dep| !placed[*dep]) {
                 continue;
             }
             placed[index] = true;
@@ -685,13 +677,10 @@ pub fn pass_order(passes: &[RenderPass]) -> Vec<usize> {
 fn dependencies(passes: &[RenderPass], index: usize) -> Vec<usize> {
     let pass = &passes[index];
     let mut deps = Vec::new();
-    let named = [
-        pass.source.as_deref(),
-        pass.aux.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .chain(pass.depends_on.iter().map(|name| name.as_str()));
+    let named = [pass.source.as_deref(), pass.aux.as_deref()]
+        .into_iter()
+        .flatten()
+        .chain(pass.depends_on.iter().map(|name| name.as_str()));
     for name in named {
         if let Some(from) = passes.iter().position(|other| other.target.name == name)
             && !deps.contains(&from)

@@ -10,8 +10,8 @@
 //! tilted quad and the funnel follows the slope. Regions are not merged, which
 //! keeps shared edges exact and adjacency unambiguous.
 
-use crate::mesh::NavMesh;
 use crate::NavError;
+use crate::mesh::NavMesh;
 use glam::{Vec2, Vec3};
 use std::collections::HashMap;
 
@@ -114,7 +114,8 @@ pub fn bake_2d<S: Source2d>(source: &S, config: &Bake2d) -> Result<NavMesh<Vec2>
         }
         for dx in -radius_cells..=radius_cells {
             for dz in -radius_cells..=radius_cells {
-                if dx * dx + dz * dz <= radius_cells * radius_cells && source.is_solid([x + dx, z + dz])
+                if dx * dx + dz * dz <= radius_cells * radius_cells
+                    && source.is_solid([x + dx, z + dz])
                 {
                     return false;
                 }
@@ -127,12 +128,13 @@ pub fn bake_2d<S: Source2d>(source: &S, config: &Bake2d) -> Result<NavMesh<Vec2>
     let mut corners: HashMap<(i32, i32), u32> = HashMap::new();
     let mut polygons: Vec<Vec<u32>> = Vec::new();
     let scale = config.cell_size;
-    let vertex = |x: i32, z: i32, vertices: &mut Vec<Vec2>, corners: &mut HashMap<(i32, i32), u32>| {
-        *corners.entry((x, z)).or_insert_with(|| {
-            vertices.push(Vec2::new(x as f32 * scale, z as f32 * scale));
-            (vertices.len() - 1) as u32
-        })
-    };
+    let vertex =
+        |x: i32, z: i32, vertices: &mut Vec<Vec2>, corners: &mut HashMap<(i32, i32), u32>| {
+            *corners.entry((x, z)).or_insert_with(|| {
+                vertices.push(Vec2::new(x as f32 * scale, z as f32 * scale));
+                (vertices.len() - 1) as u32
+            })
+        };
 
     for x in config.min[0]..config.max[0] {
         for z in config.min[1]..config.max[1] {
@@ -154,7 +156,9 @@ pub fn bake_2d<S: Source2d>(source: &S, config: &Bake2d) -> Result<NavMesh<Vec2>
 
 /// Bake a heightfield 3D navmesh from a collision sampler.
 pub fn bake_3d<S: Source3d>(source: &S, config: &Bake3d) -> Result<NavMesh<Vec3>, NavError> {
-    if config.max[0] <= config.min[0] || config.max[1] <= config.min[1] || config.max[2] <= config.min[2]
+    if config.max[0] <= config.min[0]
+        || config.max[1] <= config.min[1]
+        || config.max[2] <= config.min[2]
     {
         return Err(NavError::EmptyRegion);
     }
@@ -203,8 +207,11 @@ pub fn bake_3d<S: Source3d>(source: &S, config: &Bake3d) -> Result<NavMesh<Vec3>
         }
     };
     let corner_height = |x: i32, z: i32| -> Option<f32> {
-        column(x, z)
-            .map(|cell| source.surface_top(cell, x as f32, z as f32).unwrap_or((cell[1] + 1) as f32))
+        column(x, z).map(|cell| {
+            source
+                .surface_top(cell, x as f32, z as f32)
+                .unwrap_or((cell[1] + 1) as f32)
+        })
     };
     let erode = |x: i32, z: i32| -> bool {
         if column(x, z).is_none() {
@@ -212,7 +219,9 @@ pub fn bake_3d<S: Source3d>(source: &S, config: &Bake3d) -> Result<NavMesh<Vec3>
         }
         for dx in -radius_cells..=radius_cells {
             for dz in -radius_cells..=radius_cells {
-                if dx * dx + dz * dz <= radius_cells * radius_cells && column(x + dx, z + dz).is_none() {
+                if dx * dx + dz * dz <= radius_cells * radius_cells
+                    && column(x + dx, z + dz).is_none()
+                {
                     return false;
                 }
             }
@@ -250,7 +259,10 @@ pub fn bake_3d<S: Source3d>(source: &S, config: &Bake3d) -> Result<NavMesh<Vec3>
             if normal.y.abs() / length < cos_limit {
                 continue;
             }
-            let key = |x: i32, z: i32, vertices: &mut Vec<Vec3>, corners: &mut HashMap<(i32, i32), u32>| {
+            let key = |x: i32,
+                       z: i32,
+                       vertices: &mut Vec<Vec3>,
+                       corners: &mut HashMap<(i32, i32), u32>| {
                 *corners.entry((x, z)).or_insert_with(|| {
                     let height = corner_height(x, z).unwrap_or(0.0);
                     vertices.push(Vec3::new(x as f32, height, z as f32));

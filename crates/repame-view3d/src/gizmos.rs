@@ -90,7 +90,11 @@ impl Gizmos {
     /// Segment ribbon width, i.e. the full thickness in world units. Clamped
     /// non-negative and finite; `0` collapses ribbons to nothing.
     pub fn set_line_width(&mut self, width: f32) {
-        self.width = if width.is_finite() { width.max(0.0) } else { 0.0 };
+        self.width = if width.is_finite() {
+            width.max(0.0)
+        } else {
+            0.0
+        };
     }
 
     /// Current ribbon width in world units.
@@ -234,7 +238,14 @@ impl Gizmos {
     }
 
     /// Wire circle in the plane whose normal is `normal`, `segments` steps.
-    pub fn circle(&mut self, center: Vec3, normal: Vec3, radius: f32, segments: u32, color: GizmoColor) {
+    pub fn circle(
+        &mut self,
+        center: Vec3,
+        normal: Vec3,
+        radius: f32,
+        segments: u32,
+        color: GizmoColor,
+    ) {
         if !finite3(center) || !finite3(normal) || !radius.is_finite() || radius <= 0.0 {
             return;
         }

@@ -102,9 +102,12 @@ mod tests {
         let target = Vec3::new(1.0, 0.0, 0.0);
         let outcome = look_at(&skeleton, &mut locals, 0, target, &LookAt::default()).expect("aims");
         assert!(outcome.reached);
-        let forward = pose::world_rotation(&pose::world_matrix(&skeleton, &locals, 0).unwrap())
-            * Vec3::Y;
-        assert!(forward.normalize().dot(Vec3::X) > 0.999, "forward {forward:?}");
+        let forward =
+            pose::world_rotation(&pose::world_matrix(&skeleton, &locals, 0).unwrap()) * Vec3::Y;
+        assert!(
+            forward.normalize().dot(Vec3::X) > 0.999,
+            "forward {forward:?}"
+        );
     }
 
     #[test]
@@ -119,8 +122,8 @@ mod tests {
             look_at(&skeleton, &mut locals, 0, Vec3::new(1.0, 0.0, 0.0), &config).expect("aims");
         assert!(!outcome.reached);
         assert!((outcome.angle - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
-        let forward = pose::world_rotation(&pose::world_matrix(&skeleton, &locals, 0).unwrap())
-            * Vec3::Y;
+        let forward =
+            pose::world_rotation(&pose::world_matrix(&skeleton, &locals, 0).unwrap()) * Vec3::Y;
         let angle = forward.normalize().dot(Vec3::Y).clamp(-1.0, 1.0).acos();
         assert!((angle - 0.2).abs() < 1e-3, "clamped to {angle}");
     }

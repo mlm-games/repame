@@ -61,7 +61,9 @@ type Shared<A> = Arc<Mutex<Vec<A>>>;
 /// lost queue would strand the player in whatever screen pushed last. A
 /// poisoned mutex is reported by the panic itself, not by this function.
 fn lock<A>(shared: &Shared<A>) -> MutexGuard<'_, Vec<A>> {
-    shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The push side of an [`ActionQueue`]. Hand it to click closures.
@@ -95,7 +97,9 @@ impl<A: UiAction> Sink<A> {
 
 impl<A: UiAction> fmt::Debug for Sink<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sink").field("pending", &self.pending()).finish()
+        f.debug_struct("Sink")
+            .field("pending", &self.pending())
+            .finish()
     }
 }
 
@@ -188,7 +192,9 @@ pub struct Intents<A: UiAction> {
 
 impl<A: UiAction> Intents<A> {
     pub fn new() -> Self {
-        Self { pending: Vec::new() }
+        Self {
+            pending: Vec::new(),
+        }
     }
 
     /// Every pending action in order.
@@ -228,7 +234,10 @@ impl<A: UiAction> Intents<A> {
 
     /// How many occurrences are pending.
     pub fn count(&self, action: &A) -> usize {
-        self.pending.iter().filter(|pending| *pending == action).count()
+        self.pending
+            .iter()
+            .filter(|pending| *pending == action)
+            .count()
     }
 
     /// Consume one occurrence, reporting whether it was there.
@@ -367,8 +376,15 @@ mod tests {
             Some(Act::Pick(3))
         );
         assert_eq!(intents.requests(), [Act::Play, Act::Pick(7)]);
-        assert_eq!(intents.take_matching(|action| matches!(action, Act::Pick(_))), Some(Act::Pick(7)));
-        assert!(intents.take_matching(|action| matches!(action, Act::Pick(_))).is_none());
+        assert_eq!(
+            intents.take_matching(|action| matches!(action, Act::Pick(_))),
+            Some(Act::Pick(7))
+        );
+        assert!(
+            intents
+                .take_matching(|action| matches!(action, Act::Pick(_)))
+                .is_none()
+        );
     }
 
     #[test]

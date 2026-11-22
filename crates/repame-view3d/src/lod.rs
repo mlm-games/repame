@@ -116,9 +116,7 @@ impl LodSelector {
         if max_distances.len() + 1 > MAX_LOD_LEVELS {
             return Err(LodError::TooManyLevels(max_distances.len() + 1));
         }
-        if max_distances
-            .iter()
-            .any(|d| !d.is_finite() || *d <= 0.0)
+        if max_distances.iter().any(|d| !d.is_finite() || *d <= 0.0)
             || max_distances.windows(2).any(|w| w[0] >= w[1])
         {
             return Err(LodError::InvalidThresholds);
@@ -337,9 +335,13 @@ mod tests {
     /// drew, taking distance from its own center.
     #[test]
     fn group_swaps_meshes_by_distance() {
-        let mut group =
-            LodGroup::new(vec![tri_group(0.0), tri_group(10.0)], vec![10.0], 0.1, [0.0; 3])
-                .expect("valid");
+        let mut group = LodGroup::new(
+            vec![tri_group(0.0), tri_group(10.0)],
+            vec![10.0],
+            0.1,
+            [0.0; 3],
+        )
+        .expect("valid");
         let eye = Vec3::new(5.0, 0.0, 0.0);
         assert_eq!(group.update(eye), 0);
         assert_eq!(group.visible(eye).map(|g| g.positions[0][0]), Some(0.0));

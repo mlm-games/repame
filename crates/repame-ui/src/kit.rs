@@ -33,9 +33,7 @@ use repose_ui::{IntoChildren, Text, TextStyle as _, ViewExt as _, ZStack};
 
 use crate::layout::{Scale, anchor_rect, disc, ring};
 use crate::nav::{GroupId, NavDriver, NavMap, Wrap};
-use crate::palette::{
-    self, FONT, ICON_BUTTON, ICON_GLYPH, MATERIAL_SYMBOLS, Tokens, outline_for,
-};
+use crate::palette::{self, FONT, ICON_BUTTON, ICON_GLYPH, MATERIAL_SYMBOLS, Tokens, outline_for};
 use crate::queue::{Sink, UiAction};
 
 /// The scale, tokens, sink and nav map a panel's controls are built from.
@@ -157,8 +155,12 @@ impl<A: UiAction> Kit<A> {
     pub fn chip(&self, text: impl Into<String>, face: Color) -> View {
         let scale = self.scale.get().fit();
         let tokens = self.tokens;
-        repose_ui::Box(palette::chip(&tokens, face, scale))
-            .child(self.label_plain(Modifier::new(), &text.into(), 20.0, tokens.ink))
+        repose_ui::Box(palette::chip(&tokens, face, scale)).child(self.label_plain(
+            Modifier::new(),
+            &text.into(),
+            20.0,
+            tokens.ink,
+        ))
     }
 
     /// A card: the panel body, placed by viewport anchor and design-unit
@@ -433,8 +435,8 @@ pub const ICON_FAMILY: &str = MATERIAL_SYMBOLS;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::queue::ActionQueue;
     use crate::nav::NavDir;
+    use crate::queue::ActionQueue;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Act {
@@ -468,8 +470,14 @@ mod tests {
         let on_click = view.modifier.on_click.clone().expect("button is clickable");
         on_click();
         assert_eq!(queue.drain(), vec![Act::Play]);
-        assert!(view.modifier.focusable.unwrap_or(false), "button takes focus");
-        assert!(view.modifier.focus_requester.is_some(), "button can request focus");
+        assert!(
+            view.modifier.focusable.unwrap_or(false),
+            "button takes focus"
+        );
+        assert!(
+            view.modifier.focus_requester.is_some(),
+            "button can request focus"
+        );
     }
 
     #[test]
@@ -478,7 +486,10 @@ mod tests {
         kit.begin_frame();
         let view = kit.button("Play", Act::Play).disabled(true).view();
         assert!(view.modifier.on_click.is_none());
-        assert!(view.modifier.focus_requester.is_none(), "no focus target either");
+        assert!(
+            view.modifier.focus_requester.is_none(),
+            "no focus target either"
+        );
         assert!(view.modifier.disabled, "repose skips disabled controls");
         assert!(queue.is_empty());
     }
@@ -487,7 +498,10 @@ mod tests {
     fn an_icon_button_is_square_and_captionless() {
         let (kit, _queue) = kit();
         kit.begin_frame();
-        let view = kit.button("x", Act::Mute).fill(Tokens::default().coral).view();
+        let view = kit
+            .button("x", Act::Mute)
+            .fill(Tokens::default().coral)
+            .view();
         assert!(view.modifier.on_click.is_some());
         assert_eq!(view.children.len(), 1);
         let icon = kit.icon_button("pause", Act::Mute).view();
@@ -514,8 +528,18 @@ mod tests {
             .on_globally_positioned
             .clone()
             .expect("buttons report their rectangle");
-        resume_place(repose_core::Rect { x: 200.0, y: 300.0, w: 200.0, h: 64.0 });
-        quit_place(repose_core::Rect { x: 200.0, y: 380.0, w: 200.0, h: 64.0 });
+        resume_place(repose_core::Rect {
+            x: 200.0,
+            y: 300.0,
+            w: 200.0,
+            h: 64.0,
+        });
+        quit_place(repose_core::Rect {
+            x: 200.0,
+            y: 380.0,
+            w: 200.0,
+            h: 64.0,
+        });
 
         // The paint pass assigns view ids at the end of the frame; the next
         // frame's registration binds the rectangles to them.
@@ -555,17 +579,31 @@ mod tests {
             .focus_requester
             .clone()
             .expect("buttons request focus");
-        place(repose_core::Rect { x: 40.0, y: 300.0, w: 200.0, h: 64.0 });
-        assert!(kit.nav_map().is_empty(), "the rectangle waits for the view id");
+        place(repose_core::Rect {
+            x: 40.0,
+            y: 300.0,
+            w: 200.0,
+            h: 64.0,
+        });
+        assert!(
+            kit.nav_map().is_empty(),
+            "the rectangle waits for the view id"
+        );
         *requester.target.borrow_mut() = Some(31);
 
         kit.begin_frame();
         assert!(kit.nav_map().register(&requester, None));
-        let entry = kit.nav_map().active().into_iter().next().expect("one control");
+        let entry = kit
+            .nav_map()
+            .active()
+            .into_iter()
+            .next()
+            .expect("one control");
         assert_eq!(entry.id(), 31);
         assert_eq!(entry.rect().w, 200.0);
         assert_eq!(
-            kit.driver().enter(&repose_core::prelude::Scheduler::default()),
+            kit.driver()
+                .enter(&repose_core::prelude::Scheduler::default()),
             crate::nav::NavStep::Entered(31),
             "the control is the entry point of an empty focus chain"
         );
@@ -581,9 +619,21 @@ mod tests {
             let requester = repose_core::prelude::FocusRequester::new();
             *requester.target.borrow_mut() = Some(id);
             nav.mark(id, Some(GroupId::named("pause")), requester.clone());
-            nav.place(&requester, repose_core::Rect { x, y: 0.0, w: 200.0, h: 80.0 }, Some(GroupId::named("pause")));
+            nav.place(
+                &requester,
+                repose_core::Rect {
+                    x,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 80.0,
+                },
+                Some(GroupId::named("pause")),
+            );
         }
-        assert_eq!(nav.resolve(Some(11), NavDir::Right, Wrap::Stay), crate::nav::NavStep::Moved(12));
+        assert_eq!(
+            nav.resolve(Some(11), NavDir::Right, Wrap::Stay),
+            crate::nav::NavStep::Moved(12)
+        );
         assert_eq!(nav.len(), 2);
     }
 
@@ -594,10 +644,24 @@ mod tests {
         let chip = kit.chip("12", Tokens::default().gold);
         assert_eq!(chip.children.len(), 1);
         let scrim = kit.scrim();
-        assert!(scrim.modifier.input_blocker, "the scrim blocks the game underneath");
-        assert!(!scrim.modifier.focusable.unwrap_or(true), "the scrim takes no focus");
-        let panel = kit.panel([480.0, 270.0], [0.5, 0.5, 0.5, 0.5], [-100.0, -50.0, 100.0, 50.0], Tokens::default().cream);
-        assert!(panel.modifier.offset_left.is_some(), "panels are placed absolutely");
+        assert!(
+            scrim.modifier.input_blocker,
+            "the scrim blocks the game underneath"
+        );
+        assert!(
+            !scrim.modifier.focusable.unwrap_or(true),
+            "the scrim takes no focus"
+        );
+        let panel = kit.panel(
+            [480.0, 270.0],
+            [0.5, 0.5, 0.5, 0.5],
+            [-100.0, -50.0, 100.0, 50.0],
+            Tokens::default().cream,
+        );
+        assert!(
+            panel.modifier.offset_left.is_some(),
+            "panels are placed absolutely"
+        );
         let label = kit.label(Modifier::new(), "Play", 24.0, Tokens::default().ink);
         assert_eq!(label.children.len() + 1, 1, "labels are leaves");
         assert!(queue.is_empty());
@@ -606,7 +670,10 @@ mod tests {
     #[test]
     fn the_overlay_root_stays_out_of_the_focus_chain() {
         let root = overlay_root(repose_ui::Spacer());
-        assert!(root.modifier.focusable.is_none(), "the root must not take focus");
+        assert!(
+            root.modifier.focusable.is_none(),
+            "the root must not take focus"
+        );
         assert!(root.modifier.focus_requester.is_none());
     }
 

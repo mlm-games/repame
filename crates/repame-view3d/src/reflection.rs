@@ -85,7 +85,8 @@ impl ProbeSettings {
 
     /// Face edge actually allocated.
     pub fn clamped_resolution(&self) -> u32 {
-        self.resolution.clamp(MIN_PROBE_RESOLUTION, MAX_PROBE_RESOLUTION)
+        self.resolution
+            .clamp(MIN_PROBE_RESOLUTION, MAX_PROBE_RESOLUTION)
     }
 
     /// Capture period in frames; `0` behaves as `1`.

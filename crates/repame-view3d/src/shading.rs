@@ -238,7 +238,9 @@ pub fn gbuffer_fragment(model: &ShadingModel) -> Result<String, ShadingError> {
     }
     let mut body = String::from("    var outColor: vec4<f32>;\n");
     for unit in &units {
-        body.push_str(&format!("    let page{unit} = i32(page_of({unit}u) + 0.5);\n"));
+        body.push_str(&format!(
+            "    let page{unit} = i32(page_of({unit}u) + 0.5);\n"
+        ));
         body.push_str(&format!(
             "    let resident{unit} = repame_resident_level(page_of({unit}u));\n"
         ));

@@ -6,8 +6,8 @@
 //! geometry (rather than from bake-time bookkeeping) is what makes a merged or
 //! hand-authored mesh and a baked grid mesh share one query path.
 
-use crate::vec::NavVec;
 use crate::NavError;
+use crate::vec::NavVec;
 use std::collections::HashMap;
 
 /// One convex region, stored as indices into the mesh vertex buffer.
@@ -68,7 +68,11 @@ impl<V: NavVec> NavMesh<V> {
             for &index in &indices {
                 radius = radius.max(center.distance(vertices[index as usize]));
             }
-            regions.push(Polygon { indices, center, radius });
+            regions.push(Polygon {
+                indices,
+                center,
+                radius,
+            });
         }
 
         let mut neighbors = vec![Vec::new(); regions.len()];
@@ -89,13 +93,20 @@ impl<V: NavVec> NavMesh<V> {
                 let b = region.indices[(edge + 1) % count];
                 if let Some(&(other, other_edge)) = directed.get(&(b, a)) {
                     if other as usize != polygon {
-                        neighbors[polygon][edge] = Some(Neighbor { polygon: other, edge: other_edge });
+                        neighbors[polygon][edge] = Some(Neighbor {
+                            polygon: other,
+                            edge: other_edge,
+                        });
                     }
                 }
             }
         }
 
-        Ok(Self { vertices, polygons: regions, neighbors })
+        Ok(Self {
+            vertices,
+            polygons: regions,
+            neighbors,
+        })
     }
 
     /// Number of regions.
@@ -110,12 +121,18 @@ impl<V: NavVec> NavMesh<V> {
 
     /// Vertex indices of one region.
     pub fn polygon_indices(&self, index: u32) -> Option<&[u32]> {
-        self.polygons.get(index as usize).map(|p| p.indices.as_slice())
+        self.polygons
+            .get(index as usize)
+            .map(|p| p.indices.as_slice())
     }
 
     /// Neighbour across directed edge `edge` of `polygon`, if the edge is shared.
     pub fn neighbor(&self, polygon: u32, edge: u32) -> Option<Neighbor> {
-        self.neighbors.get(polygon as usize)?.get(edge as usize).copied().flatten()
+        self.neighbors
+            .get(polygon as usize)?
+            .get(edge as usize)
+            .copied()
+            .flatten()
     }
 
     /// Endpoints of directed edge `edge` of `polygon`.
@@ -182,7 +199,12 @@ impl<V: NavVec> NavMesh<V> {
 
 /// Barycentric weights of `point` in the navigation plane triangle `a b c`,
 /// or `None` when the point is outside it.
-pub(crate) fn barycentric(plane: [f32; 2], a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> Option<[f32; 3]> {
+pub(crate) fn barycentric(
+    plane: [f32; 2],
+    a: [f32; 2],
+    b: [f32; 2],
+    c: [f32; 2],
+) -> Option<[f32; 3]> {
     let v0 = [b[0] - a[0], b[1] - a[1]];
     let v1 = [c[0] - a[0], c[1] - a[1]];
     let v2 = [plane[0] - a[0], plane[1] - a[1]];
@@ -235,8 +257,11 @@ pub(crate) fn closest_point_on_polygon<V: NavVec>(
     region: &Polygon<V>,
     point: V,
 ) -> V {
-    let region_vertices: Vec<V> =
-        region.indices.iter().map(|&i| vertices[i as usize]).collect();
+    let region_vertices: Vec<V> = region
+        .indices
+        .iter()
+        .map(|&i| vertices[i as usize])
+        .collect();
     if let Some((triangle, weights)) = point_in_polygon(&region_vertices, point) {
         let a = region_vertices[0].mul(weights[0]);
         let b = region_vertices[triangle].mul(weights[1]);

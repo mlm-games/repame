@@ -267,9 +267,7 @@ pub fn attenuation_gain(params: &SpatialParams, distance: f32) -> f32 {
         AttenuationModel::InverseSquare => {
             -20.0 * ((d / unit) * (d / unit) + DISTANCE_EPSILON).log10()
         }
-        AttenuationModel::Exponential => {
-            -20.0 * (d / unit) * std::f32::consts::LOG10_E
-        }
+        AttenuationModel::Exponential => -20.0 * (d / unit) * std::f32::consts::LOG10_E,
         AttenuationModel::Linear => {
             if params.max_distance > 0.0 {
                 linear_to_db((1.0 - d / params.max_distance).clamp(0.0, 1.0))
@@ -410,7 +408,10 @@ mod tests {
         let at = |x, y, z| spatial_3d(&listener, Vec3::new(x, y, z), Vec3::ZERO, &p);
         assert!(close(at(10.0, 0.0, 0.0).pan, 1.0, 1e-5));
         assert!(close(at(-10.0, 0.0, 0.0).pan, -1.0, 1e-5));
-        assert!(close(at(0.0, 0.0, 10.0).pan, 0.0, 1e-5), "behind is centred");
+        assert!(
+            close(at(0.0, 0.0, 10.0).pan, 0.0, 1e-5),
+            "behind is centred"
+        );
         assert!(close(at(10.0, 0.0, 10.0).pan, 0.5, 1e-5), "45 degrees");
         let centred = SpatialParams {
             panning_strength: 0.0,
@@ -469,8 +470,11 @@ mod tests {
     #[test]
     fn listener_frame_rotates_with_the_transform() {
         // Facing +X means a source at +X is dead ahead, and so centred.
-        let listener =
-            AudioListener3D::with_transform(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+        let listener = AudioListener3D::with_transform(
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
         let p = SpatialParams::default();
         let ahead = spatial_3d(&listener, Vec3::new(10.0, 0.0, 0.0), Vec3::ZERO, &p);
         assert!(close(ahead.pan, 0.0, 1e-5));
@@ -483,7 +487,10 @@ mod tests {
     fn vector_helpers_are_sane() {
         assert_eq!(Vec3::ZERO.length(), 0.0);
         assert!(close(Vec3::new(3.0, 4.0, 0.0).length(), 5.0, 1e-6));
-        assert_eq!(Vec3::new(9.0, 0.0, 0.0).normalize(), Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(
+            Vec3::new(9.0, 0.0, 0.0).normalize(),
+            Vec3::new(1.0, 0.0, 0.0)
+        );
         let c = Vec3::new(1.0, 0.0, 0.0).cross(Vec3::new(0.0, 1.0, 0.0));
         assert_eq!(c, Vec3::new(0.0, 0.0, 1.0));
     }

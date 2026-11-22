@@ -118,7 +118,9 @@ pub enum ReplicationError {
 impl fmt::Display for ReplicationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DuplicateComponentType(name) => write!(f, "component {name:?} already registered"),
+            Self::DuplicateComponentType(name) => {
+                write!(f, "component {name:?} already registered")
+            }
             Self::TooManyComponentTypes(n) => {
                 write!(f, "{n} component types exceeds the 65536 type limit")
             }
@@ -246,10 +248,16 @@ impl fmt::Display for NetError {
             Self::NotConnected => write!(f, "transport is not connected yet"),
             Self::Closed => write!(f, "transport is closed"),
             Self::PayloadTooLarge { size, max } => {
-                write!(f, "payload of {size} bytes exceeds the {max} byte datagram budget")
+                write!(
+                    f,
+                    "payload of {size} bytes exceeds the {max} byte datagram budget"
+                )
             }
             Self::RetryLimit { channel, seq } => {
-                write!(f, "channel {channel} gave up on seq {seq} after the retry budget")
+                write!(
+                    f,
+                    "channel {channel} gave up on seq {seq} after the retry budget"
+                )
             }
             Self::Protocol(m) => write!(f, "protocol violation: {m}"),
         }

@@ -201,8 +201,14 @@ mod tests {
             element_reading(&buttons, &axes, GamepadElement::ButtonValue(1)),
             Some(ActionValue::Float(0.5))
         );
-        assert_eq!(element_reading(&buttons, &axes, GamepadElement::Button(3)), None);
-        assert_eq!(element_reading(&buttons, &axes, GamepadElement::Axes(2)), None);
+        assert_eq!(
+            element_reading(&buttons, &axes, GamepadElement::Button(3)),
+            None
+        );
+        assert_eq!(
+            element_reading(&buttons, &axes, GamepadElement::Axes(2)),
+            None
+        );
         assert_eq!(element_reading(&[], &[], GamepadElement::Button(0)), None);
 
         // A thumbstick needs both of its axes.

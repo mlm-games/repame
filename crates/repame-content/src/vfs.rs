@@ -111,10 +111,7 @@ impl<S: Storage> LooseAssets<S> {
     /// Open the manifest under `root` and serve the files it names. A missing
     /// or inconsistent manifest is a typed error naming it, never an empty
     /// store.
-    pub fn open_with_storage(
-        root: impl Into<PathBuf>,
-        storage: S,
-    ) -> Result<Self, ContentError> {
+    pub fn open_with_storage(root: impl Into<PathBuf>, storage: S) -> Result<Self, ContentError> {
         let root = root.into();
         let manifest_path = root.join(ASSET_MANIFEST_FILE);
         Self::open_with_manifest(root, manifest_path, storage)
@@ -145,7 +142,10 @@ impl<S: Storage> LooseAssets<S> {
                 )
             })?;
         let text = std::str::from_utf8(&bytes).map_err(|error| {
-            ContentError::format(manifest_path, format!("asset manifest is not UTF-8: {error}"))
+            ContentError::format(
+                manifest_path,
+                format!("asset manifest is not UTF-8: {error}"),
+            )
         })?;
         let manifest = ContentManifest::from_ron(text, manifest_path)?;
         Ok(Self {
@@ -187,7 +187,10 @@ impl<S: Storage> LooseAssets<S> {
     }
 
     /// Open a random-access source over the loose file.
-    pub fn range_source(&self, path: &AssetPath) -> Result<AssetRangeSource<'static>, ContentError> {
+    pub fn range_source(
+        &self,
+        path: &AssetPath,
+    ) -> Result<AssetRangeSource<'static>, ContentError> {
         let file = path.dev_path(&self.root);
         if !self.storage.is_file(&file) {
             return Err(ContentError::missing(path.as_str(), "asset"));
@@ -363,14 +366,13 @@ impl AssetStore<FsStorage> {
 }
 
 impl<S: Storage> AssetStore<S> {
-    pub fn open_with_storage(
-        root: impl Into<PathBuf>,
-        storage: S,
-    ) -> Result<Self, ContentError> {
+    pub fn open_with_storage(root: impl Into<PathBuf>, storage: S) -> Result<Self, ContentError> {
         let root = root.into();
         let archive = root.join(ASSET_PACK_FILE);
         if storage.is_file(&archive) {
-            Ok(Self::Packed(AssetVfs::open_with_storage(&storage, &archive)?))
+            Ok(Self::Packed(AssetVfs::open_with_storage(
+                &storage, &archive,
+            )?))
         } else {
             Ok(Self::Dev(LooseAssets::open_with_storage(root, storage)?))
         }
@@ -550,12 +552,8 @@ mod tests {
     /// The development store of [`packed_project`]: loose sources under
     /// `game/art`, manifest generated into `game`.
     fn dev_store(storage: &MemoryStorage, root: &Path) -> LooseAssets<MemoryStorage> {
-        LooseAssets::open_with_manifest(
-            "game/art",
-            root.join(ASSET_MANIFEST_FILE),
-            storage.clone(),
-        )
-        .expect("dev store")
+        LooseAssets::open_with_manifest("game/art", root.join(ASSET_MANIFEST_FILE), storage.clone())
+            .expect("dev store")
     }
 
     #[test]
@@ -566,8 +564,7 @@ mod tests {
             .read(&root.join(ASSET_PACK_FILE))
             .unwrap()
             .expect("archive");
-        let packed =
-            AssetVfs::from_bytes(pack, root.join(ASSET_PACK_FILE)).expect("packed store");
+        let packed = AssetVfs::from_bytes(pack, root.join(ASSET_PACK_FILE)).expect("packed store");
 
         assert_eq!(dev.manifest(), packed.manifest());
         for entry in dev.manifest().entries() {
@@ -604,13 +601,19 @@ mod tests {
         // loose from the external source root.
         let store = AssetStore::open_with_storage(&root, storage.clone()).expect("store");
         assert_eq!(store.mode(), AssetMode::Packed);
-        assert_eq!(store.read(&hero).expect("store read"), dev.read(&hero).expect("dev read"));
+        assert_eq!(
+            store.read(&hero).expect("store read"),
+            dev.read(&hero).expect("dev read")
+        );
         storage
             .remove_file(&root.join(ASSET_PACK_FILE))
             .expect("remove archive");
         let store = AssetStore::dev(dev_store(&storage, &root));
         assert_eq!(store.mode(), AssetMode::Dev);
-        assert_eq!(store.read(&hero).expect("store read"), dev.read(&hero).expect("dev read"));
+        assert_eq!(
+            store.read(&hero).expect("store read"),
+            dev.read(&hero).expect("dev read")
+        );
     }
 
     #[test]
@@ -639,8 +642,8 @@ mod tests {
         assert!(!packed.contains(&absent));
 
         // A root with neither manifest nor archive reports what is missing.
-        let error = AssetStore::open_with_storage("empty", MemoryStorage::new())
-            .expect_err("no content");
+        let error =
+            AssetStore::open_with_storage("empty", MemoryStorage::new()).expect_err("no content");
         assert!(error.is_missing(), "{error}");
         assert!(error.to_string().contains(ASSET_MANIFEST_FILE), "{error}");
 
@@ -684,13 +687,18 @@ mod tests {
 
         assert_eq!(vfs.len(), 4, "manifest plus three sources");
         assert_eq!(vfs.manifest().len(), 3);
-        assert!(vfs.manifest().atlas().is_some(), "the plan travels with the archive");
+        assert!(
+            vfs.manifest().atlas().is_some(),
+            "the plan travels with the archive"
+        );
         assert_eq!(
-            vfs.read(&AssetPath::parse("level.ron").expect("path")).expect("text"),
+            vfs.read(&AssetPath::parse("level.ron").expect("path"))
+                .expect("text"),
             b"(name: \"one\")"
         );
         assert_eq!(
-            vfs.read_str(&AssetPath::parse("level.ron").expect("path")).expect("text"),
+            vfs.read_str(&AssetPath::parse("level.ron").expect("path"))
+                .expect("text"),
             "(name: \"one\")"
         );
 

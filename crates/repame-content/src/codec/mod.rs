@@ -206,8 +206,14 @@ impl TextureFormat {
             | Self::Astc6x6
             | Self::Astc8x8 => 16,
             Self::R8 => 1,
-            Self::Rg8 | Self::La8 | Self::Rgb565 | Self::Bgr565 | Self::Rgba4444 | Self::Bgra4444
-            | Self::R16 | Self::R16F => 2,
+            Self::Rg8
+            | Self::La8
+            | Self::Rgb565
+            | Self::Bgr565
+            | Self::Rgba4444
+            | Self::Bgra4444
+            | Self::R16
+            | Self::R16F => 2,
             Self::Rgb8 | Self::Bgr8 => 3,
             Self::Rgba8
             | Self::Bgra8
@@ -392,9 +398,10 @@ impl BlockCodecRegistry {
         let start = usize::try_from(info_level.offset)
             .map_err(|_| ContentError::format(path, "texture level offset overflows"))?;
         let end = start
-            .checked_add(usize::try_from(info_level.size).map_err(|_| {
-                ContentError::format(path, "texture level size overflows")
-            })?)
+            .checked_add(
+                usize::try_from(info_level.size)
+                    .map_err(|_| ContentError::format(path, "texture level size overflows"))?,
+            )
             .ok_or_else(|| ContentError::format(path, "texture level range overflows"))?;
         let data = bytes.get(start..end).ok_or_else(|| {
             ContentError::format(path, format!("texture mip level {level} is truncated"))
@@ -535,17 +542,17 @@ pub fn parse_container(bytes: &[u8], path: &Path) -> Result<TextureInfo, Content
 
 pub(crate) fn read_u32_le(bytes: &[u8], offset: usize, path: &Path) -> Result<u32, ContentError> {
     let end = offset + 4;
-    let slice = bytes
-        .get(offset..end)
-        .ok_or_else(|| ContentError::format(path, format!("container is truncated at byte {offset}")))?;
+    let slice = bytes.get(offset..end).ok_or_else(|| {
+        ContentError::format(path, format!("container is truncated at byte {offset}"))
+    })?;
     Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
 pub(crate) fn read_u64_le(bytes: &[u8], offset: usize, path: &Path) -> Result<u64, ContentError> {
     let end = offset + 8;
-    let slice = bytes
-        .get(offset..end)
-        .ok_or_else(|| ContentError::format(path, format!("container is truncated at byte {offset}")))?;
+    let slice = bytes.get(offset..end).ok_or_else(|| {
+        ContentError::format(path, format!("container is truncated at byte {offset}"))
+    })?;
     Ok(u64::from_le_bytes([
         slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
     ]))

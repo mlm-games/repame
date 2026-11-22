@@ -39,11 +39,11 @@
 
 use glam::Mat4;
 
+use crate::morph_gpu::{MORPH_POS_FN_PASSTHROUGH_WGSL, MORPH_POS_FN_WGSL};
 use crate::pass::{
     MAX_PASS_TARGETS, PassError, PassKind, RenderPass, RenderTarget, RenderTargetFormat,
     TargetSemantics,
 };
-use crate::morph_gpu::{MORPH_POS_FN_PASSTHROUGH_WGSL, MORPH_POS_FN_WGSL};
 use crate::skin::{GpuSkinning, strip_skin_palette};
 
 /// Kind of screen-space effect one [`PostStage`] runs.
@@ -398,8 +398,10 @@ impl PostProcess {
         // Scene: an ordinary geometry pass the viewport fills through
         // `push_group_for_pass`. It carries its own depth, so the batch's
         // depth-tested pipelines draw into it unchanged.
-        let mut scene_pass =
-            RenderPass::render(RenderTarget::color(SCENE_TARGET, scene_w, scene_h), Vec::new());
+        let mut scene_pass = RenderPass::render(
+            RenderTarget::color(SCENE_TARGET, scene_w, scene_h),
+            Vec::new(),
+        );
         scene_pass.target.format = batch_format;
         passes.push(scene_pass);
         let scene_index = 1u32;
@@ -447,7 +449,14 @@ impl PostProcess {
                 } else {
                     PostStage::new(PostEffect::BloomDownsample, [0.0; 4], [0.0; 4])
                 };
-                passes.push(post_pass(&prev, name.clone(), *dim, batch_format, effect, None));
+                passes.push(post_pass(
+                    &prev,
+                    name.clone(),
+                    *dim,
+                    batch_format,
+                    effect,
+                    None,
+                ));
                 prev = name;
             }
             // u_{n-1} is the last down level itself; then upsample back down
@@ -519,7 +528,12 @@ impl PostProcess {
             let samples = mb.samples.clamp(1, 16) as f32;
             let stage = PostStage::new(
                 PostEffect::MotionBlur,
-                [mb.strength.clamp(0.0, 1.0), mb.max_radius_px.max(0.0), samples, 0.0],
+                [
+                    mb.strength.clamp(0.0, 1.0),
+                    mb.max_radius_px.max(0.0),
+                    samples,
+                    0.0,
+                ],
                 [0.0; 4],
             );
             passes.push(post_pass(
@@ -637,7 +651,13 @@ fn post_pass(
 ) -> RenderPass {
     let mut pass = RenderPass::fullscreen(
         source.to_string(),
-        RenderTarget::new(name, size[0].max(1), size[1].max(1), format, TargetSemantics::Auxiliary),
+        RenderTarget::new(
+            name,
+            size[0].max(1),
+            size[1].max(1),
+            format,
+            TargetSemantics::Auxiliary,
+        ),
     );
     pass.post = Some(stage);
     pass.aux = aux;
@@ -690,10 +710,7 @@ pub fn fxaa_edge_applies(luma_min: f32, luma_max: f32, fxaa: &FxaaSettings) -> b
 /// direction-reduce clamp the shader applies. Pins the sign convention: a
 /// vertical edge (different luminance left vs right) yields `dir.x`.
 pub fn fxaa_direction(nw: f32, ne: f32, sw: f32, se: f32) -> [f32; 2] {
-    [
-        -((nw + ne) - (sw + se)),
-        (nw + sw) - (ne + se),
-    ]
+    [-((nw + ne) - (sw + se)), (nw + sw) - (ne + se)]
 }
 
 /// Fullscreen post-process shader: one module with a `mode` switch, sampling a
@@ -1280,10 +1297,17 @@ mod tests {
             .plan([1920, 1080], RenderTargetFormat::Rgba8UnormSrgb)
             .expect("plans")
             .expect("active");
-        assert!(chain.passes.len() <= MAX_PASS_TARGETS, "{}", chain.passes.len());
+        assert!(
+            chain.passes.len() <= MAX_PASS_TARGETS,
+            "{}",
+            chain.passes.len()
+        );
         assert_eq!(chain.passes[0].target.name, SCENE_TARGET);
         assert_eq!(chain.passes[0].kind, PassKind::Render);
-        assert_eq!(chain.passes[0].target.format, RenderTargetFormat::Rgba8UnormSrgb);
+        assert_eq!(
+            chain.passes[0].target.format,
+            RenderTargetFormat::Rgba8UnormSrgb
+        );
         assert_eq!(chain.scene_pass, 1);
         assert_eq!(chain.depth_pass, Some(2));
         // Exactly one pass presents, and it is the last.
@@ -1303,7 +1327,10 @@ mod tests {
         let fog = chain
             .passes
             .iter()
-            .position(|p| p.post.is_some_and(|s| s.effect == PostEffect::VolumetricFog))
+            .position(|p| {
+                p.post
+                    .is_some_and(|s| s.effect == PostEffect::VolumetricFog)
+            })
             .expect("fog planned");
         assert!(fog < chain.passes.len() - 1, "fog runs before AA");
         assert_eq!(chain.passes[fog].aux.as_deref(), Some(DEPTH_TARGET));
@@ -1327,7 +1354,12 @@ mod tests {
     /// Inactive settings plan nothing, so the viewport keeps its legacy path.
     #[test]
     fn inactive_post_plans_nothing() {
-        assert!(PostProcess::default().plan([100, 100], RenderTargetFormat::Rgba8Unorm).unwrap().is_none());
+        assert!(
+            PostProcess::default()
+                .plan([100, 100], RenderTargetFormat::Rgba8Unorm)
+                .unwrap()
+                .is_none()
+        );
         let aa_only = PostProcess {
             anti_alias: AntiAliasing::Fxaa(FxaaSettings::default()),
             ..Default::default()

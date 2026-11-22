@@ -65,12 +65,18 @@ pub fn parse_header(bytes: &[u8], path: &Path) -> Result<Ktx2Header, ContentErro
     if bytes.len() < HEADER_BYTES {
         return Err(ContentError::format(
             path,
-            format!("KTX 2 header needs {HEADER_BYTES} bytes, got {}", bytes.len()),
+            format!(
+                "KTX 2 header needs {HEADER_BYTES} bytes, got {}",
+                bytes.len()
+            ),
         ));
     }
     let vk_format = read_u32_le(bytes, 12, path)?;
     let (format, srgb) = vk_format_to_texture(vk_format).ok_or_else(|| {
-        ContentError::unsupported(path, format!("KTX 2 vkFormat {vk_format} is not implemented"))
+        ContentError::unsupported(
+            path,
+            format!("KTX 2 vkFormat {vk_format} is not implemented"),
+        )
     })?;
     Ok(Ktx2Header {
         vk_format,
@@ -115,7 +121,10 @@ pub fn parse_levels(
     path: &Path,
 ) -> Result<Vec<TextureLevel>, ContentError> {
     if header.pixel_width == 0 || header.pixel_height == 0 {
-        return Err(ContentError::format(path, "KTX 2 dimensions must be non-zero"));
+        return Err(ContentError::format(
+            path,
+            "KTX 2 dimensions must be non-zero",
+        ));
     }
     if header.face_count != 1 && header.face_count != 6 {
         return Err(ContentError::format(
@@ -380,7 +389,13 @@ mod tests {
         assert_eq!(info.format, TextureFormat::Bc1);
         assert_eq!(info.kind, TextureKind::D2);
         assert_eq!(
-            (info.width, info.height, info.depth, info.layers, info.mip_levels),
+            (
+                info.width,
+                info.height,
+                info.depth,
+                info.layers,
+                info.mip_levels
+            ),
             (16, 8, 1, 1, 1)
         );
         assert_eq!(info.data_offset, 132);
@@ -403,7 +418,9 @@ mod tests {
         assert_eq!(decoded.format, TextureFormat::Rgba8);
         assert_eq!((decoded.width, decoded.height), (16, 8));
         assert_eq!(decoded.data.len(), 16 * 8 * 4);
-        let row = [85u8, 85, 85, 255, 170, 170, 170, 255, 0, 0, 0, 255, 255, 255, 255, 255];
+        let row = [
+            85u8, 85, 85, 255, 170, 170, 170, 255, 0, 0, 0, 255, 255, 255, 255, 255,
+        ];
         assert_eq!(&decoded.data[0..16], &row);
         assert_eq!(&decoded.data[16..32], &row);
     }
@@ -553,7 +570,11 @@ mod tests {
             set_level_offset(&mut bytes, 0, offset);
             let error = parse(&bytes, path).expect_err("offset inside the index");
             assert_eq!(error.kind(), crate::error::ContentErrorKind::Format);
-            assert!(error.message().contains("level index"), "{}", error.message());
+            assert!(
+                error.message().contains("level index"),
+                "{}",
+                error.message()
+            );
         }
 
         // The reviewed case: level 1 at offset 0 with length 8 fits inside the
@@ -562,7 +583,11 @@ mod tests {
         set_level_offset(&mut bytes, 1, 0);
         let error = parse(&bytes, path).expect_err("level 1 inside the index");
         assert_eq!(error.kind(), crate::error::ContentErrorKind::Format);
-        assert!(error.message().contains("level index"), "{}", error.message());
+        assert!(
+            error.message().contains("level index"),
+            "{}",
+            error.message()
+        );
         // The streamed path shares the table, so it refuses the same index.
         let streamed = crate::codec::stream::MipReader::open(bytes.as_slice(), path)
             .err()

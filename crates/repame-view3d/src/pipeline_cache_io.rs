@@ -59,7 +59,9 @@ pub fn flush(
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        Some(std::thread::spawn(move || write_cache(app, key, bytes, label)))
+        Some(std::thread::spawn(move || {
+            write_cache(app, key, bytes, label)
+        }))
     }
 }
 

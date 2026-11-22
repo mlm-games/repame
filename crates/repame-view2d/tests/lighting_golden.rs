@@ -134,11 +134,10 @@ fn check_golden(name: &str, rgba: &[u8]) {
     let total = (SIZE * SIZE) as f64;
     let mut differing = 0usize;
     for (g, a) in golden.pixels().zip(rgba.chunks_exact(4)) {
-        let over_tol = g
-            .0
-            .iter()
-            .zip(a.iter())
-            .any(|(&gc, &ac)| (gc as i16 - ac as i16).abs() > CHANNEL_TOL);
+        let over_tol =
+            g.0.iter()
+                .zip(a.iter())
+                .any(|(&gc, &ac)| (gc as i16 - ac as i16).abs() > CHANNEL_TOL);
         if over_tol {
             differing += 1;
         }
@@ -482,9 +481,8 @@ fn golden_point_light_texture() {
 
     // The inverse of `Light2d::texture_uv`: the world point a given ramp uv
     // lands on. Pixel centres are at half-integer world coordinates.
-    let world_of = |u: f32, v: f32| {
-        CENTER + OFFSET + (Vec2::new(u, v) - Vec2::splat(0.5)) * HALF * 2.0
-    };
+    let world_of =
+        |u: f32, v: f32| CENTER + OFFSET + (Vec2::new(u, v) - Vec2::splat(0.5)) * HALF * 2.0;
     // Texel centres of the 2x2 ramp: W, B on the top row, B, W on the bottom.
     for (u, v, want) in [
         (0.25, 0.25, 255),
@@ -562,32 +560,31 @@ fn golden_two_lights_disjoint_masks() {
         ..Light2d::default()
     };
 
-    let frame =
-        |gpu: &mut OffscreenRenderer, lights: Vec<Light2d>, sprites: [(Vec2, u32); 2]| {
-            let mut pass = Light2dPass::with_id("test.lighting.masks", desc(0));
-            pass.set_camera(camera());
-            pass.extend_lights(lights);
-            let mut batch = SpriteBatch::with_id("test.lighting.masks.batch", batch_desc());
-            batch.set_camera(camera());
-            batch.set_light_source("test.lighting.masks");
-            batch.set_light_modulate([0.0; 3]);
-            for (center, mask) in sprites {
-                batch.push_masked(
-                    [center.x, center.y],
-                    [64.0, 64.0],
-                    0.0,
-                    [0.5, 0.5],
-                    false,
-                    false,
-                    [0.0, 0.0],
-                    [1.0, 1.0],
-                    [1.0; 4],
-                    1,
-                    mask,
-                );
-            }
-            render(gpu, &lit_scene(pass, batch))
-        };
+    let frame = |gpu: &mut OffscreenRenderer, lights: Vec<Light2d>, sprites: [(Vec2, u32); 2]| {
+        let mut pass = Light2dPass::with_id("test.lighting.masks", desc(0));
+        pass.set_camera(camera());
+        pass.extend_lights(lights);
+        let mut batch = SpriteBatch::with_id("test.lighting.masks.batch", batch_desc());
+        batch.set_camera(camera());
+        batch.set_light_source("test.lighting.masks");
+        batch.set_light_modulate([0.0; 3]);
+        for (center, mask) in sprites {
+            batch.push_masked(
+                [center.x, center.y],
+                [64.0, 64.0],
+                0.0,
+                [0.5, 0.5],
+                false,
+                false,
+                [0.0, 0.0],
+                [1.0, 1.0],
+                [1.0; 4],
+                1,
+                mask,
+            );
+        }
+        render(gpu, &lit_scene(pass, batch))
+    };
 
     let left_only = (LEFT, 0b01);
     let right_only = (RIGHT, 0b10);
@@ -663,8 +660,7 @@ fn golden_two_lights_disjoint_masks() {
     // The two lights genuinely differ at that probe (a mask bug that always
     // answered with the same light would make the equality checks vacuous).
     assert!(
-        rgb(&only_left, A_PROBE.0, A_PROBE.1)[0]
-            >= rgb(&only_right, A_PROBE.0, A_PROBE.1)[0] + 10,
+        rgb(&only_left, A_PROBE.0, A_PROBE.1)[0] >= rgb(&only_right, A_PROBE.0, A_PROBE.1)[0] + 10,
         "the probes do not distinguish the two lights"
     );
 
@@ -734,9 +730,7 @@ fn wall(closed: bool) -> Occluder2d {
 
 /// Linear red channel of one pixel row.
 fn row_linear(rgba: &[u8], y: u32) -> Vec<f32> {
-    (0..SIZE)
-        .map(|x| srgb_decode(rgb(rgba, x, y)[0]))
-        .collect()
+    (0..SIZE).map(|x| srgb_decode(rgb(rgba, x, y)[0])).collect()
 }
 
 /// Which way a shadow edge turns along the row.
@@ -1144,11 +1138,11 @@ fn shadow_pcf4_penumbra_of_a_closed_polygon() {
     // and on the shadow side of it. A one-sided penumbra fails the second half.
     let mid = 0.5 * (lit + shadow);
     let band = 0.125 * (lit - shadow);
-    let partial: Vec<usize> = (0..90)
-        .filter(|x| (row[*x] - mid).abs() < band)
-        .collect();
+    let partial: Vec<usize> = (0..90).filter(|x| (row[*x] - mid).abs() < band).collect();
     let (first, last) = (
-        *partial.first().expect("no partial pixels left of the silhouette"),
+        *partial
+            .first()
+            .expect("no partial pixels left of the silhouette"),
         *partial.last().expect("no partial pixels"),
     );
     assert!(

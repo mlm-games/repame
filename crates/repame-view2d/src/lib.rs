@@ -76,9 +76,7 @@ pub use light::{
 };
 
 pub mod lightpass;
-pub use lightpass::{
-    Light2dDesc, Light2dPass, LightTextureUpload, LightmapInfo, lookup_lightmap,
-};
+pub use lightpass::{Light2dDesc, Light2dPass, LightTextureUpload, LightmapInfo, lookup_lightmap};
 
 pub mod pick;
 pub use pick::{CLICK_SLOP_DP, PickEvent, click_within_slop_dp};

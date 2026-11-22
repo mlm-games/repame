@@ -229,7 +229,10 @@ impl<T: DampValue> Smoothed<T> {
         let x = omega * dt;
         let exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x);
         let change = self.value.damp_sub(target);
-        let temp = self.velocity.damp_add(change.damp_scale(omega)).damp_scale(dt);
+        let temp = self
+            .velocity
+            .damp_add(change.damp_scale(omega))
+            .damp_scale(dt);
         self.velocity = self
             .velocity
             .damp_sub(temp.damp_scale(omega))
@@ -726,7 +729,11 @@ mod tests {
         world.push(Vec3::new(-5.0, -5.0, -7.0), Vec3::new(5.0, 5.0, -6.0));
         let hit = arm.resolve(Vec3::ZERO, Vec3::NEG_Z, &world);
         assert!(hit.blocked);
-        assert!((hit.distance - 5.5).abs() < 1e-4, "6 - 0.5: {}", hit.distance);
+        assert!(
+            (hit.distance - 5.5).abs() < 1e-4,
+            "6 - 0.5: {}",
+            hit.distance
+        );
     }
 
     /// Intrusions snap in instantly while recovery eases, so the camera never
@@ -743,7 +750,11 @@ mod tests {
         let mut len = Smoothed::new(10.0f32, 0.2);
         let blocked = arm.resolve_smoothed(Vec3::ZERO, Vec3::NEG_Z, &world, &mut len, 1.0 / 60.0);
         assert!(blocked.blocked);
-        assert!((blocked.distance - 3.0).abs() < 1e-4, "instant in: {}", blocked.distance);
+        assert!(
+            (blocked.distance - 3.0).abs() < 1e-4,
+            "instant in: {}",
+            blocked.distance
+        );
         // Wall gone: the arm recovers, never overshooting the rest length.
         let open = NoCollision;
         let mut max = 0.0f32;

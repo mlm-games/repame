@@ -100,13 +100,18 @@ pub(crate) fn substitute<'a>(
                 let close = match template[i + 1..].find('}') {
                     Some(offset) => i + 1 + offset,
                     None => {
-                        return Err(L10nError::UnbalancedPlaceholder { key: key.to_string() });
+                        return Err(L10nError::UnbalancedPlaceholder {
+                            key: key.to_string(),
+                        });
                     }
                 };
                 let name = &template[i + 1..close];
-                let value: &str = if !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
-                {
-                    match name.parse::<usize>().ok().and_then(|idx| args.positional.get(idx)) {
+                let value: &str = if !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()) {
+                    match name
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|idx| args.positional.get(idx))
+                    {
                         Some(value) => value,
                         None => {
                             return Err(L10nError::MissingArgument {
@@ -192,7 +197,10 @@ fn push_hex(out: &mut String, chars: &mut std::str::Chars<'_>, max: usize) {
             _ => break,
         }
     }
-    match u32::from_str_radix(&digits, 16).ok().and_then(char::from_u32) {
+    match u32::from_str_radix(&digits, 16)
+        .ok()
+        .and_then(char::from_u32)
+    {
         Some(c) => out.push(c),
         None => {
             out.push('\\');

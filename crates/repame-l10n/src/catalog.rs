@@ -226,11 +226,10 @@ impl Catalog {
         for (key, forms) in raw.plurals {
             let mut named = BTreeMap::new();
             for (name, text) in forms {
-                let category = PluralCategory::from_name(&name).ok_or_else(|| {
-                    L10nError::Catalog {
+                let category =
+                    PluralCategory::from_name(&name).ok_or_else(|| L10nError::Catalog {
                         message: format!("plural category `{name}` in key `{key}` is unknown"),
-                    }
-                })?;
+                    })?;
                 named.insert(category, text);
             }
             if !named.contains_key(&PluralCategory::Other) {
@@ -317,9 +316,7 @@ impl Catalog {
             let context = column_value(fields, context_column);
             let id_plural = column_value(fields, plural_column);
 
-            if reading_plural
-                && (!key.is_empty() || !context.is_empty() || !id_plural.is_empty())
-            {
+            if reading_plural && (!key.is_empty() || !context.is_empty() || !id_plural.is_empty()) {
                 commit_plural(
                     &mut columns,
                     &mut plural_forms,
@@ -426,7 +423,8 @@ impl ParsedPo {
         for entry in self.entries {
             match entry {
                 PoEntry::Singular { context, id, text } => {
-                    catalog.insert_singular(context_key(context.as_deref().unwrap_or(""), &id), text);
+                    catalog
+                        .insert_singular(context_key(context.as_deref().unwrap_or(""), &id), text);
                 }
                 PoEntry::Plural { context, id, forms } => {
                     if count == 0 {
@@ -446,8 +444,10 @@ impl ParsedPo {
                             ),
                         });
                     }
-                    catalog
-                        .insert_plural_forms(context_key(context.as_deref().unwrap_or(""), &id), forms);
+                    catalog.insert_plural_forms(
+                        context_key(context.as_deref().unwrap_or(""), &id),
+                        forms,
+                    );
                 }
             }
         }
@@ -584,7 +584,9 @@ fn append_value(
             }
         }
         PoField::Form(index) => {
-            builder.forms[index].get_or_insert_with(String::new).push_str(&value);
+            builder.forms[index]
+                .get_or_insert_with(String::new)
+                .push_str(&value);
         }
     }
     Ok(())
@@ -595,10 +597,13 @@ fn parse_form_index(rest: &str, line_number: usize) -> Result<(usize, &str), L10
         line: line_number,
         message: "`msgstr[` has no closing `]`".to_string(),
     })?;
-    let form = rest[..close].trim().parse::<usize>().map_err(|_| L10nError::Po {
-        line: line_number,
-        message: format!("invalid plural form index `{}`", &rest[..close]),
-    })?;
+    let form = rest[..close]
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| L10nError::Po {
+            line: line_number,
+            message: format!("invalid plural form index `{}`", &rest[..close]),
+        })?;
     Ok((form, &rest[close + 1..]))
 }
 
@@ -609,8 +614,8 @@ fn flush(parsed: &mut ParsedPo, builder: PoBuilder, line_number: usize) -> Resul
     let context = builder.context.filter(|context| !context.is_empty());
     if builder.id.is_empty() && builder.id_plural.is_none() {
         if let Some(header) = builder.text {
-            parsed.locale = header_value(&header, "Language")
-                .or_else(|| header_value(&header, "X-Language"));
+            parsed.locale =
+                header_value(&header, "Language").or_else(|| header_value(&header, "X-Language"));
             parsed.header_plural_count = parse_nplurals(&header);
         }
         return Ok(());

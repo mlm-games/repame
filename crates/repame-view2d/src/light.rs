@@ -388,12 +388,7 @@ impl Occluder2d {
         let min = min.min(max);
         let max = min.max(max);
         Self {
-            points: vec![
-                min,
-                Vec2::new(max.x, min.y),
-                max,
-                Vec2::new(min.x, max.y),
-            ],
+            points: vec![min, Vec2::new(max.x, min.y), max, Vec2::new(min.x, max.y)],
             closed: true,
             light_mask: 1,
         }
@@ -777,7 +772,10 @@ pub struct LightingPlan {
 impl LightingPlan {
     /// Vertices all lights' wedges need.
     pub fn wedge_vertices(&self) -> usize {
-        self.lights.iter().map(PlannedLight::wedge_vertex_count).sum()
+        self.lights
+            .iter()
+            .map(PlannedLight::wedge_vertex_count)
+            .sum()
     }
 
     /// Ambient rgb added to `layer` before any light: `color * energy` when
@@ -801,7 +799,11 @@ pub fn stops_at(stops: &[LightStop], t: f32) -> [f32; 4] {
     let Some(first) = stops.first() else {
         return [0.0; 4];
     };
-    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 1.0 };
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
     let mut ramp = first.color;
     let mut previous = 0.0f32;
     for stop in &stops[1..] {
@@ -1465,7 +1467,8 @@ mod tests {
                 light_mask: 0x101,
                 ..Default::default()
             },
-        ];        let plan = plan_lighting(
+        ];
+        let plan = plan_lighting(
             &lights,
             &[],
             &AmbientLight::default(),
@@ -1653,7 +1656,8 @@ mod tests {
         );
         // Collinear corners: no area to cast from.
         assert_eq!(
-            Occluder2d::polygon(vec![Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(2.0, 0.0)]).validate(),
+            Occluder2d::polygon(vec![Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(2.0, 0.0)])
+                .validate(),
             Err(OccluderRejectReason::DegenerateArea)
         );
         assert_eq!(
@@ -1695,7 +1699,10 @@ mod tests {
             closed: false,
             light_mask: 1,
         });
-        assert!(open.is_ok(), "an open polyline is a thin wall, not a reject");
+        assert!(
+            open.is_ok(),
+            "an open polyline is a thin wall, not a reject"
+        );
         let pinched = Occluder2d::polygon(vec![
             Vec2::ZERO,
             Vec2::new(4.0, 0.0),
@@ -1742,20 +1749,8 @@ mod tests {
             ..Default::default()
         };
         let world = [-100.0, -100.0, 200.0, 200.0];
-        let first = plan_lighting(
-            &lights,
-            &[],
-            &AmbientLight::default(),
-            world,
-            &budget,
-        );
-        let again = plan_lighting(
-            &lights,
-            &[],
-            &AmbientLight::default(),
-            world,
-            &budget,
-        );
+        let first = plan_lighting(&lights, &[], &AmbientLight::default(), world, &budget);
+        let again = plan_lighting(&lights, &[], &AmbientLight::default(), world, &budget);
         assert_eq!(first, again, "the plan is deterministic");
         assert_eq!(
             first
@@ -1832,7 +1827,11 @@ mod tests {
         assert_eq!(touching, 2, "the two edges at the vertex stay finite");
         // The far corners still extrude, so the shadow behind the wall is
         // covered rather than collapsing onto the light.
-        assert!(wedges.iter().any(|w| w.quad[1].x > 20.0 || w.quad[2].x > 20.0));
+        assert!(
+            wedges
+                .iter()
+                .any(|w| w.quad[1].x > 20.0 || w.quad[2].x > 20.0)
+        );
         // With a soft filter the taps also stay finite and sum to one.
         let mut soft = Vec::new();
         shadow_wedges(
@@ -1890,7 +1889,10 @@ mod tests {
         };
         assert!(covered(Vec2::new(20.0, 0.0)), "behind the wall");
         assert!(covered(Vec2::new(5.0, 0.0)), "inside the wall is solid");
-        assert!(!covered(Vec2::new(-1.0, 0.0)), "in front of the wall stays lit");
+        assert!(
+            !covered(Vec2::new(-1.0, 0.0)),
+            "in front of the wall stays lit"
+        );
         // Culling by mask: a wall on another layer casts nothing here.
         let mut masked = Vec::new();
         let other = ValidatedOccluder::validate(&Occluder2d::rect_masked(
@@ -1977,15 +1979,27 @@ mod tests {
     /// one it is nowhere near, and skips one whose min is negative.
     #[test]
     fn aabb_overlap_reads_min_max_corners() {
-        assert!(!aabb_overlap([70.0, 70.0, 80.0, 80.0], [50.0, 50.0, 60.0, 60.0]));
-        assert!(aabb_overlap([0.0, 0.0, 10.0, 10.0], [-100.0, -100.0, 50.0, 50.0]));
+        assert!(!aabb_overlap(
+            [70.0, 70.0, 80.0, 80.0],
+            [50.0, 50.0, 60.0, 60.0]
+        ));
+        assert!(aabb_overlap(
+            [0.0, 0.0, 10.0, 10.0],
+            [-100.0, -100.0, 50.0, 50.0]
+        ));
         assert!(aabb_overlap([0.0, 0.0, 10.0, 10.0], [5.0, 5.0, 15.0, 15.0]));
         assert!(
             aabb_overlap([0.0, 0.0, 10.0, 10.0], [10.0, 10.0, 20.0, 20.0]),
             "touching corners count as overlap"
         );
-        assert!(!aabb_overlap([0.0, 0.0, 10.0, 10.0], [11.0, 0.0, 20.0, 10.0]));
-        assert!(!aabb_overlap([0.0, 0.0, 10.0, 10.0], [0.0, 11.0, 10.0, 20.0]));
+        assert!(!aabb_overlap(
+            [0.0, 0.0, 10.0, 10.0],
+            [11.0, 0.0, 20.0, 10.0]
+        ));
+        assert!(!aabb_overlap(
+            [0.0, 0.0, 10.0, 10.0],
+            [0.0, 11.0, 10.0, 20.0]
+        ));
     }
 
     /// The scene that caught the bounds convention: a light at the origin with
@@ -2018,13 +2032,10 @@ mod tests {
         // survived are the real ones.
         let behind = Vec2::new(30.0, 0.0);
         assert!(
-            planned.wedges.iter().any(|w| point_in_quad(
-                behind,
-                w.quad[0],
-                w.quad[1],
-                w.quad[2],
-                w.quad[3]
-            )),
+            planned
+                .wedges
+                .iter()
+                .any(|w| point_in_quad(behind, w.quad[0], w.quad[1], w.quad[2], w.quad[3])),
             "no wedge covers the point behind the caster"
         );
 

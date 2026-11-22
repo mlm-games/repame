@@ -10,10 +10,10 @@
 //! Both lists are consumed in insertion order, which keeps queries
 //! deterministic.
 
-use crate::mesh::NavMesh;
-use crate::path::{astar_with, ResolvedLink};
-use crate::vec::NavVec;
 use crate::funnel;
+use crate::mesh::NavMesh;
+use crate::path::{ResolvedLink, astar_with};
+use crate::vec::NavVec;
 
 /// A dynamic carved region, in navigation-plane coordinates.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,7 +27,10 @@ pub struct NavObstacle {
 impl NavObstacle {
     /// Enabled obstacle from an outline.
     pub fn new(outline: Vec<[f32; 2]>) -> Self {
-        Self { outline, enabled: true }
+        Self {
+            outline,
+            enabled: true,
+        }
     }
 
     fn contains_point(&self, point: [f32; 2]) -> bool {
@@ -70,7 +73,13 @@ pub struct NavLink<V> {
 impl<V> NavLink<V> {
     /// Enabled one-way link with default cost.
     pub fn new(start: V, end: V) -> Self {
-        Self { start, end, bidirectional: false, cost: None, enabled: true }
+        Self {
+            start,
+            end,
+            bidirectional: false,
+            cost: None,
+            enabled: true,
+        }
     }
 }
 
@@ -88,7 +97,11 @@ pub struct NavMap<V: NavVec> {
 impl<V: NavVec> NavMap<V> {
     /// Wrap a baked mesh.
     pub fn new(mesh: NavMesh<V>) -> Self {
-        Self { mesh, obstacles: Vec::new(), links: Vec::new() }
+        Self {
+            mesh,
+            obstacles: Vec::new(),
+            links: Vec::new(),
+        }
     }
 
     /// Add a carved obstacle. Returns its index.
@@ -128,8 +141,14 @@ impl<V: NavVec> NavMap<V> {
             if !link.enabled || self.blocked_point(link.start) || self.blocked_point(link.end) {
                 continue;
             }
-            let from = self.mesh.locate(link.start).or_else(|| self.mesh.closest_polygon(link.start));
-            let to = self.mesh.locate(link.end).or_else(|| self.mesh.closest_polygon(link.end));
+            let from = self
+                .mesh
+                .locate(link.start)
+                .or_else(|| self.mesh.closest_polygon(link.start));
+            let to = self
+                .mesh
+                .locate(link.end)
+                .or_else(|| self.mesh.closest_polygon(link.end));
             let (Some(from), Some(to)) = (from, to) else {
                 continue;
             };
@@ -152,8 +171,14 @@ impl<V: NavVec> NavMap<V> {
     ///
     /// Deterministic: the same map state and endpoints give the same path.
     pub fn find_path(&self, from: V, to: V) -> Option<Vec<V>> {
-        let start_polygon = self.mesh.locate(from).or_else(|| self.mesh.closest_polygon(from))?;
-        let end_polygon = self.mesh.locate(to).or_else(|| self.mesh.closest_polygon(to))?;
+        let start_polygon = self
+            .mesh
+            .locate(from)
+            .or_else(|| self.mesh.closest_polygon(from))?;
+        let end_polygon = self
+            .mesh
+            .locate(to)
+            .or_else(|| self.mesh.closest_polygon(to))?;
         let start = self.mesh.closest_point_on_polygon(start_polygon, from);
         let end = self.mesh.closest_point_on_polygon(end_polygon, to);
         if start_polygon == end_polygon {

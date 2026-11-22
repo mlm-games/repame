@@ -199,11 +199,7 @@ pub trait StereoSubmit {
     }
 
     /// Draw one eye's image, viewed through `view`.
-    fn submit_eye(
-        &mut self,
-        image: &EyeImage,
-        view: &crate::ViewSetup,
-    ) -> Result<(), Self::Error>;
+    fn submit_eye(&mut self, image: &EyeImage, view: &crate::ViewSetup) -> Result<(), Self::Error>;
 
     /// Called once after the last eye. Default does nothing.
     fn end_stereo(&mut self) -> Result<(), Self::Error> {

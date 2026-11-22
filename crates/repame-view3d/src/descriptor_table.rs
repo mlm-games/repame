@@ -235,9 +235,8 @@ mod tests {
         for key in 10..64 {
             table.insert(key).unwrap();
         }
-        let snapshots: Vec<(u64, u32)> = (9..64)
-            .map(|key| (key, table.get(key).unwrap()))
-            .collect();
+        let snapshots: Vec<(u64, u32)> =
+            (9..64).map(|key| (key, table.get(key).unwrap())).collect();
         for (key, index) in snapshots {
             assert_eq!(table.get(key), Some(index));
             assert_ne!(index, FALLBACK_INDEX);

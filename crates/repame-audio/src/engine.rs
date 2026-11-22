@@ -10,10 +10,12 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::bus::{BusId, BusTree};
-use crate::command::{EngineEvent, MusicStart, MusicTransition, RealtimeCommand, SharedFrames, ThreadAudioLink};
-use crate::mixer::BusGraph;
 use crate::AudioState;
+use crate::bus::{BusId, BusTree};
+use crate::command::{
+    EngineEvent, MusicStart, MusicTransition, RealtimeCommand, SharedFrames, ThreadAudioLink,
+};
+use crate::mixer::BusGraph;
 
 /// One live voice on the audio thread.
 #[derive(Debug)]
@@ -164,8 +166,7 @@ fn drain_commands(core: &mut EngineCore) {
             RealtimeCommand::StopBus(bus) => {
                 let root = BusId::channel(bus).index();
                 let nodes = &core.graph;
-                core.voices
-                    .retain(|_, v| !nodes.descends_from(v.bus, root));
+                core.voices.retain(|_, v| !nodes.descends_from(v.bus, root));
             }
             RealtimeCommand::SetBus { bus, gain } => {
                 core.graph.set_gain(BusId::channel(bus).index(), gain);
@@ -246,7 +247,11 @@ fn schedule_transition(core: &mut EngineCore, t: MusicTransition, rate: u32) {
 }
 
 fn apply_due(core: &mut EngineCore, rate: u32) {
-    while core.pending.first().is_some_and(|e| e.at_frame <= core.clock) {
+    while core
+        .pending
+        .first()
+        .is_some_and(|e| e.at_frame <= core.clock)
+    {
         let event = core.pending.remove(0);
         for id in event.stops {
             let frames = event.fade_out_frames;

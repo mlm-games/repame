@@ -108,7 +108,9 @@ impl Registry {
 
     /// Registered types in name order, paired with their name.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &VTable)> {
-        self.types.iter().map(|(name, vtable)| (name.as_str(), vtable))
+        self.types
+            .iter()
+            .map(|(name, vtable)| (name.as_str(), vtable))
     }
 
     /// The vtable for `name`, or [`ReflectError::NotRegistered`].

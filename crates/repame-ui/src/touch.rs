@@ -26,8 +26,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use glam::Vec2;
-use repose_core::prelude::{Modifier, View};
 use repose_core::input::{PointerEvent, PointerKind};
+use repose_core::prelude::{Modifier, View};
 use repose_core::{AlignItems, Dp, JustifyContent};
 use repose_ui::{Box as RBox, Spacer, ViewExt as _, ZStack};
 
@@ -340,12 +340,17 @@ impl<A: UiAction> TouchPad<A> {
         let origin = inner.origin.to_array();
         let knob = (inner.origin + inner.raw).to_array();
         let vouchers = [
-            self.kit.disc(viewport, origin, STICK_RADIUS + 13.0, tokens.touch_shadow),
-            self.kit.disc(viewport, origin, STICK_RADIUS + 3.0, tokens.touch_bg),
-            self.kit.ring(viewport, origin, STICK_RADIUS + 3.0, 3.0, tokens.touch_ring),
+            self.kit
+                .disc(viewport, origin, STICK_RADIUS + 13.0, tokens.touch_shadow),
+            self.kit
+                .disc(viewport, origin, STICK_RADIUS + 3.0, tokens.touch_bg),
+            self.kit
+                .ring(viewport, origin, STICK_RADIUS + 3.0, 3.0, tokens.touch_ring),
             self.kit.disc(viewport, origin, 4.0, tokens.touch_center),
-            self.kit.disc(viewport, knob, KNOB_RADIUS - 3.0, tokens.touch_knob_dark),
-            self.kit.disc(viewport, knob, KNOB_RADIUS - 6.0, tokens.touch_knob),
+            self.kit
+                .disc(viewport, knob, KNOB_RADIUS - 3.0, tokens.touch_knob_dark),
+            self.kit
+                .disc(viewport, knob, KNOB_RADIUS - 6.0, tokens.touch_knob),
         ];
         ZStack(Modifier::new().fill_max_size()).child(vouchers.to_vec())
     }
@@ -406,7 +411,10 @@ mod tests {
     #[test]
     fn a_degenerate_radius_reads_as_rest() {
         let origin = Vec2::new(10.0, 10.0);
-        assert_eq!(drag(origin, Vec2::new(50.0, 10.0), 0.0), (origin, Vec2::ZERO));
+        assert_eq!(
+            drag(origin, Vec2::new(50.0, 10.0), 0.0),
+            (origin, Vec2::ZERO)
+        );
         assert_eq!(axis(Vec2::new(46.0, 0.0), 0.0), Vec2::ZERO);
     }
 
@@ -419,11 +427,20 @@ mod tests {
             "0.17 of the radius is inside repame-input's 0.22 dead zone"
         );
         let half = axis(Vec2::new(23.0, 0.0), STICK_RADIUS);
-        assert!(half.x > 0.0 && half.x < 0.5, "half deflection is partial, got {half:?}");
+        assert!(
+            half.x > 0.0 && half.x < 0.5,
+            "half deflection is partial, got {half:?}"
+        );
         let full = axis(Vec2::new(46.0, 0.0), STICK_RADIUS);
-        assert!((full.x - 1.0).abs() < 1e-6, "full deflection is unit, got {full:?}");
+        assert!(
+            (full.x - 1.0).abs() < 1e-6,
+            "full deflection is unit, got {full:?}"
+        );
         let beyond = axis(Vec2::new(200.0, 0.0), STICK_RADIUS);
-        assert!((beyond.length() - 1.0).abs() < 1e-6, "clamped to the unit disc");
+        assert!(
+            (beyond.length() - 1.0).abs() < 1e-6,
+            "clamped to the unit disc"
+        );
         assert_eq!(beyond.y, 0.0);
     }
 
@@ -432,7 +449,10 @@ mod tests {
         let up_left = axis(Vec2::new(-46.0, -46.0), STICK_RADIUS);
         assert!(up_left.x < 0.0 && up_left.y < 0.0);
         assert!((up_left.length() - 1.0).abs() < 1e-6);
-        assert!((up_left.x - up_left.y).abs() < 1e-6, "the diagonal stays symmetric");
+        assert!(
+            (up_left.x - up_left.y).abs() < 1e-6,
+            "the diagonal stays symmetric"
+        );
     }
 
     #[test]
@@ -443,9 +463,17 @@ mod tests {
         assert!(pad.enabled());
         pad.begin_frame(paused());
         assert!(!pad.enabled(), "a pause panel closes the gate");
-        pad.begin_frame(FlowState::new(Flow::Playing, Transition::Running, Suspension::Live));
+        pad.begin_frame(FlowState::new(
+            Flow::Playing,
+            Transition::Running,
+            Suspension::Live,
+        ));
         assert!(!pad.enabled(), "a transition closes the gate");
-        pad.begin_frame(FlowState::new(Flow::Playing, Transition::Idle, Suspension::Suspended));
+        pad.begin_frame(FlowState::new(
+            Flow::Playing,
+            Transition::Idle,
+            Suspension::Suspended,
+        ));
         assert!(!pad.enabled(), "a suspend closes the gate");
         pad.begin_frame(playing());
         assert!(pad.enabled());
@@ -527,20 +555,41 @@ mod tests {
     fn a_tap_button_pushes_into_the_shared_queue() {
         let (pad, queue) = pad();
         pad.begin_frame(playing());
-        let tap = pad.tap([960.0, 540.0], "arrow_upward", [820.0, 400.0], 48.0, Act::Jump);
+        let tap = pad.tap(
+            [960.0, 540.0],
+            "arrow_upward",
+            [820.0, 400.0],
+            48.0,
+            Act::Jump,
+        );
         let on_click = tap.modifier.on_click.clone().expect("enabled taps click");
         on_click();
-        let dive = pad.tap([960.0, 540.0], "arrow_downward", [820.0, 480.0], 48.0, Act::Dive);
+        let dive = pad.tap(
+            [960.0, 540.0],
+            "arrow_downward",
+            [820.0, 480.0],
+            48.0,
+            Act::Dive,
+        );
         dive.modifier.on_click.clone().expect("enabled taps click")();
         assert_eq!(queue.drain(), vec![Act::Jump, Act::Dive]);
-        assert!(!tap.modifier.focusable.unwrap_or(true), "taps stay out of keyboard traversal");
+        assert!(
+            !tap.modifier.focusable.unwrap_or(true),
+            "taps stay out of keyboard traversal"
+        );
     }
 
     #[test]
     fn a_tap_button_is_disabled_with_the_gate() {
         let (pad, queue) = pad();
         pad.begin_frame(paused());
-        let tap = pad.tap([960.0, 540.0], "arrow_upward", [820.0, 400.0], 48.0, Act::Jump);
+        let tap = pad.tap(
+            [960.0, 540.0],
+            "arrow_upward",
+            [820.0, 400.0],
+            48.0,
+            Act::Jump,
+        );
         assert!(tap.modifier.on_click.is_none());
         assert!(tap.modifier.disabled);
         assert!(queue.is_empty());
@@ -549,11 +598,25 @@ mod tests {
     #[test]
     fn a_zone_fraction_outside_the_unit_interval_is_rejected() {
         let (pad, _queue) = pad();
-        assert_eq!(TouchPad::new(pad.kit().clone()).with_zone(0.0).err(), Some(TouchError::ZoneOutOfRange));
-        assert_eq!(TouchPad::new(pad.kit().clone()).with_zone(1.5).err(), Some(TouchError::ZoneOutOfRange));
-        assert_eq!(TouchPad::new(pad.kit().clone()).with_zone(f32::NAN).err(), Some(TouchError::ZoneOutOfRange));
-        let half = TouchPad::new(pad.kit().clone()).with_zone(0.5).expect("half the width");
-        assert!(!half.enabled(), "a fresh pad is closed until a frame opens it");
+        assert_eq!(
+            TouchPad::new(pad.kit().clone()).with_zone(0.0).err(),
+            Some(TouchError::ZoneOutOfRange)
+        );
+        assert_eq!(
+            TouchPad::new(pad.kit().clone()).with_zone(1.5).err(),
+            Some(TouchError::ZoneOutOfRange)
+        );
+        assert_eq!(
+            TouchPad::new(pad.kit().clone()).with_zone(f32::NAN).err(),
+            Some(TouchError::ZoneOutOfRange)
+        );
+        let half = TouchPad::new(pad.kit().clone())
+            .with_zone(0.5)
+            .expect("half the width");
+        assert!(
+            !half.enabled(),
+            "a fresh pad is closed until a frame opens it"
+        );
     }
 
     #[test]
@@ -574,7 +637,10 @@ mod tests {
         };
         let (_, delta) = drag(contact.start, contact.pos, STICK_RADIUS);
         let value = axis(delta, STICK_RADIUS);
-        assert!((value.x - 1.0).abs() < 1e-6, "a full drag reads as full deflection");
+        assert!(
+            (value.x - 1.0).abs() < 1e-6,
+            "a full drag reads as full deflection"
+        );
         assert_eq!(value.y, 0.0);
     }
 

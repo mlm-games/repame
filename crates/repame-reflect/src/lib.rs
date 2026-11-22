@@ -109,32 +109,56 @@ mod tests {
         let registry = registry();
         let mut world = World::new();
         let a = world
-            .spawn((Health { current: 3, max: 10 }, agent()))
+            .spawn((
+                Health {
+                    current: 3,
+                    max: 10,
+                },
+                agent(),
+            ))
             .id();
-        let b = world.spawn(Health { current: 10, max: 10 }).id();
+        let b = world
+            .spawn(Health {
+                current: 10,
+                max: 10,
+            })
+            .id();
         world.spawn(());
 
         let first = save_world(&world, &registry).unwrap();
         let second = save_world(&world, &registry).unwrap();
-        assert_eq!(first, second, "identical worlds serialize to identical bytes");
+        assert_eq!(
+            first, second,
+            "identical worlds serialize to identical bytes"
+        );
         assert!(!first.is_empty(), "the document is not empty");
 
         let mut target = World::new();
         let report = load_world(&mut target, &registry, &first).unwrap();
-        assert_eq!(report.entities.len(), 2, "the component-less entity is skipped");
+        assert_eq!(
+            report.entities.len(),
+            2,
+            "the component-less entity is skipped"
+        );
         assert_eq!(report.components, 3);
         assert!(report.entity(u64::MAX).is_none());
 
         let loaded_a = report.entity(a.to_bits()).unwrap();
         assert_eq!(
             target.get::<Health>(loaded_a).unwrap(),
-            &Health { current: 3, max: 10 }
+            &Health {
+                current: 3,
+                max: 10
+            }
         );
         assert_eq!(target.get::<Agent>(loaded_a).unwrap(), &agent());
         let loaded_b = report.entity(b.to_bits()).unwrap();
         assert_eq!(
             target.get::<Health>(loaded_b).unwrap(),
-            &Health { current: 10, max: 10 }
+            &Health {
+                current: 10,
+                max: 10
+            }
         );
         assert!(target.get::<Agent>(loaded_b).is_none());
     }
@@ -164,7 +188,13 @@ mod tests {
         let registry = registry();
         let mut world = World::new();
         let a = world
-            .spawn((Health { current: 3, max: 10 }, agent()))
+            .spawn((
+                Health {
+                    current: 3,
+                    max: 10,
+                },
+                agent(),
+            ))
             .id();
         let b = world.spawn(Health { current: 1, max: 1 }).id();
 
@@ -174,7 +204,10 @@ mod tests {
         let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
         assert_eq!(names, vec!["game::Agent", "game::Health"]);
         assert_eq!(views[0].value["name"], json!("scout"));
-        assert_eq!(views[0].value["stance"], json!({ "Walk": { "speed": 1.5 } }));
+        assert_eq!(
+            views[0].value["stance"],
+            json!({ "Walk": { "speed": 1.5 } })
+        );
         assert_eq!(views[0].value["path"], json!([[0, 0], [4, 7]]));
 
         assert!(has(&world, &registry, a, "game::Agent"));
@@ -209,10 +242,19 @@ mod tests {
             json!({ "current": "many", "max": 9 }),
         )
         .unwrap_err();
-        assert!(matches!(error, ReflectError::BadValue { .. }), "got {error:?}");
+        assert!(
+            matches!(error, ReflectError::BadValue { .. }),
+            "got {error:?}"
+        );
 
-        let error = set(&mut world, &registry, entity, "game::Nope", serde_json::Value::Null)
-            .unwrap_err();
+        let error = set(
+            &mut world,
+            &registry,
+            entity,
+            "game::Nope",
+            serde_json::Value::Null,
+        )
+        .unwrap_err();
         assert!(
             matches!(error, ReflectError::NotRegistered { ref name } if name == "game::Nope"),
             "got {error:?}"

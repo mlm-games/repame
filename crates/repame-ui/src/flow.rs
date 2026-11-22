@@ -111,8 +111,7 @@ impl FlowState {
     /// The front end with nothing running: what a game that has not installed
     /// the flow reads as, so a mis-wired frame freezes the game instead of
     /// running it behind a menu.
-    pub const CLOSED: FlowState =
-        FlowState::new(Flow::Menu, Transition::Idle, Suspension::Live);
+    pub const CLOSED: FlowState = FlowState::new(Flow::Menu, Transition::Idle, Suspension::Live);
 
     pub const fn new(flow: Flow, transition: Transition, suspension: Suspension) -> Self {
         Self {
@@ -316,7 +315,9 @@ mod tests {
 
         let (a, b, c) = (log.clone(), log.clone(), log.clone());
         sim.on_exit(Flow::Menu, move || a.lock().unwrap().push("exit:menu"));
-        sim.on_enter(Flow::Playing, move || b.lock().unwrap().push("enter:playing"));
+        sim.on_enter(Flow::Playing, move || {
+            b.lock().unwrap().push("enter:playing")
+        });
         sim.on_transition(Flow::Menu, Flow::Playing, move || {
             c.lock().unwrap().push("menu->playing")
         });
@@ -348,7 +349,11 @@ mod tests {
         );
 
         sim.tick();
-        assert_eq!(TICKS.load(Ordering::SeqCst), 0, "menu does not advance the world");
+        assert_eq!(
+            TICKS.load(Ordering::SeqCst),
+            0,
+            "menu does not advance the world"
+        );
 
         sim.set_state(Flow::Playing);
         sim.tick();
@@ -361,7 +366,11 @@ mod tests {
         sim.set_state(Transition::Idle);
         sim.set_state(Suspension::Suspended);
         sim.tick();
-        assert_eq!(TICKS.load(Ordering::SeqCst), 1, "a suspend freezes the world");
+        assert_eq!(
+            TICKS.load(Ordering::SeqCst),
+            1,
+            "a suspend freezes the world"
+        );
 
         sim.set_state(Suspension::Live);
         sim.tick();

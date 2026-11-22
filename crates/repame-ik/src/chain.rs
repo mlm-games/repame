@@ -153,8 +153,8 @@ impl JointChain {
     ) -> Result<Vec<Vec3>, IkError> {
         let mut points = Vec::with_capacity(self.joints.len() + 1);
         for joint in &self.joints {
-            let world =
-                pose::world_matrix(skeleton, locals, *joint).ok_or(IkError::UnknownJoint(*joint))?;
+            let world = pose::world_matrix(skeleton, locals, *joint)
+                .ok_or(IkError::UnknownJoint(*joint))?;
             points.push(world.transform_point3(Vec3::ZERO));
         }
         points.push(self.effector(skeleton, locals)?);
@@ -168,7 +168,8 @@ impl JointChain {
         locals: &HashMap<usize, JointPose>,
     ) -> Result<Vec3, IkError> {
         let last = *self.joints.last().ok_or(IkError::EmptyChain)?;
-        let world = pose::world_matrix(skeleton, locals, last).ok_or(IkError::UnknownJoint(last))?;
+        let world =
+            pose::world_matrix(skeleton, locals, last).ok_or(IkError::UnknownJoint(last))?;
         Ok(world.transform_point3(self.end_offset))
     }
 
@@ -302,7 +303,8 @@ pub(crate) fn apply_point_targets(
     }
     for i in 0..count {
         let joint = chain.joints[i];
-        let world = pose::world_matrix(skeleton, locals, joint).ok_or(IkError::UnknownJoint(joint))?;
+        let world =
+            pose::world_matrix(skeleton, locals, joint).ok_or(IkError::UnknownJoint(joint))?;
         let origin = world.transform_point3(Vec3::ZERO);
         let outgoing = if i + 1 < count {
             let child = chain.joints[i + 1];

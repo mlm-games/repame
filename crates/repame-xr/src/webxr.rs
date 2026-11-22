@@ -378,7 +378,9 @@ impl WebXrBackend {
                 }));
             };
             let Some(layer) = shared.layer.clone() else {
-                return Err(FrameError::Xr(XrError::NotReady { what: "a WebXR layer" }));
+                return Err(FrameError::Xr(XrError::NotReady {
+                    what: "a WebXR layer",
+                }));
             };
             let size = [layer.framebuffer_width(), layer.framebuffer_height()];
             (reference, layer, size)
@@ -439,11 +441,12 @@ impl WebXrBackend {
                     what: "view projection matrix",
                 },
             ))?;
-            let viewport = layer
-                .get_viewport(&view)
-                .ok_or(FrameError::Xr(XrError::InvalidData {
-                    what: "view viewport",
-                }))?;
+            let viewport =
+                layer
+                    .get_viewport(&view)
+                    .ok_or(FrameError::Xr(XrError::InvalidData {
+                        what: "view viewport",
+                    }))?;
             let viewport = [
                 viewport.x().max(0) as u32,
                 viewport.y().max(0) as u32,
@@ -476,16 +479,12 @@ impl WebXrBackend {
         }
         let expected = self.view_configuration.view_count();
         if setups.len() != expected {
-            return Err(FrameError::Xr(XrError::InvalidData {
-                what: "view count",
-            }));
+            return Err(FrameError::Xr(XrError::InvalidData { what: "view count" }));
         }
         if expected > 1 && setups[0].eye == setups[1].eye {
             // Two views for one eye would draw the same eye twice; the runtime
             // does not get to name them both the same.
-            return Err(FrameError::Xr(XrError::InvalidData {
-                what: "view eyes",
-            }));
+            return Err(FrameError::Xr(XrError::InvalidData { what: "view eyes" }));
         }
 
         let config = ViewConfig {
@@ -549,10 +548,10 @@ impl WebXrBackend {
             return;
         }
         let weak = Rc::downgrade(&self.shared);
-        let callback = Closure::wrap_assert_unwind_safe(
-            Box::new(move |time: f64, frame: JsValue| animation_frame(&weak, time, frame))
-                as Box<dyn FnMut(f64, JsValue)>,
-        );
+        let callback =
+            Closure::wrap_assert_unwind_safe(Box::new(move |time: f64, frame: JsValue| {
+                animation_frame(&weak, time, frame)
+            }) as Box<dyn FnMut(f64, JsValue)>);
         shared.loop_callback = Some(callback);
     }
 
@@ -859,7 +858,11 @@ fn request_reference_space(
 
 /// A refused reference space is not fatal: only the app that asks to be placed
 /// in it hears about it.
-fn on_reference_space_failure(shared: &Weak<RefCell<Shared>>, space: ReferenceSpace, error: &JsValue) {
+fn on_reference_space_failure(
+    shared: &Weak<RefCell<Shared>>,
+    space: ReferenceSpace,
+    error: &JsValue,
+) {
     let Some(shared) = shared.upgrade() else {
         return;
     };
@@ -922,11 +925,13 @@ fn viewer_pose(
     frame: &XrFrame,
     reference: &js::XrReferenceSpace,
 ) -> XrResult<Option<js::XrViewerPose>> {
-    frame.get_viewer_pose(reference).map_err(|error| XrError::Runtime {
-        backend: NAME,
-        code: js_error_code(&error),
-        detail: format!("getViewerPose: {}", error_text(&error)),
-    })
+    frame
+        .get_viewer_pose(reference)
+        .map_err(|error| XrError::Runtime {
+            backend: NAME,
+            code: js_error_code(&error),
+            detail: format!("getViewerPose: {}", error_text(&error)),
+        })
 }
 
 /// A pose from the runtime's rigid transform.
@@ -1022,7 +1027,8 @@ fn read_sources(
     let mut readings: Vec<InputSource> = Vec::new();
     let mut profiles: Vec<(Hand, InteractionProfile)> = Vec::new();
     for index in 0..sources.length() {
-        let Ok(value) = js_sys::Reflect::get(sources.as_ref(), &JsValue::from_f64(f64::from(index)))
+        let Ok(value) =
+            js_sys::Reflect::get(sources.as_ref(), &JsValue::from_f64(f64::from(index)))
         else {
             continue;
         };
@@ -1161,7 +1167,11 @@ fn eye_of(name: &str, index: usize, configuration: ViewConfiguration) -> Eye {
     match name {
         "left" => Eye::Left,
         "right" => Eye::Right,
-        _ => configuration.eyes().get(index).copied().unwrap_or(Eye::Left),
+        _ => configuration
+            .eyes()
+            .get(index)
+            .copied()
+            .unwrap_or(Eye::Left),
     }
 }
 
@@ -1235,11 +1245,7 @@ fn render_state(layer: &js::XrWebGlLayer) -> js_sys::Object {
 /// defaults, spelled out because they decide what the framebuffer is.
 fn layer_init(alpha: bool) -> JsValue {
     let init = js_sys::Object::new();
-    let alpha_value = if alpha {
-        JsValue::TRUE
-    } else {
-        JsValue::FALSE
-    };
+    let alpha_value = if alpha { JsValue::TRUE } else { JsValue::FALSE };
     set_property(init.as_ref(), "alpha", &alpha_value);
     set_property(init.as_ref(), "antialias", &JsValue::TRUE);
     set_property(init.as_ref(), "depth", &JsValue::TRUE);
@@ -1314,14 +1320,22 @@ mod js {
 
     #[wasm_bindgen]
     extern "C" {
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "XRSystem", typescript_type = "XRSystem")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "XRSystem",
+            typescript_type = "XRSystem"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrSystem;
 
         #[wasm_bindgen(method, js_class = "XRSystem", js_name = "requestSession")]
         pub fn request_session(this: &XrSystem, mode: &str, options: &JsValue) -> js_sys::Promise;
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "XRSession", typescript_type = "XRSession")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "XRSession",
+            typescript_type = "XRSession"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrSession;
 
@@ -1349,7 +1363,11 @@ mod js {
         #[wasm_bindgen(method, js_class = "XRSession", js_name = "cancelAnimationFrame")]
         pub fn cancel_animation_frame(this: &XrSession, handle: u32);
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "XRWebGLLayer", typescript_type = "XRWebGLLayer")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "XRWebGLLayer",
+            typescript_type = "XRWebGLLayer"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrWebGlLayer;
 
@@ -1363,24 +1381,46 @@ mod js {
         #[wasm_bindgen(method, getter, js_class = "XRWebGLLayer", js_name = "framebuffer")]
         pub fn framebuffer(this: &XrWebGlLayer) -> Option<web_sys::WebGlFramebuffer>;
 
-        #[wasm_bindgen(method, getter, js_class = "XRWebGLLayer", js_name = "framebufferWidth")]
+        #[wasm_bindgen(
+            method,
+            getter,
+            js_class = "XRWebGLLayer",
+            js_name = "framebufferWidth"
+        )]
         pub fn framebuffer_width(this: &XrWebGlLayer) -> u32;
 
-        #[wasm_bindgen(method, getter, js_class = "XRWebGLLayer", js_name = "framebufferHeight")]
+        #[wasm_bindgen(
+            method,
+            getter,
+            js_class = "XRWebGLLayer",
+            js_name = "framebufferHeight"
+        )]
         pub fn framebuffer_height(this: &XrWebGlLayer) -> u32;
 
         #[wasm_bindgen(method, js_class = "XRWebGLLayer", js_name = "getViewport")]
         pub fn get_viewport(this: &XrWebGlLayer, view: &XrView) -> Option<XrViewport>;
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "XRSpace", typescript_type = "XRSpace")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "XRSpace",
+            typescript_type = "XRSpace"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrSpace;
 
-        #[wasm_bindgen(extends = "XrSpace", js_name = "XRReferenceSpace", typescript_type = "XRReferenceSpace")]
+        #[wasm_bindgen(
+            extends = "XrSpace",
+            js_name = "XRReferenceSpace",
+            typescript_type = "XRReferenceSpace"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrReferenceSpace;
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "XRFrame", typescript_type = "XRFrame")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "XRFrame",
+            typescript_type = "XRFrame"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrFrame;
 
@@ -1397,7 +1437,11 @@ mod js {
             base: &XrSpace,
         ) -> Result<Option<XrPose>, JsValue>;
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "XRPose", typescript_type = "XRPose")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "XRPose",
+            typescript_type = "XRPose"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrPose;
 
@@ -1407,14 +1451,22 @@ mod js {
         #[wasm_bindgen(method, getter, js_class = "XRPose", js_name = "emulatedPosition")]
         pub fn emulated_position(this: &XrPose) -> bool;
 
-        #[wasm_bindgen(extends = "XrPose", js_name = "XRViewerPose", typescript_type = "XRViewerPose")]
+        #[wasm_bindgen(
+            extends = "XrPose",
+            js_name = "XRViewerPose",
+            typescript_type = "XRViewerPose"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrViewerPose;
 
         #[wasm_bindgen(method, getter, js_class = "XRViewerPose", js_name = "views")]
         pub fn views(this: &XrViewerPose) -> js_sys::Array;
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "XRView", typescript_type = "XRView")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "XRView",
+            typescript_type = "XRView"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrView;
 
@@ -1427,7 +1479,11 @@ mod js {
         #[wasm_bindgen(method, getter, js_class = "XRView", js_name = "transform")]
         pub fn transform(this: &XrView) -> XrRigidTransform;
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "XRViewport", typescript_type = "XRViewport")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "XRViewport",
+            typescript_type = "XRViewport"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrViewport;
 
@@ -1443,7 +1499,11 @@ mod js {
         #[wasm_bindgen(method, getter, js_class = "XRViewport", js_name = "height")]
         pub fn height(this: &XrViewport) -> i32;
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "XRRigidTransform", typescript_type = "XRRigidTransform")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "XRRigidTransform",
+            typescript_type = "XRRigidTransform"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrRigidTransform;
 
@@ -1457,14 +1517,22 @@ mod js {
         // length and an indexed getter, so a source is read through
         // `Reflect::get` by index.
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "XRInputSourceArray", typescript_type = "XRInputSourceArray")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "XRInputSourceArray",
+            typescript_type = "XRInputSourceArray"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrInputSourceArray;
 
         #[wasm_bindgen(method, getter, js_class = "XRInputSourceArray", js_name = "length")]
         pub fn length(this: &XrInputSourceArray) -> u32;
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "XRInputSource", typescript_type = "XRInputSource")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "XRInputSource",
+            typescript_type = "XRInputSource"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type XrInputSource;
 
@@ -1487,7 +1555,11 @@ mod js {
         // too, so that this module is the one place the WebXR surface is
         // spelled.
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "Gamepad", typescript_type = "Gamepad")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "Gamepad",
+            typescript_type = "Gamepad"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type Gamepad;
 
@@ -1500,7 +1572,11 @@ mod js {
         #[wasm_bindgen(method, getter, js_class = "Gamepad", js_name = "axes")]
         pub fn axes(this: &Gamepad) -> js_sys::Array;
 
-        #[wasm_bindgen(extends = "::js_sys::Object", js_name = "GamepadButton", typescript_type = "GamepadButton")]
+        #[wasm_bindgen(
+            extends = "::js_sys::Object",
+            js_name = "GamepadButton",
+            typescript_type = "GamepadButton"
+        )]
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub type GamepadButton;
 

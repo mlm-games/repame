@@ -173,7 +173,10 @@ impl<S: Storage> AssetPipeline<S> {
     }
 
     /// Write only the manifest, into `output_root`.
-    pub fn write_manifest(&self, output_root: impl AsRef<Path>) -> Result<ContentManifest, ContentError> {
+    pub fn write_manifest(
+        &self,
+        output_root: impl AsRef<Path>,
+    ) -> Result<ContentManifest, ContentError> {
         let manifest = self.scan()?;
         let path = output_root.as_ref().join(ASSET_MANIFEST_FILE);
         write_atomic(&self.storage, &path, manifest.to_ron()?.as_bytes())?;
@@ -505,10 +508,18 @@ mod tests {
     fn game_tree() -> MemoryStorage {
         let storage = MemoryStorage::new();
         storage.create_dir_all(Path::new("game/art/ui")).unwrap();
-        storage.write(Path::new("game/art/ui/hero.png"), &tiny_png(4, 3)).unwrap();
-        storage.write(Path::new("game/art/tile.png"), &tiny_png(16, 8)).unwrap();
-        storage.write(Path::new("game/art/beep.wav"), &tiny_wav()).unwrap();
-        storage.write(Path::new("game/art/notes.txt"), b"hello").unwrap();
+        storage
+            .write(Path::new("game/art/ui/hero.png"), &tiny_png(4, 3))
+            .unwrap();
+        storage
+            .write(Path::new("game/art/tile.png"), &tiny_png(16, 8))
+            .unwrap();
+        storage
+            .write(Path::new("game/art/beep.wav"), &tiny_wav())
+            .unwrap();
+        storage
+            .write(Path::new("game/art/notes.txt"), b"hello")
+            .unwrap();
         storage
     }
 
@@ -565,12 +576,21 @@ mod tests {
             .iter()
             .map(|entry| entry.path.as_str())
             .collect();
-        assert_eq!(paths, vec!["beep.wav", "notes.txt", "tile.png", "ui/hero.png"]);
+        assert_eq!(
+            paths,
+            vec!["beep.wav", "notes.txt", "tile.png", "ui/hero.png"]
+        );
         let hero = AssetPath::parse("ui/hero.png").expect("path");
         let hero_entry = first.manifest.entry(&hero).expect("hero");
         assert_eq!(hero_entry.kind, AssetKind::Image);
-        assert_eq!(hero_entry.image.as_ref().expect("dimensions").dimensions(), (4, 3));
-        let beep = first.manifest.entry(&AssetPath::parse("beep.wav").expect("path")).expect("beep");
+        assert_eq!(
+            hero_entry.image.as_ref().expect("dimensions").dimensions(),
+            (4, 3)
+        );
+        let beep = first
+            .manifest
+            .entry(&AssetPath::parse("beep.wav").expect("path"))
+            .expect("beep");
         assert_eq!(beep.kind, AssetKind::Audio);
         assert_eq!(
             beep.audio,
@@ -579,22 +599,39 @@ mod tests {
                 channels: Some(1)
             })
         );
-        let notes = first.manifest.entry(&AssetPath::parse("notes.txt").expect("path")).expect("notes");
+        let notes = first
+            .manifest
+            .entry(&AssetPath::parse("notes.txt").expect("path"))
+            .expect("notes");
         assert_eq!(notes.kind, AssetKind::Text);
-        let summed: u64 = first.manifest.entries().iter().map(|entry| entry.size).sum();
+        let summed: u64 = first
+            .manifest
+            .entries()
+            .iter()
+            .map(|entry| entry.size)
+            .sum();
         assert_eq!(first.manifest.total_size(), summed);
         assert_eq!(first.atlas_pages(), Some(1));
-        assert!(first.manifest.atlas().is_some(), "atlas plan is in the manifest");
+        assert!(
+            first.manifest.atlas().is_some(),
+            "atlas plan is in the manifest"
+        );
     }
 
     #[test]
     fn nested_output_named_sources_are_scanned_and_packed() {
         let storage = game_tree();
         storage
-            .write(Path::new("game/art/levels/assets.ron"), b"(name: \"nested\")")
+            .write(
+                Path::new("game/art/levels/assets.ron"),
+                b"(name: \"nested\")",
+            )
             .unwrap();
         storage
-            .write(Path::new("game/art/levels/assets.pack"), b"nested pack bytes")
+            .write(
+                Path::new("game/art/levels/assets.pack"),
+                b"nested pack bytes",
+            )
             .unwrap();
         // Outputs land in the source root: the root copies are skipped, the
         // nested sources named the same are not, so `pack` carries everything
@@ -620,7 +657,12 @@ mod tests {
                 "ui/hero.png",
             ]
         );
-        assert!(storage.read(Path::new("game/art/assets.pack")).unwrap().is_some());
+        assert!(
+            storage
+                .read(Path::new("game/art/assets.pack"))
+                .unwrap()
+                .is_some()
+        );
         let archive = Path::new("game/art/assets.pack");
         let pack = storage.read(archive).unwrap().expect("pack");
         let package = Package::read(pack.clone(), archive).expect("package");
@@ -636,7 +678,10 @@ mod tests {
         // missing when shipped.
         let packed = AssetVfs::from_bytes(pack, archive).expect("packed store");
         let dev = LooseAssets::open_with_storage("game/art", storage.clone()).expect("dev store");
-        assert!(packed.contains(&nested), "the archive holds the nested source");
+        assert!(
+            packed.contains(&nested),
+            "the archive holds the nested source"
+        );
         for entry in build.manifest.entries() {
             assert_eq!(
                 dev.read(&entry.path).expect("dev read"),
@@ -670,9 +715,16 @@ mod tests {
             .scan()
             .expect("scan");
         let plan = manifest.atlas().expect("plan");
-        assert_eq!(plan.len(), 2, "both plain images pack; the wav and text do not");
+        assert_eq!(
+            plan.len(),
+            2,
+            "both plain images pack; the wav and text do not"
+        );
         assert_eq!(plan.pages, 1);
-        assert!(plan.placement(&AssetPath::parse("tile.png").expect("path")).is_some());
+        assert!(
+            plan.placement(&AssetPath::parse("tile.png").expect("path"))
+                .is_some()
+        );
 
         // Replaying the plan's own order through repame-atlas reproduces it.
         let mut atlas = repame_atlas::Atlas::new(desc);
@@ -720,7 +772,9 @@ mod tests {
         assert!(error.to_string().contains("nowhere"), "{error}");
 
         storage.create_dir_all(Path::new("art")).unwrap();
-        storage.write(Path::new("art/broken.png"), b"not a png").unwrap();
+        storage
+            .write(Path::new("art/broken.png"), b"not a png")
+            .unwrap();
         let error = AssetPipeline::with_storage("art", storage.clone())
             .expect("pipeline")
             .scan()
@@ -731,7 +785,10 @@ mod tests {
         // An absolute source outside the content root never becomes a key.
         let error = AssetPath::from_absolute(Path::new("art"), Path::new("/elsewhere/hero.png"))
             .expect_err("outside the root");
-        assert!(error.to_string().contains("outside the content root"), "{error}");
+        assert!(
+            error.to_string().contains("outside the content root"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -743,7 +800,10 @@ mod tests {
             .expect("build");
         assert_eq!(build.entries(), 4);
         assert_eq!(build.atlas_pages(), None);
-        let pack = storage.read(Path::new("out/assets.pack")).unwrap().expect("pack");
+        let pack = storage
+            .read(Path::new("out/assets.pack"))
+            .unwrap()
+            .expect("pack");
         assert_eq!(build.archive_size, pack.len() as u64);
         let package = Package::read(pack, Path::new(ASSET_PACK_FILE)).expect("package");
         assert_eq!(package.len(), 5, "manifest plus four sources");

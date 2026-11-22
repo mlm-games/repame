@@ -267,7 +267,11 @@ pub fn decode_f16(bits: u16) -> f32 {
         return f32::from_bits(sign | value.to_bits());
     }
     if exponent == 0x1f {
-        let payload = if mantissa == 0 { 0 } else { 0x40_0000 | (mantissa << 13) };
+        let payload = if mantissa == 0 {
+            0
+        } else {
+            0x40_0000 | (mantissa << 13)
+        };
         return f32::from_bits(sign | 0x7f80_0000 | payload);
     }
     f32::from_bits(sign | ((exponent + 127 - 15) << 23) | (mantissa << 13))
@@ -306,7 +310,12 @@ pub fn aabb_ndc(view_proj: &Mat4, min: [f32; 3], max: [f32; 3]) -> Option<([f32;
 }
 
 /// Nearest view depth of an AABB's corners along a unit `forward` axis.
-pub fn nearest_view_depth(min: [f32; 3], max: [f32; 3], cam_pos: [f32; 3], forward: [f32; 3]) -> f32 {
+pub fn nearest_view_depth(
+    min: [f32; 3],
+    max: [f32; 3],
+    cam_pos: [f32; 3],
+    forward: [f32; 3],
+) -> f32 {
     let mut nearest = f32::MAX;
     for corner in 0..8 {
         let p = [
@@ -464,14 +473,7 @@ impl DepthPyramid {
 
     /// The shared upper half: level 0 plus the max-of-2x2 coarsening up to a
     /// single tile, over exactly [`coarsened_dims`].
-    fn coarsen(
-        width: u32,
-        height: u32,
-        tile: u32,
-        cols: u32,
-        rows: u32,
-        level0: Vec<f32>,
-    ) -> Self {
+    fn coarsen(width: u32, height: u32, tile: u32, cols: u32, rows: u32, level0: Vec<f32>) -> Self {
         let dims = coarsened_dims(cols, rows);
         let mut levels = Vec::with_capacity(dims.len());
         levels.push(level0);
@@ -612,7 +614,9 @@ impl DepthPyramid {
                         let bits = u16::from_le_bytes([texel[0], texel[1]]);
                         decode_f16(bits)
                     }
-                    DepthSource::R32Float => f32::from_le_bytes([texel[0], texel[1], texel[2], texel[3]]),
+                    DepthSource::R32Float => {
+                        f32::from_le_bytes([texel[0], texel[1], texel[2], texel[3]])
+                    }
                 };
                 depths.push(depth);
             }
@@ -891,7 +895,10 @@ mod tests {
             [0.0, 0.0, 10.0],
             [0.0, 0.0, -1.0],
         );
-        assert!((nearest - 9.0).abs() < 1e-6, "near corner is z = 1: {nearest}");
+        assert!(
+            (nearest - 9.0).abs() < 1e-6,
+            "near corner is z = 1: {nearest}"
+        );
     }
 
     /// End to end through the batch-facing wrapper: a box behind an occluder

@@ -141,7 +141,10 @@ pub fn parse_header(bytes: &[u8], path: &Path) -> Result<DdsHeader, ContentError
             let mapped = dxgi_format(extension.dxgi_format).ok_or_else(|| {
                 ContentError::unsupported(
                     path,
-                    format!("DDS DXGI format {} is not implemented", extension.dxgi_format),
+                    format!(
+                        "DDS DXGI format {} is not implemented",
+                        extension.dxgi_format
+                    ),
                 )
             })?;
             format = mapped.0;
@@ -164,7 +167,10 @@ pub fn parse_header(bytes: &[u8], path: &Path) -> Result<DdsHeader, ContentError
         format = masked_format(&pixel_format, path)?;
     }
     if format == TextureFormat::Undefined {
-        return Err(ContentError::unsupported(path, "DDS header has no pixel format"));
+        return Err(ContentError::unsupported(
+            path,
+            "DDS header has no pixel format",
+        ));
     }
 
     Ok(DdsHeader {
@@ -210,7 +216,10 @@ pub fn parse_levels(
     path: &Path,
 ) -> Result<Vec<TextureLevel>, ContentError> {
     if header.width == 0 || header.height == 0 {
-        return Err(ContentError::format(path, "DDS dimensions must be non-zero"));
+        return Err(ContentError::format(
+            path,
+            "DDS dimensions must be non-zero",
+        ));
     }
     let max_levels = max_mip_levels(header.width, header.height);
     let mip_levels = header.levels_declared();
@@ -260,7 +269,11 @@ pub fn parse_levels(
         for level in 0..mip_levels {
             let width = (header.width >> level).max(1);
             let height = (header.height >> level).max(1);
-            let level_depth = if is_volume { (depth >> level).max(1) } else { 1 };
+            let level_depth = if is_volume {
+                (depth >> level).max(1)
+            } else {
+                1
+            };
             let size = header.format.surface_bytes(width, height) as u64 * u64::from(level_depth);
             levels.push(TextureLevel {
                 width,
@@ -348,7 +361,10 @@ fn dds_images(header: &DdsHeader) -> u32 {
 pub fn parse(bytes: &[u8], path: &Path) -> Result<TextureInfo, ContentError> {
     let header = parse_header(bytes, path)?;
     if header.width == 0 || header.height == 0 {
-        return Err(ContentError::format(path, "DDS dimensions must be non-zero"));
+        return Err(ContentError::format(
+            path,
+            "DDS dimensions must be non-zero",
+        ));
     }
     let payload_len = (bytes.len() as u64).saturating_sub(data_offset(&header));
     let levels = parse_levels(&header, payload_len, path)?;
@@ -464,7 +480,9 @@ pub(crate) fn masked_format(
             _ => {
                 return Err(ContentError::unsupported(
                     path,
-                    format!("DDS bitmasked pixel format (bits={bits}, r={red:#x}, g={green:#x}, b={blue:#x}, a={alpha:#x}) is not implemented"),
+                    format!(
+                        "DDS bitmasked pixel format (bits={bits}, r={red:#x}, g={green:#x}, b={blue:#x}, a={alpha:#x}) is not implemented"
+                    ),
                 ));
             }
         }
@@ -491,7 +509,9 @@ pub(crate) fn masked_format(
             _ => {
                 return Err(ContentError::unsupported(
                     path,
-                    format!("DDS bitmasked pixel format (bits={bits}, r={red:#x}, g={green:#x}, b={blue:#x}) is not implemented"),
+                    format!(
+                        "DDS bitmasked pixel format (bits={bits}, r={red:#x}, g={green:#x}, b={blue:#x}) is not implemented"
+                    ),
                 ));
             }
         }
@@ -590,7 +610,11 @@ mod tests {
         // One byte short of the chain: typed format error, not a panic.
         let error = parse_levels(&header, 55, path).expect_err("overruns the payload");
         assert_eq!(error.kind(), crate::error::ContentErrorKind::Format);
-        assert!(error.message().contains("56 payload bytes"), "{}", error.message());
+        assert!(
+            error.message().contains("56 payload bytes"),
+            "{}",
+            error.message()
+        );
     }
 
     #[test]
@@ -716,7 +740,9 @@ mod tests {
         ] {
             assert!(error.is_unsupported(), "{error}");
             assert!(
-                error.message().contains("pitched DDS rows are not supported"),
+                error
+                    .message()
+                    .contains("pitched DDS rows are not supported"),
                 "{}",
                 error.message()
             );
@@ -746,8 +772,8 @@ mod tests {
         assert_eq!(decoded.data, vec![0x7f; 256]);
 
         // 5x4 RGB8 with pitch 16: one level, padded rows, refused.
-        let error = parse(&rgb8_pitched_dds(5, 4, 16, 1, 64), path)
-            .expect_err("padded rows are refused");
+        let error =
+            parse(&rgb8_pitched_dds(5, 4, 16, 1, 64), path).expect_err("padded rows are refused");
         assert!(error.is_unsupported(), "{error}");
         assert!(error.message().contains("pitched"), "{}", error.message());
     }

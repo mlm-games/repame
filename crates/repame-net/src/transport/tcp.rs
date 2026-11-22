@@ -276,21 +276,30 @@ fn reader_loop(
         match read_full(&mut stream, &mut header, &shutdown) {
             Ok(true) => {}
             Ok(false) => {
-                let _ = send_event(&events, TransportEvent::Disconnected {
-                    peer,
-                    reason: DisconnectReason::PeerClosed,
-                });
+                let _ = send_event(
+                    &events,
+                    TransportEvent::Disconnected {
+                        peer,
+                        reason: DisconnectReason::PeerClosed,
+                    },
+                );
                 return;
             }
             Err(error) => {
-                let _ = send_event(&events, TransportEvent::Error {
-                    peer: Some(peer),
-                    error: NetError::Io(error),
-                });
-                let _ = send_event(&events, TransportEvent::Disconnected {
-                    peer,
-                    reason: DisconnectReason::Io("read failed".to_string()),
-                });
+                let _ = send_event(
+                    &events,
+                    TransportEvent::Error {
+                        peer: Some(peer),
+                        error: NetError::Io(error),
+                    },
+                );
+                let _ = send_event(
+                    &events,
+                    TransportEvent::Disconnected {
+                        peer,
+                        reason: DisconnectReason::Io("read failed".to_string()),
+                    },
+                );
                 return;
             }
         }
@@ -305,10 +314,7 @@ fn reader_loop(
                         error: NetError::Codec(error),
                     },
                 );
-                let _ = send_event(
-                    &events,
-                    TransportEvent::Disconnected { peer, reason },
-                );
+                let _ = send_event(&events, TransportEvent::Disconnected { peer, reason });
                 return;
             }
         };
@@ -316,17 +322,23 @@ fn reader_loop(
         match read_full(&mut stream, &mut body, &shutdown) {
             Ok(true) => {}
             Ok(false) => {
-                let _ = send_event(&events, TransportEvent::Disconnected {
-                    peer,
-                    reason: DisconnectReason::PeerClosed,
-                });
+                let _ = send_event(
+                    &events,
+                    TransportEvent::Disconnected {
+                        peer,
+                        reason: DisconnectReason::PeerClosed,
+                    },
+                );
                 return;
             }
             Err(error) => {
-                let _ = send_event(&events, TransportEvent::Error {
-                    peer: Some(peer),
-                    error: NetError::Io(error),
-                });
+                let _ = send_event(
+                    &events,
+                    TransportEvent::Error {
+                        peer: Some(peer),
+                        error: NetError::Io(error),
+                    },
+                );
                 return;
             }
         }
@@ -353,10 +365,7 @@ fn reader_loop(
                         error: NetError::Codec(error),
                     },
                 );
-                let _ = send_event(
-                    &events,
-                    TransportEvent::Disconnected { peer, reason },
-                );
+                let _ = send_event(&events, TransportEvent::Disconnected { peer, reason });
                 return;
             }
         }
@@ -392,19 +401,25 @@ fn writer_loop(
                 let frame = match encode_frame(&[FramedMessage { channel, payload }]) {
                     Ok(frame) => frame,
                     Err(error) => {
-                        let _ = send_event(&events, TransportEvent::Error {
-                            peer: Some(peer),
-                            error: NetError::Codec(error),
-                        });
+                        let _ = send_event(
+                            &events,
+                            TransportEvent::Error {
+                                peer: Some(peer),
+                                error: NetError::Codec(error),
+                            },
+                        );
                         continue;
                     }
                 };
                 match streams.get_mut(&peer) {
                     None => {
-                        let _ = send_event(&events, TransportEvent::Error {
-                            peer: Some(peer),
-                            error: NetError::UnknownPeer(peer),
-                        });
+                        let _ = send_event(
+                            &events,
+                            TransportEvent::Error {
+                                peer: Some(peer),
+                                error: NetError::UnknownPeer(peer),
+                            },
+                        );
                     }
                     Some(stream) => {
                         if let Err(error) = stream.write_all(&frame).and_then(|()| stream.flush()) {
@@ -412,14 +427,20 @@ fn writer_loop(
                             if let Ok(mut set) = known.lock() {
                                 set.remove(&peer);
                             }
-                            let _ = send_event(&events, TransportEvent::Error {
-                                peer: Some(peer),
-                                error: NetError::Io(error),
-                            });
-                            let _ = send_event(&events, TransportEvent::Disconnected {
-                                peer,
-                                reason: DisconnectReason::Io("write failed".to_string()),
-                            });
+                            let _ = send_event(
+                                &events,
+                                TransportEvent::Error {
+                                    peer: Some(peer),
+                                    error: NetError::Io(error),
+                                },
+                            );
+                            let _ = send_event(
+                                &events,
+                                TransportEvent::Disconnected {
+                                    peer,
+                                    reason: DisconnectReason::Io("write failed".to_string()),
+                                },
+                            );
                         }
                     }
                 }
@@ -432,10 +453,13 @@ fn writer_loop(
         set.clear();
     }
     for peer in streams.keys() {
-        let _ = send_event(&events, TransportEvent::Disconnected {
-            peer: *peer,
-            reason: DisconnectReason::LocalClosed,
-        });
+        let _ = send_event(
+            &events,
+            TransportEvent::Disconnected {
+                peer: *peer,
+                reason: DisconnectReason::LocalClosed,
+            },
+        );
     }
 }
 
@@ -457,10 +481,13 @@ fn accept_loop(
                 let writer_stream = match stream.try_clone() {
                     Ok(writer_stream) => writer_stream,
                     Err(error) => {
-                        let _ = send_event(&events, TransportEvent::Error {
-                            peer: None,
-                            error: NetError::Io(error),
-                        });
+                        let _ = send_event(
+                            &events,
+                            TransportEvent::Error {
+                                peer: None,
+                                error: NetError::Io(error),
+                            },
+                        );
                         continue;
                     }
                 };
@@ -481,10 +508,13 @@ fn accept_loop(
                 thread::sleep(TICK);
             }
             Err(error) => {
-                let _ = send_event(&events, TransportEvent::Error {
-                    peer: None,
-                    error: NetError::Io(error),
-                });
+                let _ = send_event(
+                    &events,
+                    TransportEvent::Error {
+                        peer: None,
+                        error: NetError::Io(error),
+                    },
+                );
                 return;
             }
         }

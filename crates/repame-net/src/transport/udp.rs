@@ -275,12 +275,11 @@ impl ReliableEndpoint {
                         pending.attempts = 1;
                     }
                     Some(sent) => {
-                        if now_ms.saturating_sub(sent) >= Self::backoff_ms(retransmit_ms, pending.attempts) {
+                        if now_ms.saturating_sub(sent)
+                            >= Self::backoff_ms(retransmit_ms, pending.attempts)
+                        {
                             if pending.attempts >= max_retries {
-                                return Err(NetError::RetryLimit {
-                                    channel,
-                                    seq: *seq,
-                                });
+                                return Err(NetError::RetryLimit { channel, seq: *seq });
                             }
                             pending.attempts += 1;
                             pending.last_sent_ms = Some(now_ms);
@@ -359,11 +358,11 @@ impl ReliableEndpoint {
         }
     }
 
-/// Exponential backoff on the base retransmit timeout, capped at 32x.
-fn backoff_ms(base_ms: u32, attempts: u32) -> u64 {
-    let shift = attempts.saturating_sub(1).min(MAX_BACKOFF_SHIFT);
-    u64::from(base_ms.saturating_mul(1u32 << shift))
-}
+    /// Exponential backoff on the base retransmit timeout, capped at 32x.
+    fn backoff_ms(base_ms: u32, attempts: u32) -> u64 {
+        let shift = attempts.saturating_sub(1).min(MAX_BACKOFF_SHIFT);
+        u64::from(base_ms.saturating_mul(1u32 << shift))
+    }
 
     fn chunk(&self, records: Vec<Record>) -> Result<Vec<Vec<u8>>, NetError> {
         let mut datagrams = Vec::new();
@@ -473,7 +472,9 @@ impl UdpTransport {
             let peers = peers.clone();
             thread::Builder::new()
                 .name("repame-net-udp".to_string())
-                .spawn(move || worker_loop(socket, mode, channels, peers, events_tx, out_rx, shutdown))
+                .spawn(move || {
+                    worker_loop(socket, mode, channels, peers, events_tx, out_rx, shutdown)
+                })
                 .map_err(NetError::Io)?
         };
         Ok(Self {

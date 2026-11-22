@@ -22,7 +22,8 @@ pub fn bind_matrix(skeleton: &Skeleton, node: usize) -> Mat4 {
 
 /// Bind local TRS for `node` as a [`JointPose`].
 pub fn bind_pose(skeleton: &Skeleton, node: usize) -> JointPose {
-    let (scale, rotation, translation) = bind_matrix(skeleton, node).to_scale_rotation_translation();
+    let (scale, rotation, translation) =
+        bind_matrix(skeleton, node).to_scale_rotation_translation();
     JointPose {
         translation: translation.to_array(),
         rotation: rotation.to_array(),
@@ -60,11 +61,7 @@ pub fn rest_matrix(skeleton: &Skeleton, node: usize) -> Option<Mat4> {
     world_from(skeleton, |n| bind_matrix(skeleton, n), node)
 }
 
-fn world_from(
-    skeleton: &Skeleton,
-    local: impl Fn(usize) -> Mat4,
-    node: usize,
-) -> Option<Mat4> {
+fn world_from(skeleton: &Skeleton, local: impl Fn(usize) -> Mat4, node: usize) -> Option<Mat4> {
     if !skeleton.parents.contains_key(&node) {
         return None;
     }

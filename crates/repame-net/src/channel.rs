@@ -13,8 +13,8 @@
 
 use std::collections::HashMap;
 
-use crate::error::{ChannelError, CodecError, NetError};
 use crate::codec::{Decode, Encode, Reader, Writer};
+use crate::error::{ChannelError, CodecError, NetError};
 
 /// Channel identifier. `u8`, so a table holds at most 256 channels.
 pub type ChannelId = u8;

@@ -105,8 +105,9 @@ pub fn load_world(
     registry: &Registry,
     text: &str,
 ) -> Result<LoadReport, ReflectError> {
-    let snapshot: WorldSnapshot =
-        ron::from_str(text).map_err(|source| ReflectError::Format { source: source.into() })?;
+    let snapshot: WorldSnapshot = ron::from_str(text).map_err(|source| ReflectError::Format {
+        source: source.into(),
+    })?;
     if snapshot.format != WORLD_FORMAT {
         return Err(ReflectError::Version {
             found: snapshot.format,

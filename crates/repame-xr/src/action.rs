@@ -381,10 +381,7 @@ impl InteractionProfile {
 
     /// The full `/interaction_profiles/...` path.
     pub fn as_path(&self) -> String {
-        format!(
-            "/interaction_profiles/{}/{}",
-            self.vendor, self.name
-        )
+        format!("/interaction_profiles/{}/{}", self.vendor, self.name)
     }
 
     /// True when `text` is this profile's path.
@@ -461,7 +458,8 @@ pub fn parse_binding_path(text: &str) -> XrResult<ParsedBindingPath> {
 
     let (profile, rest) = match segments.first() {
         Some(&"interaction_profiles") => {
-            let profile = InteractionProfile::parse(text).map_err(|reason| bad_path(text, reason))?;
+            let profile =
+                InteractionProfile::parse(text).map_err(|reason| bad_path(text, reason))?;
             (Some(profile), &segments[3..])
         }
         _ => (None, segments.as_slice()),
@@ -534,11 +532,7 @@ pub struct ActionSet {
 
 impl ActionSet {
     /// An empty set.
-    pub fn new(
-        name: impl Into<String>,
-        localized_name: impl Into<String>,
-        priority: u32,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, localized_name: impl Into<String>, priority: u32) -> Self {
         Self {
             name: name.into(),
             localized_name: localized_name.into(),
@@ -637,7 +631,11 @@ impl ActionSet {
     /// nothing can drive it.
     pub fn subaction_paths(&self, action: &str) -> Vec<&UserPath> {
         let mut out: Vec<&UserPath> = Vec::new();
-        for binding in self.bindings.iter().filter(|binding| binding.action == action) {
+        for binding in self
+            .bindings
+            .iter()
+            .filter(|binding| binding.action == action)
+        {
             if !out.iter().any(|seen| **seen == binding.input.user) {
                 out.push(&binding.input.user);
             }
@@ -789,7 +787,10 @@ mod tests {
             })
         ));
         assert!(matches!(
-            set.add_binding("sprint", "/interaction_profiles/khr/simple_controller/user/head/input/pose"),
+            set.add_binding(
+                "sprint",
+                "/interaction_profiles/khr/simple_controller/user/head/input/pose"
+            ),
             Err(XrError::UnknownAction { .. })
         ));
         assert!(matches!(
@@ -802,7 +803,10 @@ mod tests {
         assert_eq!(touch.len(), 2);
         assert_eq!(touch[0].0.name, "move");
         assert_eq!(touch[1].0.name, "grip");
-        assert_eq!(set.bindings_for(InteractionProfile::VIVE_CONTROLLER).len(), 0);
+        assert_eq!(
+            set.bindings_for(InteractionProfile::VIVE_CONTROLLER).len(),
+            0
+        );
         assert_eq!(set.profiles().len(), 2);
         assert_eq!(set.action("move").unwrap().kind, ActionKind::Vector2);
 
@@ -822,7 +826,12 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(find_action(&[state.clone()], "gameplay", "move").unwrap().active, true);
+        assert_eq!(
+            find_action(&[state.clone()], "gameplay", "move")
+                .unwrap()
+                .active,
+            true
+        );
         assert!(matches!(
             find_action(&[state], "gameplay", "grip"),
             Err(XrError::UnknownAction { .. })
@@ -933,7 +942,10 @@ mod tests {
         );
 
         // Nothing to combine is the type's zero value, inactive.
-        assert_eq!(combine(ActionKind::Float, &[]), ActionReading::inactive(ActionKind::Float));
+        assert_eq!(
+            combine(ActionKind::Float, &[]),
+            ActionReading::inactive(ActionKind::Float)
+        );
         assert_eq!(
             combine(ActionKind::Vector2, &[]),
             ActionReading::inactive(ActionKind::Vector2)
@@ -986,7 +998,10 @@ mod tests {
         );
         assert_eq!(
             ActionReading::reported(ActionKind::Boolean, true, ActionValue::Bool(true)),
-            ActionReading { active: true, value: ActionValue::Bool(true) }
+            ActionReading {
+                active: true,
+                value: ActionValue::Bool(true)
+            }
         );
     }
 }

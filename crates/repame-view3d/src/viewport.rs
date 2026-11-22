@@ -1036,7 +1036,11 @@ impl WgpuCallback for GpuViewport3d {
             }
             None => {
                 batch.set_light(light);
-                batch.set_shadow(self.input.shadow, self.input.cam.target.into(), self.input.cam.dist);
+                batch.set_shadow(
+                    self.input.shadow,
+                    self.input.cam.target.into(),
+                    self.input.cam.dist,
+                );
             }
         }
         let slots: Vec<u32> = self

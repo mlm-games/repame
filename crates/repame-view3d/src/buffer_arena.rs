@@ -72,10 +72,7 @@ impl BufferArena {
             self.free.insert(base + size, rest);
         }
         self.used += size;
-        Ok(Alloc {
-            offset: base,
-            size,
-        })
+        Ok(Alloc { offset: base, size })
     }
 
     pub fn free(&mut self, alloc: Alloc) {

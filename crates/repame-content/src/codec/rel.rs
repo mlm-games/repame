@@ -59,7 +59,9 @@ impl Rel {
         if entries <= BSS_SLOT {
             return Err(ContentError::format(
                 source,
-                format!("relocatable object names {entries} sections, expected more than {BSS_SLOT}"),
+                format!(
+                    "relocatable object names {entries} sections, expected more than {BSS_SLOT}"
+                ),
             ));
         }
         let text_start = table
@@ -178,7 +180,12 @@ impl Rel {
     }
 
     /// The `count` floats a symbol holds, read big endian.
-    pub fn f32s(&self, section: &str, offset: usize, count: usize) -> Result<Vec<f32>, ContentError> {
+    pub fn f32s(
+        &self,
+        section: &str,
+        offset: usize,
+        count: usize,
+    ) -> Result<Vec<f32>, ContentError> {
         let size = count
             .checked_mul(4)
             .ok_or_else(|| ContentError::format(&self.source, "symbol range overflows"))?;

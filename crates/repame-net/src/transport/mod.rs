@@ -58,7 +58,10 @@ impl std::fmt::Display for DisconnectReason {
             Self::PeerClosed => write!(f, "peer closed"),
             Self::Io(message) => write!(f, "io: {message}"),
             Self::RetryLimit { channel, seq } => {
-                write!(f, "retransmit budget exhausted on channel {channel} seq {seq}")
+                write!(
+                    f,
+                    "retransmit budget exhausted on channel {channel} seq {seq}"
+                )
             }
             Self::Protocol(message) => write!(f, "protocol: {message}"),
         }

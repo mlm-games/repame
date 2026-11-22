@@ -978,15 +978,11 @@ fn gbuffer_shader(skinning: GpuSkinning) -> String {
 
 /// G-buffer module for one lowered material program: the shared vertex prefix
 /// with the combinator chain feeding albedo and the MRT fragment stage.
-fn gbuffer_material_shader(
-    skinning: GpuSkinning,
-    model: &super::material::ShadingModel,
-) -> String {
+fn gbuffer_material_shader(skinning: GpuSkinning, model: &super::material::ShadingModel) -> String {
     let mut source = scene_prefix(skinning);
     source.push_str(GBUFFER_STRUCT_WGSL);
-    source.push_str(
-        &super::shading::gbuffer_fragment(model).expect("registered materials validate"),
-    );
+    source
+        .push_str(&super::shading::gbuffer_fragment(model).expect("registered materials validate"));
     source
 }
 
@@ -1163,9 +1159,9 @@ use super::particles::{
     GpuColliders, GpuDrawParams, GpuEmitter, GpuSimState, ParticleFrame, ParticleVoxels,
     SIMULATE_WORKGROUP, pack_colliders, pack_emitter, request_capacity,
 };
-use super::reflection::ProbeSettings;
-use super::postfx::{PostProcess, PostStage, POST_WGSL, depth_velocity_shader};
+use super::postfx::{POST_WGSL, PostProcess, PostStage, depth_velocity_shader};
 use super::probe_prefilter::ProbePrefilter;
+use super::reflection::ProbeSettings;
 use super::skin::{GpuSkinning, SkinnedDraw, strip_skin_palette};
 
 fn align256(value: u64) -> u64 {
@@ -2168,7 +2164,7 @@ impl HizPipeline {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<HizTestParams>() as u64
+                            std::mem::size_of::<HizTestParams>() as u64,
                         ),
                     },
                     count: None,
@@ -2305,7 +2301,9 @@ impl OcclusionFeed {
             }));
         }
         let (layout, tile_reduce, coarsen, params, uniform_stride, levels) = {
-            let hiz = self.hiz.get_or_insert_with(|| HizPipeline::new(device, None));
+            let hiz = self
+                .hiz
+                .get_or_insert_with(|| HizPipeline::new(device, None));
             (
                 hiz.layout.clone(),
                 hiz.tile_reduce.clone(),
@@ -3025,47 +3023,46 @@ impl ParticleGpu {
             bind_group_layouts: &[Some(cam_layout), Some(tex_layout), Some(&draw_layout)],
             immediate_size: 0,
         });
-        let billboard_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("repame_view3d_particle_billboard"),
-                layout: Some(&render_layout),
-                vertex: wgpu::VertexState {
-                    module: &billboard_module,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &billboard_module,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth24PlusStencil8,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: SCENE_TARGET_SAMPLE_COUNT,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview_mask: None,
-                cache,
-            });
+        let billboard_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("repame_view3d_particle_billboard"),
+            layout: Some(&render_layout),
+            vertex: wgpu::VertexState {
+                module: &billboard_module,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &billboard_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: SCENE_TARGET_SAMPLE_COUNT,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache,
+        });
         let colliders = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("repame_view3d_particle_colliders"),
             size: size_of::<GpuColliders>() as u64,
@@ -4565,14 +4562,13 @@ impl SceneBatch {
                     gbuffer_material_shader(res.skin, &entry.model).into(),
                 ),
             });
-            let gbuffer_targets: [Option<wgpu::ColorTargetState>; 4] =
-                std::array::from_fn(|_| {
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })
-                });
+            let gbuffer_targets: [Option<wgpu::ColorTargetState>; 4] = std::array::from_fn(|_| {
+                Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            });
             let gbuffer = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("repame_view3d_gbuffer_material_pipeline"),
                 layout: Some(&layout),
@@ -4726,8 +4722,7 @@ impl SceneBatch {
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D3,
                         format: wgpu::TextureFormat::R32Uint,
-                        usage: wgpu::TextureUsages::TEXTURE_BINDING
-                            | wgpu::TextureUsages::COPY_DST,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                         view_formats: &[],
                     });
                     gpu.voxels_view = gpu
@@ -4825,13 +4820,8 @@ impl SceneBatch {
                     &gpu.colliders,
                     &voxels_view,
                 );
-                let draw_bind = particle_draw_bind(
-                    device,
-                    &gpu.draw_layout,
-                    &particles,
-                    &params,
-                    &draw_params,
-                );
+                let draw_bind =
+                    particle_draw_bind(device, &gpu.draw_layout, &particles, &params, &draw_params);
                 gpu.systems[index] = Some(ParticleSystemGpu {
                     capacity,
                     seed: system.seed,
@@ -4898,9 +4888,8 @@ impl SceneBatch {
             .iter()
             .map(|system| {
                 system.sub.and_then(|sub| {
-                    (!matches!(sub.mode, super::particles::SubEmitterMode::Off)
-                        && live(sub.target))
-                    .then_some(sub.target as u32)
+                    (!matches!(sub.mode, super::particles::SubEmitterMode::Off) && live(sub.target))
+                        .then_some(sub.target as u32)
                 })
             })
             .collect();
@@ -5007,10 +4996,7 @@ impl SceneBatch {
         }
         for (slot, probe) in probes.iter().enumerate() {
             let edge = probe.clamped_resolution();
-            let rebuild = gpu
-                .probes
-                .get(slot)
-                .is_none_or(|state| state.edge != edge);
+            let rebuild = gpu.probes.get(slot).is_none_or(|state| state.edge != edge);
             if rebuild {
                 let size = wgpu::Extent3d {
                     width: edge,
@@ -5047,8 +5033,7 @@ impl SceneBatch {
                         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                             label: Some("repame_view3d_probe_camera"),
                             size: size_of::<CameraUniform>() as u64,
-                            usage: wgpu::BufferUsages::UNIFORM
-                                | wgpu::BufferUsages::COPY_DST,
+                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
                         let bind = camera_bind_group(
@@ -5080,8 +5065,7 @@ impl SceneBatch {
             let state = &mut gpu.probes[slot];
             let changed = state.settings != *probe;
             let interval = probe.clamped_interval() as u64;
-            state.capture = probe.is_active()
-                && (changed || gpu.frames % interval == 0);
+            state.capture = probe.is_active() && (changed || gpu.frames % interval == 0);
             state.settings = *probe;
         }
         let views: [&wgpu::TextureView; super::reflection::MAX_PROBES] = std::array::from_fn(|i| {
@@ -5540,8 +5524,10 @@ impl SceneBatch {
             return false;
         }
         let spec = self.passes.iter().find(|spec| {
-            matches!(spec.kind, super::pass::PassKind::Depth | super::pass::PassKind::Occlusion)
-                && res.pass_targets.contains_key(&spec.target.name)
+            matches!(
+                spec.kind,
+                super::pass::PassKind::Depth | super::pass::PassKind::Occlusion
+            ) && res.pass_targets.contains_key(&spec.target.name)
         });
         let target = spec.and_then(|spec| res.pass_targets.get(&spec.target.name));
         let Some(target) = target else {
@@ -6130,12 +6116,7 @@ impl SceneBatch {
     /// target's size, so the rect is scaled into the target. A copy that
     /// scales samples the source linearly, a copy that does not samples it
     /// nearest.
-    fn warm_copy_binds(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        res: &mut SceneEntry,
-    ) {
+    fn warm_copy_binds(&self, device: &wgpu::Device, queue: &wgpu::Queue, res: &mut SceneEntry) {
         for spec in &self.passes {
             if spec.kind != super::pass::PassKind::Copy {
                 continue;
@@ -6309,11 +6290,15 @@ impl SceneBatch {
         let mut pipelines = HashMap::new();
         for spec in self.passes.iter().filter(|spec| spec.post.is_some()) {
             let format = pass_format(spec.target.format);
-            pipelines
-                .entry(format)
-                .or_insert_with(|| {
-                    make_post_pipeline(device, &module, &layout, format, res.pipeline_cache.as_ref())
-                });
+            pipelines.entry(format).or_insert_with(|| {
+                make_post_pipeline(
+                    device,
+                    &module,
+                    &layout,
+                    format,
+                    res.pipeline_cache.as_ref(),
+                )
+            });
         }
         res.post = Some(PostState {
             layout,
@@ -6332,7 +6317,13 @@ impl SceneBatch {
         let Some(dummy) = res.post.as_ref().map(|post| post.dummy_view.clone()) else {
             return;
         };
-        let prepared: Vec<(u32, wgpu::TextureView, [f32; 4], wgpu::TextureView, PostStage)> = self
+        let prepared: Vec<(
+            u32,
+            wgpu::TextureView,
+            [f32; 4],
+            wgpu::TextureView,
+            PostStage,
+        )> = self
             .passes
             .iter()
             .filter_map(|spec| {
@@ -6523,8 +6514,7 @@ impl SceneBatch {
         bytes_per_texel: usize,
     ) -> Option<Vec<u8>> {
         let bytes_per_texel = bytes_per_texel.max(1);
-        let bytes_per_row =
-            (width as usize * bytes_per_texel).div_ceil(256) * 256;
+        let bytes_per_row = (width as usize * bytes_per_texel).div_ceil(256) * 256;
         let (tx, rx) = std::sync::mpsc::channel();
         buffer
             .slice(..)
@@ -6671,11 +6661,8 @@ impl SceneBatch {
                 mesh.name
             );
         }
-        let mut palette: Vec<[[f32; 4]; 4]> = draw
-            .palette
-            .iter()
-            .map(|m| m.to_cols_array_2d())
-            .collect();
+        let mut palette: Vec<[[f32; 4]; 4]> =
+            draw.palette.iter().map(|m| m.to_cols_array_2d()).collect();
         palette.resize(crate::MAX_SKIN_JOINTS, [[0.0; 4]; 4]);
         self.skinned.push(SkinnedPending {
             positions: mesh.positions.clone(),
@@ -6785,10 +6772,12 @@ impl SceneBatch {
         let phase_two = self.armed_feed().is_some_and(|feed| feed.phase_two)
             && self.occlusion.is_some()
             && culling
-            && self
-                .passes
-                .iter()
-                .any(|spec| matches!(spec.kind, super::pass::PassKind::Depth | super::pass::PassKind::Occlusion));
+            && self.passes.iter().any(|spec| {
+                matches!(
+                    spec.kind,
+                    super::pass::PassKind::Depth | super::pass::PassKind::Occlusion
+                )
+            });
         let scene_passes: Vec<u32> = self
             .passes
             .iter()
@@ -6823,9 +6812,7 @@ impl SceneBatch {
                         continue;
                     }
                 }
-                if !g.hz_culled
-                    && Self::group_outside(&planes, &g.positions)
-                {
+                if !g.hz_culled && Self::group_outside(&planes, &g.positions) {
                     self.culled += 1;
                     self.stats.culled_groups = self.culled as u32;
                     continue;
@@ -7732,7 +7719,13 @@ impl SceneBatch {
         };
         let mk = |_label: &'static str, depth_test: bool, transparent: bool| {
             std::array::from_fn(|i| {
-                mk_with(&shader, depth_test, transparent, super::mesh::CullMode::ALL[i]).0
+                mk_with(
+                    &shader,
+                    depth_test,
+                    transparent,
+                    super::mesh::CullMode::ALL[i],
+                )
+                .0
             })
         };
         let gbuffer_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -8248,7 +8241,8 @@ impl SceneBatch {
                 .alloc(vert_bytes)
                 .expect("geometry arena sized for this frame");
             res.vert_base = alloc.offset;
-            res.geometry.write(queue, alloc, bytemuck::cast_slice(&self.verts));
+            res.geometry
+                .write(queue, alloc, bytemuck::cast_slice(&self.verts));
         } else {
             res.vert_base = 0;
         }
@@ -8714,8 +8708,10 @@ pub fn prepare_scene_with_id(
             && res.occlusion_candidate_count > 0
             && res.occlusion.is_some()
             && res.pass_specs.iter().any(|spec| {
-                matches!(spec.kind, super::pass::PassKind::Depth | super::pass::PassKind::Occlusion)
-                    && res.pass_targets.contains_key(&spec.target.name)
+                matches!(
+                    spec.kind,
+                    super::pass::PassKind::Depth | super::pass::PassKind::Occlusion
+                ) && res.pass_targets.contains_key(&spec.target.name)
             });
         let cascade_vps = [
             mat.cascade_vp0,
@@ -8779,10 +8775,7 @@ pub fn prepare_scene_with_id(
                                 .as_ref()
                                 .and_then(|name| res.pass_targets.get(name))
                                 .map(|target| target.format),
-                            aux_normal_view: target
-                                .aux
-                                .as_ref()
-                                .map(|aux| aux.normal_view.clone()),
+                            aux_normal_view: target.aux.as_ref().map(|aux| aux.normal_view.clone()),
                             aux_material_view: target
                                 .aux
                                 .as_ref()
@@ -8960,7 +8953,10 @@ pub fn prepare_scene_with_id(
         spass.set_pipeline(&snap.shadow_depth_pipeline);
         spass.set_bind_group(0, &snap.shadow_cam_bind, &[]);
         spass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
-        spass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
+        spass.set_index_buffer(
+            snap.indices.slice(snap.index_base..),
+            wgpu::IndexFormat::Uint32,
+        );
         for r in &snap.ranges {
             if r.pass == 0 && !r.transparent && r.depth_test {
                 spass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
@@ -9011,7 +9007,10 @@ pub fn prepare_scene_with_id(
             cpass.set_pipeline(&snap.shadow_depth_pipeline);
             cpass.set_bind_group(0, slice_bind, &[]);
             cpass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
-            cpass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
+            cpass.set_index_buffer(
+                snap.indices.slice(snap.index_base..),
+                wgpu::IndexFormat::Uint32,
+            );
             for r in &snap.ranges {
                 if r.pass == 0 && !r.transparent && r.depth_test {
                     cpass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
@@ -9059,7 +9058,10 @@ pub fn prepare_scene_with_id(
                 ppass.set_pipeline(&snap.shadow_depth_pipeline);
                 ppass.set_bind_group(0, face_bind, &[]);
                 ppass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
-                ppass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
+                ppass.set_index_buffer(
+                    snap.indices.slice(snap.index_base..),
+                    wgpu::IndexFormat::Uint32,
+                );
                 for r in &snap.ranges {
                     if r.pass == 0 && !r.transparent && r.depth_test {
                         ppass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
@@ -9129,20 +9131,16 @@ pub fn prepare_scene_with_id(
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_viewport(
-                    0.0,
-                    0.0,
-                    probe.edge as f32,
-                    probe.edge as f32,
-                    0.0,
-                    1.0,
-                );
+                pass.set_viewport(0.0, 0.0, probe.edge as f32, probe.edge as f32, 0.0, 1.0);
                 pass.set_bind_group(0, face_bind, &[]);
                 pass.set_bind_group(1, &snap.tex_bind, &[]);
                 pass.set_bind_group(2, &captures.capture_bind, &[]);
                 pass.set_bind_group(3, &snap.material_bind, &[]);
                 pass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
-                pass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
+                pass.set_index_buffer(
+                    snap.indices.slice(snap.index_base..),
+                    wgpu::IndexFormat::Uint32,
+                );
                 let mut bound_material: Option<u32> = None;
                 for r in snap
                     .ranges
@@ -9261,8 +9259,15 @@ pub fn prepare_scene_with_id(
         dv.set_bind_group(0, &snap.cam_bind, &[]);
         dv.set_bind_group(1, &snap.depth_velocity_bind, &[]);
         dv.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
-        dv.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
-        for r in snap.ranges.iter().filter(|r| r.depth_test && !r.transparent) {
+        dv.set_index_buffer(
+            snap.indices.slice(snap.index_base..),
+            wgpu::IndexFormat::Uint32,
+        );
+        for r in snap
+            .ranges
+            .iter()
+            .filter(|r| r.depth_test && !r.transparent)
+        {
             dv.draw_indexed(r.index_start..r.index_end, 0, 0..1);
         }
     };
@@ -9284,7 +9289,10 @@ pub fn prepare_scene_with_id(
         pass.set_bind_group(2, &snap.shadow_bind, &[]);
         pass.set_bind_group(3, &snap.material_bind, &[]);
         pass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
-        pass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
+        pass.set_index_buffer(
+            snap.indices.slice(snap.index_base..),
+            wgpu::IndexFormat::Uint32,
+        );
         let mut bound_material: Option<u32> = None;
         for r in snap.ranges.iter().filter(|r| r.hz_culled.is_some()) {
             let program = snap
@@ -9350,7 +9358,10 @@ pub fn prepare_scene_with_id(
         pass.set_bind_group(2, &snap.shadow_bind, &[]);
         pass.set_bind_group(3, &snap.material_bind, &[]);
         pass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
-        pass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
+        pass.set_index_buffer(
+            snap.indices.slice(snap.index_base..),
+            wgpu::IndexFormat::Uint32,
+        );
         let mut bound_material: Option<u32> = None;
         for r in snap.ranges.iter().filter(|r| r.pass == 0) {
             let program = snap
@@ -9405,7 +9416,10 @@ pub fn prepare_scene_with_id(
         let (spec, view, depth_view) = (&entry.spec, &entry.view, &entry.depth_view);
         let pass_index = spec.index;
         let target = spec.target.clear;
-        if matches!(spec.kind, super::pass::PassKind::Depth | super::pass::PassKind::Occlusion) {
+        if matches!(
+            spec.kind,
+            super::pass::PassKind::Depth | super::pass::PassKind::Occlusion
+        ) {
             encode_depth_pass(encoder, entry, &mut profiler);
             // Phase two: the chain reads this pass's target, so the GPU test
             // and the second scene pass follow it here.
@@ -9467,14 +9481,16 @@ pub fn prepare_scene_with_id(
                                     store: wgpu::StoreOp::Store,
                                 },
                             })],
-                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                                view: &scene.depth_view,
-                                depth_ops: Some(wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                }),
-                                stencil_ops: None,
-                            }),
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: &scene.depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
                             timestamp_writes: profiler.as_mut().and_then(|p| p.timestamp_writes()),
                             occlusion_query_set: None,
                             multiview_mask: None,
@@ -9488,8 +9504,8 @@ pub fn prepare_scene_with_id(
                             1.0,
                         );
                         draw_phase_two(&mut pass, &snap);
-                    } else if let Some(mut pass) =
-                        DepthComposite::get(resources).begin_scene_ops_timed(
+                    } else if let Some(mut pass) = DepthComposite::get(resources)
+                        .begin_scene_ops_timed(
                             id,
                             encoder,
                             ScenePassOps {
@@ -9611,7 +9627,10 @@ pub fn prepare_scene_with_id(
             gbuffer.set_bind_group(2, &snap.shadow_bind, &[]);
             gbuffer.set_bind_group(3, &snap.material_bind, &[]);
             gbuffer.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
-            gbuffer.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
+            gbuffer.set_index_buffer(
+                snap.indices.slice(snap.index_base..),
+                wgpu::IndexFormat::Uint32,
+            );
             gbuffer.set_viewport(
                 0.0,
                 0.0,
@@ -9847,7 +9866,10 @@ pub fn prepare_scene_with_id(
         pass.set_bind_group(2, &snap.shadow_bind, &[]);
         pass.set_bind_group(3, &snap.material_bind, &[]);
         pass.set_vertex_buffer(0, snap.verts.slice(snap.vert_base..));
-        pass.set_index_buffer(snap.indices.slice(snap.index_base..), wgpu::IndexFormat::Uint32);
+        pass.set_index_buffer(
+            snap.indices.slice(snap.index_base..),
+            wgpu::IndexFormat::Uint32,
+        );
         pass.set_viewport(
             0.0,
             0.0,
@@ -9893,7 +9915,13 @@ pub fn prepare_scene_with_id(
             pass.draw_indexed(r.index_start..r.index_end, 0, 0..1);
         }
         if let Some(particles) = snap.particles.as_ref() {
-            draw_particle_billboards(&mut pass, particles, pass_index, &snap.cam_bind, &snap.tex_bind);
+            draw_particle_billboards(
+                &mut pass,
+                particles,
+                pass_index,
+                &snap.cam_bind,
+                &snap.tex_bind,
+            );
         }
         if let Some(p) = profiler.as_ref() {
             p.end_statistics(&mut pass);
@@ -9989,7 +10017,11 @@ fn draw_particle_billboards(
     tex_bind: &wgpu::BindGroup,
 ) {
     let mut bound = false;
-    for draw in particles.draws.iter().filter(|draw| draw.pass == pass_index) {
+    for draw in particles
+        .draws
+        .iter()
+        .filter(|draw| draw.pass == pass_index)
+    {
         if !bound {
             pass.set_pipeline(&particles.billboard_pipeline);
             pass.set_bind_group(0, cam_bind, &[]);
@@ -10031,11 +10063,7 @@ pub fn pipeline_cache_data(id: &str, resources: &CallbackResources) -> Option<Ve
 
 /// Reserves a stable texture page for a caller-owned key. Reuses a released
 /// slot, and returns the fallback page when the table is full.
-pub fn bind_texture_page(
-    id: &str,
-    key: u64,
-    resources: &mut CallbackResources,
-) -> u32 {
+pub fn bind_texture_page(id: &str, key: u64, resources: &mut CallbackResources) -> u32 {
     resources
         .get_mut::<SceneResources>()
         .and_then(|all| all.batches.get_mut(id))
@@ -10137,7 +10165,10 @@ mod tests {
     #[test]
     fn every_generated_scene_shader_parses() {
         parses("SHADER_PREFIX", SHADER_PREFIX);
-        parses("scene_shader(supported)", &scene_shader(GpuSkinning::Supported));
+        parses(
+            "scene_shader(supported)",
+            &scene_shader(GpuSkinning::Supported),
+        );
         parses(
             "scene_shader(unsupported)",
             &scene_shader(GpuSkinning::Unsupported),
@@ -10146,7 +10177,10 @@ mod tests {
         parses("shadow_depth_shader(unsupported)", &shadow_unsupported);
         assert!(!shadow_unsupported.contains("morph_data"));
         assert!(!shadow_unsupported.contains("skin_palette"));
-        parses("gbuffer_shader(supported)", &gbuffer_shader(GpuSkinning::Supported));
+        parses(
+            "gbuffer_shader(supported)",
+            &gbuffer_shader(GpuSkinning::Supported),
+        );
         parses(
             "gbuffer_shader(unsupported)",
             &gbuffer_shader(GpuSkinning::Unsupported),
@@ -10201,7 +10235,10 @@ mod tests {
         let shadow_unsupported = shadow_depth_shader(GpuSkinning::Unsupported);
         assert!(!shadow_unsupported.contains("skin_palette"));
         assert!(!shadow_unsupported.contains("SkinPalette"));
-        assert!(shadow_unsupported.contains("fn vs_main("), "entry point stays");
+        assert!(
+            shadow_unsupported.contains("fn vs_main("),
+            "entry point stays"
+        );
     }
 
     /// Minimal valid GPU-skinned draw for the push-path gate.
@@ -10840,12 +10877,20 @@ mod tests {
             },
         );
         for page in 0..3 {
-            assert_eq!(batch.test_page_level(page), Some(0), "default fully resident");
+            assert_eq!(
+                batch.test_page_level(page),
+                Some(0),
+                "default fully resident"
+            );
         }
         batch.set_page_level(1, Some(2));
         assert_eq!(batch.test_page_level(1), Some(2));
         batch.set_page_level(1, None);
-        assert_eq!(batch.test_page_level(1), None, "nothing resident publishes None");
+        assert_eq!(
+            batch.test_page_level(1),
+            None,
+            "nothing resident publishes None"
+        );
         // A page past the layers and a level past the chain are rejected,
         // leaving the published value alone.
         batch.set_page_level(3, Some(1));
@@ -11126,7 +11171,9 @@ mod tests {
         let mut batch = SceneBatch::with_id("test.occlusion.gpu");
         batch.set_camera(cam.view_proj(1.0));
         batch.set_camera_pos(cam.eye().into());
-        batch.set_passes(&[depth_pass()]).expect("a lone depth pass validates");
+        batch
+            .set_passes(&[depth_pass()])
+            .expect("a lone depth pass validates");
         batch.set_occlusion(Some(state));
         batch.set_occlusion_feed(Some(crate::OcclusionFeedDesc {
             phase_two: true,
@@ -11196,7 +11243,9 @@ mod tests {
         let mut batch = SceneBatch::with_id("test.occlusion.gpu.chained");
         batch.set_camera(cam.view_proj(1.0));
         batch.set_camera_pos(cam.eye().into());
-        batch.set_passes(&[scene, occlusion]).expect("scene + occlusion validate");
+        batch
+            .set_passes(&[scene, occlusion])
+            .expect("scene + occlusion validate");
         batch.set_occlusion(Some(state));
         batch.set_occlusion_feed(Some(crate::OcclusionFeedDesc {
             phase_two: true,
@@ -11335,7 +11384,9 @@ mod tests {
         let mut batch = SceneBatch::with_id("test.phase_two.other_pass");
         batch.set_camera(view_proj);
         batch.set_camera_pos(cam.eye().into());
-        batch.set_passes(&[depth_pass()]).expect("a lone depth pass validates");
+        batch
+            .set_passes(&[depth_pass()])
+            .expect("a lone depth pass validates");
         batch.set_occlusion(Some(state.clone()));
         batch.set_occlusion_feed(Some(armed));
         batch.push_group_for_pass(&big_far_box(&cam), 1);
@@ -11348,7 +11399,9 @@ mod tests {
         let mut batch = SceneBatch::with_id("test.phase_two.default");
         batch.set_camera(view_proj);
         batch.set_camera_pos(cam.eye().into());
-        batch.set_passes(&[depth_pass()]).expect("a lone depth pass validates");
+        batch
+            .set_passes(&[depth_pass()])
+            .expect("a lone depth pass validates");
         batch.set_occlusion(Some(state.clone()));
         batch.set_occlusion_feed(Some(OcclusionFeedDesc::default()));
         batch.push_group(&big_far_box(&cam));
@@ -11366,7 +11419,9 @@ mod tests {
         let mut batch = SceneBatch::with_id("test.phase_two.scene_pass");
         batch.set_camera(view_proj);
         batch.set_camera_pos(cam.eye().into());
-        batch.set_passes(&[scene, depth_pass()]).expect("scene + depth validate");
+        batch
+            .set_passes(&[scene, depth_pass()])
+            .expect("scene + depth validate");
         batch.set_occlusion(Some(state.clone()));
         batch.set_occlusion_feed(Some(armed));
         batch.push_group_for_pass(&big_far_box(&cam), 1);
@@ -11381,7 +11436,9 @@ mod tests {
         let mut batch = SceneBatch::with_id("test.phase_two.armed");
         batch.set_camera(view_proj);
         batch.set_camera_pos(cam.eye().into());
-        batch.set_passes(&[depth_pass()]).expect("a lone depth pass validates");
+        batch
+            .set_passes(&[depth_pass()])
+            .expect("a lone depth pass validates");
         batch.set_occlusion(Some(state.clone()));
         batch.set_occlusion_feed(Some(armed));
         batch.push_group(&big_far_box(&cam));
@@ -11396,7 +11453,9 @@ mod tests {
         let mut batch = SceneBatch::with_id("test.phase_two.engine_pass");
         batch.set_camera(view_proj);
         batch.set_camera_pos(cam.eye().into());
-        batch.set_passes(&[occlusion_pass()]).expect("the engine pass validates");
+        batch
+            .set_passes(&[occlusion_pass()])
+            .expect("the engine pass validates");
         batch.set_occlusion(Some(state));
         batch.set_occlusion_feed(Some(armed));
         batch.push_group(&big_far_box(&cam));
@@ -11434,7 +11493,9 @@ mod tests {
         let mut batch = SceneBatch::with_id("test.occlusion.unsupported");
         batch.set_camera(view_proj);
         batch.set_camera_pos(cam.eye().into());
-        batch.set_passes(&[depth_pass()]).expect("a lone depth pass validates");
+        batch
+            .set_passes(&[depth_pass()])
+            .expect("a lone depth pass validates");
         batch.set_gpu_occlusion(GpuOcclusion::Unsupported);
         batch.set_occlusion(Some(state));
         batch.set_occlusion_feed(Some(OcclusionFeedDesc {
@@ -11505,7 +11566,8 @@ mod tests {
     }
 
     #[test]
-    fn depth_tested_groups_draw_first() {        let mut batch = SceneBatch::with_id("test.order");
+    fn depth_tested_groups_draw_first() {
+        let mut batch = SceneBatch::with_id("test.order");
         let mut flat = solid_box();
         flat.depth_test = false;
         batch.push_group(&flat);
@@ -12948,7 +13010,11 @@ mod tests {
         ) else {
             return;
         };
-        assert_eq!(center(&px), [255, 0, 0, 255], "default page samples level 0");
+        assert_eq!(
+            center(&px),
+            [255, 0, 0, 255],
+            "default page samples level 0"
+        );
 
         // Level 0 never written; level 1 (1x1 green) is the finest resident
         // level and must be the one sampled.
@@ -13066,7 +13132,9 @@ mod tests {
         batch.set_particles(Some(frame));
         batch.finish();
         assert!(
-            batch.particles().is_some_and(|frame| !frame.systems.is_empty()),
+            batch
+                .particles()
+                .is_some_and(|frame| !frame.systems.is_empty()),
             "the textured system stages"
         );
         batch.ensure_resources(&device, &screen, &mut resources);

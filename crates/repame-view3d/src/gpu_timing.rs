@@ -236,8 +236,7 @@ impl GpuProfiler {
             }
             let ok = self.status.load(Ordering::Acquire) == 1;
             let timing = if ok {
-                let view = self
-                    .readback[self.mapping_index]
+                let view = self.readback[self.mapping_index]
                     .slice(..)
                     .get_mapped_range()
                     .expect("readback is mapped");
@@ -259,11 +258,8 @@ impl GpuProfiler {
         self.readback[self.pending_index]
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |result| {
-            status.store(
-                if result.is_ok() { 1 } else { 2 },
-                Ordering::Release,
-            );
-        });
+                status.store(if result.is_ok() { 1 } else { 2 }, Ordering::Release);
+            });
         self.mapping_index = self.pending_index;
         self.mapping = true;
         let _ = device.poll(wgpu::PollType::Poll);

@@ -134,7 +134,9 @@ pub(crate) fn apply<S: States>(world: &mut World) {
 /// ```ignore
 /// sim.add_chained_systems(update_walk.run_if(in_state(Mode::Walk)));
 /// ```
-pub fn in_state<S: States>(state: S) -> impl FnMut(Res<State<S>>) -> bool + Clone + Send + Sync + 'static {
+pub fn in_state<S: States>(
+    state: S,
+) -> impl FnMut(Res<State<S>>) -> bool + Clone + Send + Sync + 'static {
     move |current: Res<State<S>>| current.get() == &state
 }
 
@@ -232,9 +234,13 @@ mod tests {
         sim.add_state(Mode::Menu);
 
         let e = seen.clone();
-        sim.on_exit(Mode::Menu, move |s: Res<State<Mode>>| e.lock().unwrap().push(*s.get()));
+        sim.on_exit(Mode::Menu, move |s: Res<State<Mode>>| {
+            e.lock().unwrap().push(*s.get())
+        });
         let n = seen.clone();
-        sim.on_enter(Mode::Play, move |s: Res<State<Mode>>| n.lock().unwrap().push(*s.get()));
+        sim.on_enter(Mode::Play, move |s: Res<State<Mode>>| {
+            n.lock().unwrap().push(*s.get())
+        });
 
         sim.set_state(Mode::Play);
         sim.tick();

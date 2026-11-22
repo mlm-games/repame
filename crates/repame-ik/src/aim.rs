@@ -82,7 +82,14 @@ pub fn aim(
         angle
     };
     let delta = Quat::from_axis_angle(axis, applied);
-    chain::rotate_joint(skeleton, locals, joint, config.axis, delta, JointLimits::FREE)?;
+    chain::rotate_joint(
+        skeleton,
+        locals,
+        joint,
+        config.axis,
+        delta,
+        JointLimits::FREE,
+    )?;
     Ok(ModifierOutcome {
         angle,
         reached: angle.abs() <= config.max_angle,
@@ -118,7 +125,10 @@ mod tests {
         let forward =
             pose::world_rotation(&pose::world_matrix(&skeleton, &locals, 0).unwrap()) * Vec3::Y;
         assert!(
-            forward.normalize().dot(Vec3::new(0.0, 1.0, 1.0).normalize()) > 0.999,
+            forward
+                .normalize()
+                .dot(Vec3::new(0.0, 1.0, 1.0).normalize())
+                > 0.999,
             "forward {forward:?}"
         );
     }

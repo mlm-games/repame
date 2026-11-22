@@ -113,7 +113,11 @@ impl fmt::Display for ContentError {
 impl std::error::Error for ContentError {}
 
 pub(crate) fn io_error(path: &Path, action: impl Into<String>, error: io::Error) -> ContentError {
-    ContentError::of(path, ContentErrorKind::Io, format!("{}: {error}", action.into()))
+    ContentError::of(
+        path,
+        ContentErrorKind::Io,
+        format!("{}: {error}", action.into()),
+    )
 }
 
 pub(crate) fn ron_error(path: &Path, error: impl fmt::Display) -> ContentError {

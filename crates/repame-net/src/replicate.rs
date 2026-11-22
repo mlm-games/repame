@@ -641,7 +641,8 @@ impl ReplicationClient {
                 }
                 let entity = world.spawn_empty().id();
                 for (type_id, bytes) in state {
-                    self.registry.insert_component(world, entity, *type_id, bytes)?;
+                    self.registry
+                        .insert_component(world, entity, *type_id, bytes)?;
                 }
                 self.replicas.insert(*replica, entity);
                 events.push(ReplicaEvent::Spawned {
@@ -755,7 +756,9 @@ mod tests {
     #[test]
     fn delta_snapshot_round_trip_preserves_component_values() {
         let mut server_world = World::new();
-        let entity = server_world.spawn((Health(100), Position { x: 1.5, y: -2.25 })).id();
+        let entity = server_world
+            .spawn((Health(100), Position { x: 1.5, y: -2.25 }))
+            .id();
         let mut server = ReplicationServer::new(registry());
         let replica = server.track(entity).unwrap();
 

@@ -52,7 +52,10 @@ pub fn decode(bytes: &[u8], source: &Path) -> Result<Vec<u8>, ContentError> {
     if bytes.len() < HEADER_BYTES {
         return Err(ContentError::format(
             source,
-            format!("Yaz0 stream is {} bytes, shorter than its header", bytes.len()),
+            format!(
+                "Yaz0 stream is {} bytes, shorter than its header",
+                bytes.len()
+            ),
         ));
     }
     if !is_yaz0(bytes) {
@@ -89,17 +92,19 @@ pub fn decode(bytes: &[u8], source: &Path) -> Result<Vec<u8>, ContentError> {
                 let distance = (usize::from(first & 0x0F) << 8) | usize::from(second);
                 let mut length = usize::from(first >> 4);
                 if length == 0 {
-                    length = usize::from(
-                        *bytes
-                            .get(cursor)
-                            .ok_or_else(|| ContentError::format(source, "Yaz0 stream is truncated"))?,
-                    ) + 0x12;
+                    length =
+                        usize::from(*bytes.get(cursor).ok_or_else(|| {
+                            ContentError::format(source, "Yaz0 stream is truncated")
+                        })?) + 0x12;
                     cursor += 1;
                 } else {
                     length += 2;
                 }
                 let start = out.len().checked_sub(distance + 1).ok_or_else(|| {
-                    ContentError::format(source, "Yaz0 back reference points before the stream start")
+                    ContentError::format(
+                        source,
+                        "Yaz0 back reference points before the stream start",
+                    )
                 })?;
                 for step in 0..length {
                     let byte = out.get(start + step).copied().ok_or_else(|| {
@@ -135,7 +140,10 @@ mod tests {
     #[test]
     fn a_yaz0_stream_expands_to_the_bytes_it_holds() {
         let source = Path::new("stream.yaz0");
-        assert_eq!(decode(&stream(), source).expect("expand"), b"abcdabcd".to_vec());
+        assert_eq!(
+            decode(&stream(), source).expect("expand"),
+            b"abcdabcd".to_vec()
+        );
         assert!(is_yaz0(&stream()));
         assert!(!is_yaz0(b"RARC"));
     }

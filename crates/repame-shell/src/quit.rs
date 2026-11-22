@@ -17,13 +17,27 @@ use repose_ui::{Center, Text, ViewExt};
 #[derive(Default)]
 pub struct Quit {
     latched: bool,
+    hooks: Vec<Box<dyn FnOnce()>>,
 }
 
 impl Quit {
+    /// Registers a one-shot shutdown hook, run once when [`Self::request`]
+    /// is called. Games use this to flush pipeline caches before the device
+    /// is dropped.
+    pub fn on_shutdown(&mut self, hook: impl FnOnce() + 'static) {
+        self.hooks.push(Box::new(hook));
+    }
+
     /// Ask to quit. Does not return off the web, where the process exits
     /// here.
     pub fn request(&mut self) {
+        if self.latched {
+            return;
+        }
         self.latched = true;
+        for hook in self.hooks.drain(..) {
+            hook();
+        }
         #[cfg(not(target_arch = "wasm32"))]
         std::process::exit(0);
     }

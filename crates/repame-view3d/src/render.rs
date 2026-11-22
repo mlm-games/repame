@@ -488,14 +488,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 /// G-buffer fragment stage, appended to [`scene_prefix`]. The declared target
-/// holds albedo and coverage; the two engine-owned attachments hold the
-/// view-space normal (`.w` carries the lit flag) and material params
-/// (`metallic`, `roughness`, emissive as luminance, view depth).
+/// holds albedo and coverage; the three engine-owned attachments hold the
+/// view-space normal (`.w` carries the lit flag), material params (`metallic`,
+/// `roughness`, unused, view depth) and the full emissive RGB.
 const GBUFFER_FS: &str = r#"
 struct GbufferOut {
     @location(0) albedo: vec4<f32>,
     @location(1) normal: vec4<f32>,
     @location(2) material: vec4<f32>,
+    @location(3) emissive: vec4<f32>,
 };
 
 @fragment
@@ -522,13 +523,18 @@ fn fs_main(in: VsOut) -> GbufferOut {
     let axis = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(forward.y) > 0.99);
     let right = normalize(cross(axis, forward));
     let up = cross(forward, right);
+    // The legacy material path blends its fog constant over the shaded pixel.
+    // The G-buffer has no shader-result channel, so fold the same material
+    // fog into albedo; the deferred pass' own camera fog still runs later.
+    let fog_t = clamp((in.view_depth - material.fog_range.x)
+        / max(material.fog_range.y - material.fog_range.x, 1e-6), 0.0, 1.0)
+        * clamp(material.fog.a, 0.0, 1.0);
+    base = mix(base, material.fog.rgb, fog_t);
     out.albedo = vec4<f32>(base, alpha);
     out.normal = vec4<f32>(
         dot(world_n, right), dot(world_n, up), dot(world_n, forward), in.lit_flag);
-    out.material = vec4<f32>(
-        in.metallic, in.roughness,
-        dot(in.emissive, vec3<f32>(0.2126, 0.7152, 0.0722)),
-        in.view_depth);
+    out.material = vec4<f32>(in.metallic, in.roughness, 0.0, in.view_depth);
+    out.emissive = vec4<f32>(in.emissive, 1.0);
     return out;
 }
 "#;
@@ -563,10 +569,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Deferred light accumulation over the three G-buffer attachments. The
-/// camera block is the same uniform the scene passes bind; shading reproduces
-/// the legacy sun, ambient, point, fog and tone-map terms but has no shadow
-/// maps or reflection probes (the G-buffer carries no world position).
+/// Deferred light accumulation over the four G-buffer attachments. The camera
+/// block is the same uniform the scene passes bind; the second bind group is
+/// the frame's existing shadow/probe group, so shading reproduces the legacy
+/// sun, ambient, shadow map, cascades, point lights, probes, fog and tone-map
+/// terms. Material-program colour registers are not reprogrammable here.
 const DEFERRED_SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -617,6 +624,21 @@ struct Camera {
 @group(0) @binding(2) var material_tex: texture_2d<f32>;
 @group(0) @binding(3) var src_smp: sampler;
 @group(0) @binding(4) var<uniform> camera: Camera;
+@group(0) @binding(5) var emissive_tex: texture_2d<f32>;
+
+// Shared with the forward shaders at group 2; the deferred pipeline binds
+// the SceneEntry shadow group at group 1.
+@group(1) @binding(0) var shadow_tex: texture_depth_2d;
+@group(1) @binding(1) var shadow_smp: sampler_comparison;
+@group(1) @binding(2) var cascade_tex: texture_depth_2d_array;
+@group(1) @binding(3) var cascade_smp: sampler_comparison;
+@group(1) @binding(4) var point_tex: texture_depth_cube;
+@group(1) @binding(5) var point_smp: sampler_comparison;
+@group(1) @binding(6) var probe_tex0: texture_cube<f32>;
+@group(1) @binding(7) var probe_tex1: texture_cube<f32>;
+@group(1) @binding(8) var probe_tex2: texture_cube<f32>;
+@group(1) @binding(9) var probe_tex3: texture_cube<f32>;
+@group(1) @binding(10) var probe_smp: sampler;
 
 fn repame_pbr_neutral(c: vec3<f32>) -> vec3<f32> {
     let start_compression = 0.8 - 0.04;
@@ -647,6 +669,69 @@ fn repame_tonemap(c: vec3<f32>, exposure: f32, method: f32) -> vec3<f32> {
     return (c * exposure) / (c * (exposure - 1.0) + vec3<f32>(1.0));
 }
 
+fn repame_probe_weight(distance: f32, range: f32) -> f32 {
+    if (range <= 0.0) {
+        return 0.0;
+    }
+    let inner = range * 0.5;
+    if (distance <= inner) {
+        return 1.0;
+    }
+    if (distance >= range) {
+        return 0.0;
+    }
+    let t = (distance - inner) / (range - inner);
+    return 1.0 - t * t * (3.0 - 2.0 * t);
+}
+
+fn repame_probe_cube(index: i32, dir: vec3<f32>, lod: f32) -> vec3<f32> {
+    if (index == 0) {
+        return textureSampleLevel(probe_tex0, probe_smp, dir, lod).rgb;
+    }
+    if (index == 1) {
+        return textureSampleLevel(probe_tex1, probe_smp, dir, lod).rgb;
+    }
+    if (index == 2) {
+        return textureSampleLevel(probe_tex2, probe_smp, dir, lod).rgb;
+    }
+    return textureSampleLevel(probe_tex3, probe_smp, dir, lod).rgb;
+}
+
+fn repame_probe(
+    world_pos: vec3<f32>,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    base: vec3<f32>,
+    metallic: f32,
+    roughness: f32,
+) -> vec3<f32> {
+    var acc = vec3<f32>(0.0);
+    let reflection = reflect(-v, n);
+    for (var i: i32 = 0; i < 4; i = i + 1) {
+        let params = camera.probe_params[i];
+        if (params.w < 0.5) {
+            continue;
+        }
+        let spec = camera.probe_pos[i];
+        let weight = repame_probe_weight(length(spec.xyz - world_pos), spec.w) * params.x;
+        if (weight <= 0.0) {
+            continue;
+        }
+        let levels = max(
+            max(textureNumLevels(probe_tex0), textureNumLevels(probe_tex1)),
+            max(textureNumLevels(probe_tex2), textureNumLevels(probe_tex3)),
+        );
+        let max_lod = f32(levels - 1u);
+        let spec_lod = clamp(roughness, 0.0, 1.0) * (max_lod - 1.0);
+        let cube = repame_probe_cube(i, reflection, spec_lod);
+        let irradiance = repame_probe_cube(i, n, max_lod);
+        let fresnel = pow(1.0 - max(dot(n, v), 0.0), 5.0);
+        let specular = params.z * mix(0.15, 1.0, fresnel) * (1.0 - clamp(roughness, 0.0, 1.0));
+        acc = acc + (irradiance * base * (1.0 - metallic) * params.y + cube * vec3<f32>(specular)) * weight;
+    }
+    return acc;
+}
+
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -667,6 +752,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let albedo = textureSample(albedo_tex, src_smp, in.uv);
     let g_normal = textureSample(normal_tex, src_smp, in.uv);
     let g_material = textureSample(material_tex, src_smp, in.uv);
+    let g_emissive = textureSample(emissive_tex, src_smp, in.uv);
     let view_depth = g_material.w;
     if (view_depth <= 0.0) {
         return vec4<f32>(0.0);
@@ -691,6 +777,54 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ray = normalize(forward + right * (ndc.x * tan_x) + up * (ndc.y * tan_y));
     let world_pos = camera.cam_pos + ray * (view_depth / max(dot(ray, forward), 1e-4));
     let v = normalize(camera.cam_pos - world_pos);
+
+    var shadow: f32 = 1.0;
+    if (lit_flag > 0.5 && camera.shadow_params.y > 0.5) {
+        let light_clip = camera.shadow_vp * vec4<f32>(world_pos, 1.0);
+        let light_ndc = light_clip.xyz / max(light_clip.w, 1e-6);
+        let suv = light_ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+        if (all(suv >= vec2<f32>(0.0)) && all(suv <= vec2<f32>(1.0))) {
+            let ref_depth = light_ndc.z - camera.shadow_params.z;
+            var lit_count: f32 = 0.0;
+            let texel = camera.shadow_texel.xy;
+            for (var oy: i32 = -1; oy <= 1; oy = oy + 1) {
+                for (var ox: i32 = -1; ox <= 1; ox = ox + 1) {
+                    lit_count = lit_count + textureSampleCompareLevel(
+                        shadow_tex, shadow_smp, suv + vec2<f32>(f32(ox), f32(oy)) * texel, ref_depth);
+                }
+            }
+            shadow = mix(1.0, lit_count / 9.0, camera.shadow_params.x);
+        }
+    }
+    if (lit_flag > 0.5 && camera.cascade_params.y > 0.5) {
+        var slice: i32 = 0;
+        if (view_depth > camera.cascade_splits.x) { slice = 1; }
+        if (view_depth > camera.cascade_splits.y) { slice = 2; }
+        if (view_depth > camera.cascade_splits.z) { slice = 3; }
+        if (f32(slice) < camera.cascade_params.z) {
+            var cvp: mat4x4<f32>;
+            if (slice == 0) { cvp = camera.cascade_vp0; }
+            else if (slice == 1) { cvp = camera.cascade_vp1; }
+            else if (slice == 2) { cvp = camera.cascade_vp2; }
+            else { cvp = camera.cascade_vp3; }
+            let biased_pos = world_pos + n * camera.cascade_params.w;
+            let light_clip = cvp * vec4<f32>(biased_pos, 1.0);
+            let light_ndc = light_clip.xyz / max(light_clip.w, 1e-6);
+            let suv = light_ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+            if (all(suv >= vec2<f32>(0.0)) && all(suv <= vec2<f32>(1.0))) {
+                let ref_depth = light_ndc.z - camera.shadow_params.z;
+                var lit_count: f32 = 0.0;
+                let texel = camera.shadow_texel.xy;
+                for (var oy: i32 = -1; oy <= 1; oy = oy + 1) {
+                    for (var ox: i32 = -1; ox <= 1; ox = ox + 1) {
+                        lit_count = lit_count + textureSampleCompareLevel(
+                            cascade_tex, cascade_smp, suv + vec2<f32>(f32(ox), f32(oy)) * texel, slice, ref_depth);
+                    }
+                }
+                shadow = shadow * mix(1.0, lit_count / 9.0, camera.cascade_params.x);
+            }
+        }
+    }
 
     let ndl = max(dot(n, camera.light_dir), 0.0);
     let diffuse = base * (1.0 - metallic) * ndl * camera.diffuse;
@@ -730,17 +864,25 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let ldir = to_light / dist;
             let atten = linten / (dist * dist + 1.0);
             let pndl = max(dot(n, ldir), 0.0);
+            var pshadow: f32 = 1.0;
+            if (camera.point_params.y > 0.5 && lit_flag > 0.5) {
+                let cube_uv = normalize(-to_light);
+                let ref_depth = dist / max(lrange, 1e-6) - camera.point_params.z;
+                pshadow = mix(1.0, textureSampleCompareLevel(point_tex, point_smp, cube_uv, ref_depth), camera.point_params.w);
+            }
             let pdiff = base * (1.0 - metallic) * pndl * atten;
             let ph = normalize(ldir + v);
             let pspec = mix(lcol, base, metallic)
                 * pow(max(dot(n, ph), 0.0), spec_pow)
                 * (1.0 - roughness) * atten;
-            point_accum = point_accum + (pdiff * lcol + pspec) * lit_flag;
+            point_accum = point_accum + (pdiff * lcol + pspec) * pshadow * lit_flag;
         }
     }
 
-    let emissive = vec3<f32>(g_material.z);
-    let lit = base * camera.ambient + (camera.light_color * diffuse + spec) + point_accum + emissive;
+    let emissive = g_emissive.rgb;
+    let probe = repame_probe(world_pos, n, v, base, metallic, roughness) * lit_flag;
+    let lit = base * camera.ambient + (camera.light_color * diffuse + spec) * shadow
+        + point_accum + emissive + probe;
     var rgb = mix(base, lit, lit_flag);
     let fog_t = clamp((view_depth - camera.fog_range.x)
         / max(camera.fog_range.y - camera.fog_range.x, 1e-6), 0.0, 1.0)
@@ -1505,6 +1647,9 @@ struct CopyState {
 /// GPU state for the deferred light-accumulation passes.
 struct DeferredState {
     layout: wgpu::BindGroupLayout,
+    /// The frame's existing shadow/probe layout, bound as group 1 so the
+    /// deferred shader reuses the same textures and bind group as forward.
+    shadow_layout: wgpu::BindGroupLayout,
     module: wgpu::ShaderModule,
     sampler: wgpu::Sampler,
     /// One pipeline per declared target format.
@@ -1514,13 +1659,15 @@ struct DeferredState {
     binds: HashMap<u32, wgpu::BindGroup>,
 }
 
-/// The two engine-owned attachments of a G-buffer target. The declared target
-/// is attachment 0; these are attachments 1 and 2.
+/// The three engine-owned attachments of a G-buffer target. The declared
+/// target is attachment 0; these are attachments 1, 2 and 3.
 struct GbufferAux {
     _normal: wgpu::Texture,
     normal_view: wgpu::TextureView,
     _material: wgpu::Texture,
     material_view: wgpu::TextureView,
+    _emissive: wgpu::Texture,
+    emissive_view: wgpu::TextureView,
     width: u32,
     height: u32,
     format: super::pass::RenderTargetFormat,
@@ -1557,6 +1704,7 @@ struct PassEntry {
     /// Auxiliary G-buffer attachments this pass writes, when it is a G-buffer.
     aux_normal_view: Option<wgpu::TextureView>,
     aux_material_view: Option<wgpu::TextureView>,
+    aux_emissive_view: Option<wgpu::TextureView>,
 }
 
 /// A declared render target the batch owns: its texture and view, allocated
@@ -2657,12 +2805,13 @@ fn make_deferred_pipeline(
     device: &wgpu::Device,
     module: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
+    shadow_layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
     cache: Option<&wgpu::PipelineCache>,
 ) -> wgpu::RenderPipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("repame_view3d_deferred_pl"),
-        bind_group_layouts: &[Some(layout)],
+        bind_group_layouts: &[Some(layout), Some(shadow_layout)],
         immediate_size: 0,
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -4980,11 +5129,14 @@ impl SceneBatch {
                 };
                 let (normal, normal_view) = make_aux("repame_view3d_gbuffer_normal");
                 let (material, material_view) = make_aux("repame_view3d_gbuffer_material");
+                let (emissive, emissive_view) = make_aux("repame_view3d_gbuffer_emissive");
                 Some(GbufferAux {
                     _normal: normal,
                     normal_view,
                     _material: material,
                     material_view,
+                    _emissive: emissive,
+                    emissive_view,
                     width: spec.target.width,
                     height: spec.target.height,
                     format: spec.target.format,
@@ -5698,6 +5850,16 @@ impl SceneBatch {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -5708,8 +5870,10 @@ impl SceneBatch {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
+        let shadow_layout = res.shadow_layout.clone();
         res.deferred = Some(DeferredState {
             layout,
+            shadow_layout,
             module,
             sampler,
             pipelines: HashMap::new(),
@@ -5744,10 +5908,11 @@ impl SceneBatch {
                 );
                 continue;
             };
-            let (albedo, normal, material) = (
+            let (albedo, normal, material, emissive) = (
                 target.view.clone(),
                 aux.normal_view.clone(),
                 aux.material_view.clone(),
+                aux.emissive_view.clone(),
             );
             let format = pass_format(spec.target.format);
             if !state.pipelines.contains_key(&format) {
@@ -5755,6 +5920,7 @@ impl SceneBatch {
                     device,
                     &state.module,
                     &state.layout,
+                    &state.shadow_layout,
                     format,
                     cache.as_ref(),
                 );
@@ -5783,6 +5949,10 @@ impl SceneBatch {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&emissive),
                     },
                 ],
             });
@@ -7478,14 +7648,13 @@ impl SceneBatch {
             label: Some("repame_view3d_gbuffer"),
             source: wgpu::ShaderSource::Wgsl(gbuffer_shader(self.skinning).into()),
         });
-        let gbuffer_targets: [Option<wgpu::ColorTargetState>; 3] =
-            std::array::from_fn(|_| {
-                Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })
-            });
+        let gbuffer_targets: [Option<wgpu::ColorTargetState>; 4] = std::array::from_fn(|_| {
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })
+        });
         let gbuffer_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("repame_view3d_gbuffer"),
             layout: Some(&pipe_layout),
@@ -8527,6 +8696,10 @@ pub fn prepare_scene_with_id(
                                 .aux
                                 .as_ref()
                                 .map(|aux| aux.material_view.clone()),
+                            aux_emissive_view: target
+                                .aux
+                                .as_ref()
+                                .map(|aux| aux.emissive_view.clone()),
                         })
                 })
                 .collect(),
@@ -9242,9 +9415,10 @@ pub fn prepare_scene_with_id(
             continue;
         }
         if spec.kind == super::pass::PassKind::Gbuffer {
-            let (Some(normal_view), Some(material_view)) = (
+            let (Some(normal_view), Some(material_view), Some(emissive_view)) = (
                 entry.aux_normal_view.as_ref(),
                 entry.aux_material_view.as_ref(),
+                entry.aux_emissive_view.as_ref(),
             ) else {
                 continue;
             };
@@ -9289,6 +9463,24 @@ pub fn prepare_scene_with_id(
                     }),
                     Some(wgpu::RenderPassColorAttachment {
                         view: material_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: if spec.load {
+                                wgpu::LoadOp::Load
+                            } else {
+                                wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 0.0,
+                                })
+                            },
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: emissive_view,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
@@ -9378,6 +9570,7 @@ pub fn prepare_scene_with_id(
                     .get(&spec.index)
                     .map(|bind| (pipeline, bind))
             });
+            let is_deferred = deferred.is_some();
             if let Some((pipeline, bind)) = deferred.or(post).or(plain) {
                 let mut full = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: if spec.kind == super::pass::PassKind::Deferred {
@@ -9413,6 +9606,9 @@ pub fn prepare_scene_with_id(
                 });
                 full.set_pipeline(pipeline);
                 full.set_bind_group(0, bind, &[]);
+                if is_deferred {
+                    full.set_bind_group(1, &snap.shadow_bind, &[]);
+                }
                 full.draw(0..3, 0..1);
             }
             continue;
@@ -9861,6 +10057,10 @@ mod tests {
         );
         parses("FULLSCREEN_SHADER", FULLSCREEN_SHADER);
         parses("DEFERRED_SHADER", DEFERRED_SHADER);
+        assert!(GBUFFER_FS.contains("@location(3) emissive: vec4<f32>"));
+        assert!(DEFERRED_SHADER.contains("@group(0) @binding(5) var emissive_tex"));
+        assert!(DEFERRED_SHADER.contains("@group(1) @binding(0) var shadow_tex"));
+        assert!(DEFERRED_SHADER.contains("@group(1) @binding(10) var probe_smp"));
         parses("HIZ_WGSL", HIZ_WGSL);
         parses("HIZ_TEST_WGSL", HIZ_TEST_WGSL);
         // The dispatch stride is built from `HIZ_WORKGROUP` and the
@@ -11764,6 +11964,176 @@ mod tests {
             &pass_px[i..i + 4],
             &[0, 255, 0, 255],
             "declared pass drew its own group"
+        );
+    }
+
+    /// End-to-end GPU proof for the deferred path: a lit quad is written to
+    /// a declared G-buffer, accumulated by a declared Deferred pass, then
+    /// read back from that pass's target. A black pixel would mean the
+    /// G-buffer attachments or the shadow bind never reached lighting.
+    #[test]
+    fn offscreen_gbuffer_then_deferred_is_lit() {
+        use repose_core::{Color, Rect, Scene, SceneNode};
+        use repose_render_wgpu::{Callback, WgpuCallback, offscreen::OffscreenRenderer};
+
+        use super::super::camera::OrbitCamera;
+        use super::super::pass::{RenderPass, RenderTarget, RenderTargetFormat, TargetSemantics};
+
+        const SIZE: u32 = 32;
+
+        #[derive(Default)]
+        struct Captured {
+            device: Option<wgpu::Device>,
+            batch: Option<SceneBatch>,
+            buffer: Option<(wgpu::Buffer, u32, u32)>,
+        }
+
+        struct DeferredPass {
+            cam: OrbitCamera,
+            group: MeshGroup,
+            light: SceneLight,
+            captured: std::sync::Arc<std::sync::Mutex<Captured>>,
+        }
+
+        impl WgpuCallback for DeferredPass {
+            fn prepare(
+                &self,
+                device: &wgpu::Device,
+                queue: &wgpu::Queue,
+                encoder: &mut wgpu::CommandEncoder,
+                screen: &repose_render_wgpu::ScreenDescriptor,
+                resources: &mut repose_render_wgpu::CallbackResources,
+            ) -> Vec<wgpu::CommandBuffer> {
+                let mut batch = SceneBatch::with_id("test.deferred");
+                batch.set_camera(self.cam.view_proj(1.0));
+                batch.set_camera_pos(self.cam.eye().into());
+                batch.set_camera_forward(self.cam.forward().into());
+                batch.set_light(self.light);
+                let gbuffer = RenderTarget::new(
+                    "gbuffer",
+                    SIZE,
+                    SIZE,
+                    RenderTargetFormat::Rgba16Float,
+                    TargetSemantics::Auxiliary,
+                )
+                .with_clear([0.0, 0.0, 0.0, 0.0]);
+                let lit = RenderTarget::new(
+                    "lit",
+                    SIZE,
+                    SIZE,
+                    RenderTargetFormat::Rgba8UnormSrgb,
+                    TargetSemantics::Auxiliary,
+                )
+                .with_clear([0.0, 0.0, 0.0, 1.0]);
+                batch
+                    .set_passes(&[
+                        RenderPass::gbuffer(gbuffer, Vec::new()),
+                        RenderPass::deferred("gbuffer", lit),
+                    ])
+                    .expect("valid gbuffer + deferred passes");
+                batch.push_group_for_pass(&self.group, 1);
+                batch.finish();
+                batch.ensure_resources(device, screen, resources);
+                batch.upload_all(device, queue, resources);
+                prepare_scene_with_id(
+                    "test.deferred",
+                    device,
+                    queue,
+                    encoder,
+                    screen,
+                    resources,
+                    SIZE,
+                    SIZE,
+                    [0.0, 0.0, 0.0, 1.0],
+                );
+                let readback = batch.encode_pass_readback(device, resources, "lit", encoder);
+                let mut captured = self.captured.lock().unwrap();
+                captured.device = Some(device.clone());
+                captured.batch = Some(batch);
+                captured.buffer = readback;
+                Vec::new()
+            }
+
+            fn paint(
+                &self,
+                _info: repose_core::PaintCallbackInfo,
+                rpass: &mut CallbackRenderPass<'_, '_>,
+                resources: &repose_render_wgpu::CallbackResources,
+            ) {
+                paint_scene_with_callback("test.deferred", rpass, resources);
+            }
+        }
+
+        let mut group = MeshGroup {
+            depth_test: true,
+            ..Default::default()
+        };
+        group.push_quad_lit(
+            [-5.0, 5.0, 5.0],
+            [5.0, 5.0, 5.0],
+            [5.0, 5.0, -5.0],
+            [-5.0, 5.0, -5.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 0.0],
+        );
+        let light = SceneLight {
+            direction: [0.0, 1.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            diffuse: 1.0,
+            ambient: [0.0, 0.0, 0.0],
+            tonemap: TonemapMethod::None,
+            ..SceneLight::default()
+        };
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Captured::default()));
+        let mut renderer = match OffscreenRenderer::new_blocking(SIZE, SIZE, 1) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("SKIP deferred test (no GPU): {e}");
+                return;
+            }
+        };
+        let cam = OrbitCamera {
+            target: glam::Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.9,
+            dist: 30.0,
+            fov_y_deg: 30.0,
+        };
+        let scene = Scene {
+            clear_color: Color::from_rgba(0, 0, 0, 255),
+            nodes: vec![SceneNode::Callback {
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: SIZE as f32,
+                    h: SIZE as f32,
+                },
+                payload: Callback::new(DeferredPass {
+                    cam,
+                    group,
+                    light,
+                    captured: captured.clone(),
+                }),
+            }],
+        };
+        renderer
+            .render_rgba(&scene, Some([0.0, 0.0, 0.0, 1.0]))
+            .expect("offscreen render");
+
+        let mut state = captured.lock().unwrap();
+        let (device, batch, (buffer, w, h)) = (
+            state.device.take().expect("device captured"),
+            state.batch.take().expect("batch captured"),
+            state.buffer.take().expect("readback encoded"),
+        );
+        let lit_px = batch
+            .map_pass_readback(&device, &buffer, w, h)
+            .expect("mapped deferred target");
+        let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+        let px = [lit_px[i], lit_px[i + 1], lit_px[i + 2], lit_px[i + 3]];
+        assert!(
+            px[0] > 200 && px[1] > 200 && px[2] > 200 && px[3] > 200,
+            "deferred pass must shade the lit quad, got {px:?}"
         );
     }
 

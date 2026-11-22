@@ -69,6 +69,7 @@ repame-physics = { path = "crates/repame-physics", version = "0.3.38" }
 repame-rapier2d = { path = "crates/repame-rapier2d", version = "0.3.38" }
 repame-rapier3d = { path = "crates/repame-rapier3d", version = "0.3.38" }
 repame-content = { path = "crates/repame-content", version = "0.3.38" }
+repame-save = { path = "crates/repame-save", version = "0.3.38" }
 
 
 [patch.crates-io]

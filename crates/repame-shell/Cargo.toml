@@ -16,6 +16,10 @@ repose-core.workspace = true
 repose-ui.workspace = true
 repose-platform = { workspace = true, features = ["gamepad", "sensors"] }
 repose-app.workspace = true
+repose-render-wgpu.workspace = true
+repame-save.workspace = true
+repame-view3d.workspace = true
+wgpu.workspace = true
 anyhow.workspace = true
 log.workspace = true
 playgama-bridge = { workspace = true, optional = true }

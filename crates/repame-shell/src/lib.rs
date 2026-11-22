@@ -40,6 +40,7 @@ pub use haptics::{RUMBLE_REFRESH, RUMBLE_UPLOAD_MS, RumbleBridge};
 pub use levels::apply_scheduler_levels;
 pub use motion::{MotionPoller, PadMotion};
 pub use pads::{PadBank, PadBridge, TRIGGER_HELD};
+pub mod pipeline_cache;
 pub use portal::{AdKind, AdOutcome, GameState, PortalHost, PortalReport, Suspend};
 pub use quit::Quit;
 pub use shortcuts::{

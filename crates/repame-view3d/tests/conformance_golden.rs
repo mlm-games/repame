@@ -228,6 +228,7 @@ fn golden_fog_reaches_full_strength_at_the_far_plane() {
         far: 20.0,
         color: [0.0; 3],
         enabled: true,
+        ..Default::default()
     };
     assert!(approx(fog_factor(&fog, 5.0), 0.0, 1e-6));
     assert!(approx(fog_factor(&fog, 15.0), 0.5, 1e-6));

@@ -16,8 +16,9 @@
 //!   what changed and publishes [`ArtifactSwap`]s to apply at a boundary.
 //! * [`codec`] parses DDS and KTX 2 containers and decodes BC1, BC3, BC4, BC5
 //!   and BC7 blocks; [`codec::stream`] opens a header and reads one mip level at a time
-//!   from a file, a slice or a package entry; [`package`] reads and writes ZIP
-//!   archives and PCK-like indexes.
+//!   from a file, a slice or a package entry; [`codec::rarc`], [`codec::rel`]
+//!   and [`codec::yaz0`] read the retail archive containers a GameCube disc
+//!   ships; [`package`] reads and writes ZIP archives and PCK-like indexes.
 //!
 //! [`World`]: bevy_ecs::prelude::World
 
@@ -41,7 +42,10 @@ pub use codec::{
     BlockCodec, BlockCodecRegistry, DecodedImage, TextureFormat, TextureInfo, TextureKind,
     TextureLevel, parse_container,
 };
+pub use codec::rarc::{Archive as RarcArchive, RARC_MAGIC};
+pub use codec::rel::{Rel, RelSection};
 pub use codec::stream::{ByteRangeSource, FileRangeSource, MipReader};
+pub use codec::yaz0::{YAZ0_MAGIC, decode as decode_yaz0, is_yaz0};
 pub use error::{ContentError, ContentErrorKind};
 pub use import::{
     AssetKind, AudioImporter, BinaryImporter, GltfImporter, IMPORT_FORMAT, IMPORTER_VERSION,

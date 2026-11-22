@@ -227,6 +227,9 @@ pub enum TevArg {
     Reg1,
     /// Output register 2, in the channel being computed.
     Reg2,
+    /// Alpha of an output register, broadcast into every color channel (the
+    /// console's `A0`/`A1`/`A2`). The index is the register number.
+    RegAlpha(u8),
     /// Rasterized color: the incoming vertex tint, as the console's `RASC`
     /// reads it. The seed every stage accumulates onto, so stage 0 is usually
     /// `d + RASC`.
@@ -274,12 +277,17 @@ pub struct TevStage {
     pub alpha_clamp: bool,
     pub color_dest: TevDest,
     pub alpha_dest: TevDest,
-    /// Channel the rasterized operand reads its alpha from, and the channel
-    /// the texture operand reads its alpha from. `0..3` is R,G,B,A. Three is
-    /// the hardware's identity, and the default: `APREV` takes `Prev.a` and
-    /// `TEXA` takes `texel.a`.
+    /// Channel the rasterized operand reads its alpha from (`RASA`), and the
+    /// channel the texture operand reads its alpha from (`TEXA`). `0..3` is
+    /// R,G,B,A. Three is the hardware's identity, and the default: `RASA`
+    /// takes the tint's alpha and `TEXA` takes `texel.a`. `APREV` is never
+    /// swapped: it always takes the previous register's alpha.
     pub ras_sel: u8,
     pub tex_sel: u8,
+    /// Signed texture LOD bias in 1/32ths, the console's texture-object
+    /// encoding. A negative bias sharpens the sample; it stays signed all the
+    /// way to the sampler.
+    pub lod_bias: i8,
 }
 
 impl Default for TevStage {
@@ -301,6 +309,7 @@ impl Default for TevStage {
             alpha_dest: TevDest::Prev,
             ras_sel: 3,
             tex_sel: 3,
+            lod_bias: 0,
         }
     }
 }
@@ -403,13 +412,51 @@ impl Light {
     }
 }
 
-/// Material fog: start/end distance and its blend color.
+/// The curve the console bends the fog range factor through.
+///
+/// The range factor runs `0..1` across the fog window; the curve is the
+/// hardware's fog type register, and the codes are the console's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FogCurve {
+    Linear,
+    Exp,
+    Exp2,
+    RevExp,
+    RevExp2,
+}
+
+impl FogCurve {
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Linear => 2,
+            Self::Exp => 4,
+            Self::Exp2 => 5,
+            Self::RevExp => 6,
+            Self::RevExp2 => 7,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            2 => Some(Self::Linear),
+            4 => Some(Self::Exp),
+            5 => Some(Self::Exp2),
+            6 => Some(Self::RevExp),
+            7 => Some(Self::RevExp2),
+            _ => None,
+        }
+    }
+}
+
+/// Material fog: start/end distance, its blend color and its curve.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFog {
     pub near: f32,
     pub far: f32,
     pub color: Rgb,
     pub enabled: bool,
+    /// Curve applied to the range factor.
+    pub curve: FogCurve,
 }
 
 impl Default for MaterialFog {
@@ -419,6 +466,102 @@ impl Default for MaterialFog {
             far: 100.0,
             color: [0.0, 0.0, 0.0],
             enabled: false,
+            curve: FogCurve::Linear,
+        }
+    }
+}
+
+/// The compare a fragment's alpha must satisfy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AlphaCompare {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+}
+
+impl AlphaCompare {
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Never => 0,
+            Self::Less => 1,
+            Self::Equal => 2,
+            Self::LessEqual => 3,
+            Self::Greater => 4,
+            Self::NotEqual => 5,
+            Self::GreaterEqual => 6,
+            Self::Always => 7,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Never),
+            1 => Some(Self::Less),
+            2 => Some(Self::Equal),
+            3 => Some(Self::LessEqual),
+            4 => Some(Self::Greater),
+            5 => Some(Self::NotEqual),
+            6 => Some(Self::GreaterEqual),
+            7 => Some(Self::Always),
+            _ => None,
+        }
+    }
+}
+
+/// How the two alpha compares combine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AlphaTestOp {
+    And,
+    Or,
+    Xor,
+    Xnor,
+}
+
+impl AlphaTestOp {
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::And => 0,
+            Self::Or => 1,
+            Self::Xor => 2,
+            Self::Xnor => 3,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::And),
+            1 => Some(Self::Or),
+            2 => Some(Self::Xor),
+            3 => Some(Self::Xnor),
+            _ => None,
+        }
+    }
+}
+
+/// The console's alpha test: two compares over the final alpha, combined by
+/// one operation. A fragment that fails the combination is discarded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AlphaTest {
+    pub comp0: AlphaCompare,
+    pub ref0: u8,
+    pub op: AlphaTestOp,
+    pub comp1: AlphaCompare,
+    pub ref1: u8,
+}
+
+impl Default for AlphaTest {
+    fn default() -> Self {
+        Self {
+            comp0: AlphaCompare::Always,
+            ref0: 0,
+            op: AlphaTestOp::And,
+            comp1: AlphaCompare::Always,
+            ref1: 0,
         }
     }
 }
@@ -432,6 +575,9 @@ pub struct ShadingModel {
     pub lights: Vec<Light>,
     pub ambient: u8,
     pub material_fog: MaterialFog,
+    /// The alpha test, if the program carries one. A fragment whose final
+    /// alpha fails the test is discarded.
+    pub alpha_test: Option<AlphaTest>,
     /// Ambient occlusion factor applied to indirect light.
     pub ao: f32,
     /// Which faces this program culls. Defaults to back faces.
@@ -446,6 +592,7 @@ impl Default for ShadingModel {
             lights: Vec::new(),
             ambient: 0,
             material_fog: MaterialFog::default(),
+            alpha_test: None,
             ao: 1.0,
             cull_mode: super::mesh::CullMode::default(),
         }
@@ -483,6 +630,9 @@ impl ShadingModel {
         let check = |arg: TevArg, alpha: bool| -> Result<(), ShadingError> {
             match arg {
                 TevArg::KColor(index) if !kc(index) => Err(ShadingError::KColorOutOfRange(index)),
+                TevArg::RegAlpha(index) if index > 2 => {
+                    Err(ShadingError::TevRegisterOutOfRange(index))
+                }
                 TevArg::TexColorOf(unit) if usize::from(unit) >= MAX_TEX_UNITS => {
                     Err(ShadingError::TexUnitOutOfRange(unit))
                 }
@@ -544,6 +694,8 @@ impl ShadingModel {
         self.material_fog.near.to_bits().hash(&mut hasher);
         self.material_fog.far.to_bits().hash(&mut hasher);
         self.material_fog.color.map(f32::to_bits).hash(&mut hasher);
+        self.material_fog.curve.hash(&mut hasher);
+        self.alpha_test.hash(&mut hasher);
         self.cull_mode.hash(&mut hasher);
         hasher.finish()
     }
@@ -559,6 +711,8 @@ pub enum ShadingError {
     /// An argument reads a unit no stage samples, so no page is bound for it.
     TexUnitNotSampled(u8),
     KColorOutOfRange(u8),
+    /// An argument names an output register the hardware does not have.
+    TevRegisterOutOfRange(u8),
     /// Texture color argument used in an alpha channel; alpha reads texel alpha.
     AlphaArgTakesColor,
 }
@@ -575,6 +729,9 @@ impl std::fmt::Display for ShadingError {
                 "texture unit {unit} is read by an argument but sampled by no stage"
             ),
             Self::KColorOutOfRange(index) => write!(f, "constant color {index} out of range"),
+            Self::TevRegisterOutOfRange(index) => {
+                write!(f, "output register {index} out of range")
+            }
             Self::AlphaArgTakesColor => write!(
                 f,
                 "alpha channel cannot read texture color; use TevArg::TexAlpha"

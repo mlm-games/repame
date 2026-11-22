@@ -6,8 +6,8 @@
 //! emitting it in WGSL.
 
 use crate::material::{
-    KColors, Light, MaterialFog, Rgba, ShadingModel, TevArg, TevBias, TevDest, TevOp, TevScale,
-    TevStage,
+    AlphaCompare, AlphaTest, AlphaTestOp, FogCurve, KColors, Light, MaterialFog, Rgba, ShadingModel,
+    TevArg, TevBias, TevDest, TevOp, TevScale, TevStage,
 };
 
 /// Sampled texel for one texture unit.
@@ -90,10 +90,10 @@ fn chan(sel: u8) -> usize {
 
 /// Resolve a hardware constant-color selector.
 ///
-/// `0x00..=0x07` are the fixed grays the hardware names, `sel`/8; `0x0C..=0x0F`
-/// read a whole K-color register; `0x10..=0x1F` read one component of one.
-/// Anything else has no hardware meaning, so it reads zero rather than
-/// inventing a color.
+/// `0x00..=0x07` are the fixed grays the hardware names, `8/8` down to `1/8`;
+/// `0x0C..=0x0F` read a whole K-color register; `0x10..=0x1F` read one
+/// component of one. Anything else has no hardware meaning, so it reads zero
+/// rather than inventing a color.
 fn konst_value(sel: u8, channel: usize, kcolors: &KColors) -> f32 {
     let reg = |index: u8| -> [f32; 4] {
         kcolors
@@ -102,12 +102,12 @@ fn konst_value(sel: u8, channel: usize, kcolors: &KColors) -> f32 {
             .unwrap_or([0.0, 0.0, 0.0, 1.0])
     };
     match sel {
-        0x00..=0x07 => f32::from(sel) / 8.0,
+        0x00..=0x07 => f32::from(8 - sel) / 8.0,
         0x0C..=0x0F => reg(sel - 0x0C)[channel.min(3)],
         0x10..=0x13 => reg(sel - 0x10)[0],
         0x14..=0x17 => reg(sel - 0x14)[1],
-        0x18..=0x1B => reg(sel - 0x18)[3],
-        0x1C..=0x1F => reg(sel - 0x1C)[2],
+        0x18..=0x1B => reg(sel - 0x18)[2],
+        0x1C..=0x1F => reg(sel - 0x1C)[3],
         _ => 0.0,
     }
 }
@@ -140,10 +140,11 @@ fn arg_value(
         TevArg::Half => 0.5,
         TevArg::Two => 2.0,
         TevArg::Color => regs[0][channel],
-        TevArg::Alpha => regs[0][chan(ras_sel)],
+        TevArg::Alpha => regs[0][3],
         TevArg::Reg0 => regs[1][channel],
         TevArg::Reg1 => regs[2][channel],
         TevArg::Reg2 => regs[3][channel],
+        TevArg::RegAlpha(index) => regs[usize::from(index).min(2) + 1][3],
         TevArg::Rasc => {
             if channel == 3 {
                 raster[3]
@@ -151,7 +152,7 @@ fn arg_value(
                 raster[channel]
             }
         }
-        TevArg::Rasa => raster[3],
+        TevArg::Rasa => raster[chan(ras_sel)],
         TevArg::KColor(index) => kcolors
             .get(usize::from(index))
             .copied()
@@ -302,15 +303,58 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
 }
 
 /// Fog blend factor for a view distance.
+///
+/// The range factor runs `0..1` across the fog window; the material's curve
+/// bends it the way the console's fog-type register does.
 pub fn fog_factor(fog: &MaterialFog, distance: f32) -> f32 {
     if !fog.enabled {
         return 0.0;
     }
     let span = (fog.far - fog.near).max(1e-6);
-    ((distance - fog.near) / span).clamp(0.0, 1.0)
+    let t = ((distance - fog.near) / span).clamp(0.0, 1.0);
+    match fog.curve {
+        FogCurve::Linear => t,
+        FogCurve::Exp => 1.0 - 2.0_f32.powf(-8.0 * t),
+        FogCurve::Exp2 => 1.0 - 2.0_f32.powf(-8.0 * t * t),
+        FogCurve::RevExp => 2.0_f32.powf(-8.0 * (1.0 - t)),
+        FogCurve::RevExp2 => 2.0_f32.powf(-8.0 * (1.0 - t) * (1.0 - t)),
+    }
+}
+
+/// One alpha compare over the fragment's 8-bit alpha.
+fn alpha_compare_value(compare: AlphaCompare, reference: u8, alpha: u8) -> bool {
+    match compare {
+        AlphaCompare::Never => false,
+        AlphaCompare::Less => alpha < reference,
+        AlphaCompare::Equal => alpha == reference,
+        AlphaCompare::LessEqual => alpha <= reference,
+        AlphaCompare::Greater => alpha > reference,
+        AlphaCompare::NotEqual => alpha != reference,
+        AlphaCompare::GreaterEqual => alpha >= reference,
+        AlphaCompare::Always => true,
+    }
+}
+
+/// Whether a fragment survives the material's alpha test.
+///
+/// The reference is compared against the final alpha rounded to 8 bits, the
+/// way the console's alpha-test register does.
+pub fn alpha_test_passes(test: &AlphaTest, color: Rgba) -> bool {
+    let alpha = (color[3].clamp(0.0, 1.0) * 255.0).round() as u8;
+    let first = alpha_compare_value(test.comp0, test.ref0, alpha);
+    let second = alpha_compare_value(test.comp1, test.ref1, alpha);
+    match test.op {
+        AlphaTestOp::And => first && second,
+        AlphaTestOp::Or => first || second,
+        AlphaTestOp::Xor => first != second,
+        AlphaTestOp::Xnor => first == second,
+    }
 }
 
 /// Full CPU reference: light, stage program, then fog.
+///
+/// `None` means the fragment failed the material's alpha test and is
+/// discarded.
 #[allow(clippy::too_many_arguments)] // shading inputs are the hardware's inputs
 pub fn evaluate(
     model: &ShadingModel,
@@ -319,7 +363,7 @@ pub fn evaluate(
     world_pos: [f32; 3],
     eye: [f32; 3],
     texels: &[Option<TexInput>],
-) -> Rgba {
+) -> Option<Rgba> {
     let lit = evaluate_lights(model, normal, world_pos);
     let incoming = [
         vertex_color[0] * lit[0],
@@ -339,7 +383,10 @@ pub fn evaluate(
         out[2] + (model.material_fog.color[2] - out[2]) * t,
         out[3],
     ];
-    out
+    match &model.alpha_test {
+        Some(test) if !alpha_test_passes(test, out) => None,
+        _ => Some(out),
+    }
 }
 
 fn arg_wgsl(arg: TevArg, unit: usize, channel: usize, ras_sel: u8, tex_sel: u8) -> String {
@@ -352,10 +399,11 @@ fn arg_wgsl(arg: TevArg, unit: usize, channel: usize, ras_sel: u8, tex_sel: u8) 
         TevArg::Half => "0.5".to_string(),
         TevArg::Two => "2.0".to_string(),
         TevArg::Color => format!("tev_regs[0].{slot}"),
-        TevArg::Alpha => format!("tev_regs[0].{ras}"),
+        TevArg::Alpha => "tev_regs[0].a".to_string(),
         TevArg::Reg0 => format!("tev_regs[1].{slot}"),
         TevArg::Reg1 => format!("tev_regs[2].{slot}"),
         TevArg::Reg2 => format!("tev_regs[3].{slot}"),
+        TevArg::RegAlpha(index) => format!("tev_regs[{}].a", usize::from(index).min(2) + 1),
         TevArg::Rasc => {
             if channel == 3 {
                 "lit_in.a".to_string()
@@ -363,7 +411,7 @@ fn arg_wgsl(arg: TevArg, unit: usize, channel: usize, ras_sel: u8, tex_sel: u8) 
                 format!("lit_in.{slot}")
             }
         }
-        TevArg::Rasa => "lit_in.a".to_string(),
+        TevArg::Rasa => format!("lit_in.{ras}"),
         TevArg::KColor(index) => format!("kcolor[{}].{slot}", index.min(3)),
         TevArg::TexColor => {
             if channel == 3 {
@@ -381,12 +429,12 @@ fn arg_wgsl(arg: TevArg, unit: usize, channel: usize, ras_sel: u8, tex_sel: u8) 
             }
         }
         TevArg::Konst(sel) => match sel {
-            0x00..=0x07 => format!("{:.6}", f32::from(sel) / 8.0),
+            0x00..=0x07 => format!("{:.6}", f32::from(8 - sel) / 8.0),
             0x0C..=0x0F => format!("kcolor[{}].{slot}", usize::from(sel - 0x0C)),
             0x10..=0x13 => format!("kcolor[{}].r", usize::from(sel - 0x10)),
             0x14..=0x17 => format!("kcolor[{}].g", usize::from(sel - 0x14)),
-            0x18..=0x1B => format!("kcolor[{}].a", usize::from(sel - 0x18)),
-            0x1C..=0x1F => format!("kcolor[{}].b", usize::from(sel - 0x1C)),
+            0x18..=0x1B => format!("kcolor[{}].b", usize::from(sel - 0x18)),
+            0x1C..=0x1F => format!("kcolor[{}].a", usize::from(sel - 0x1C)),
             _ => "0.0".to_string(),
         },
         TevArg::TexAlpha => format!("tex{unit}.{tex}"),
@@ -430,11 +478,42 @@ fn stage_channel_wgsl(stage: &TevStage, channel: usize) -> String {
     }
 }
 
+/// One alpha compare as a WGSL predicate over the 8-bit alpha.
+fn alpha_compare_wgsl(compare: AlphaCompare, reference: u8) -> String {
+    match compare {
+        AlphaCompare::Never => "false".to_string(),
+        AlphaCompare::Less => format!("(alpha_compare < {reference}u)"),
+        AlphaCompare::Equal => format!("(alpha_compare == {reference}u)"),
+        AlphaCompare::LessEqual => format!("(alpha_compare <= {reference}u)"),
+        AlphaCompare::Greater => format!("(alpha_compare > {reference}u)"),
+        AlphaCompare::NotEqual => format!("(alpha_compare != {reference}u)"),
+        AlphaCompare::GreaterEqual => format!("(alpha_compare >= {reference}u)"),
+        AlphaCompare::Always => "true".to_string(),
+    }
+}
+
+/// The alpha test as a fragment-shader fragment: the rounded alpha, then the
+/// discard for every fragment the comparison rejects.
+fn alpha_test_wgsl(test: &AlphaTest) -> String {
+    let first = alpha_compare_wgsl(test.comp0, test.ref0);
+    let second = alpha_compare_wgsl(test.comp1, test.ref1);
+    let pass = match test.op {
+        AlphaTestOp::And => format!("({first} && {second})"),
+        AlphaTestOp::Or => format!("({first} || {second})"),
+        AlphaTestOp::Xor => format!("({first} != {second})"),
+        AlphaTestOp::Xnor => format!("({first} == {second})"),
+    };
+    format!(
+        "let alpha_compare = u32(round(clamp(tev_out.a, 0.0, 1.0) * 255.0));\nif (!({pass})) {{ discard; }}\n"
+    )
+}
+
 /// WGSL for the stage program, as a fragment-shader function body.
 ///
 /// `texN` / `lodN` bindings are expected in scope per sampled unit (the
 /// sampled texel, alpha included), plus `kcolor` (4 RGBA constants) and the
-/// incoming `lit_in` color. Assigns `outColor`.
+/// incoming `lit_in` color. Assigns `outColor`. A model with an alpha test
+/// discards the fragments the test rejects.
 pub fn wgsl_program(model: &ShadingModel) -> String {
     let mut body = String::from(
         "var tev_regs: array<vec4<f32>, 4> = array<vec4<f32>, 4>(lit_in, vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));\n",
@@ -456,13 +535,16 @@ pub fn wgsl_program(model: &ShadingModel) -> String {
         ));
     }
     body.push_str("outColor = tev_out;\n");
+    if let Some(test) = &model.alpha_test {
+        body.push_str(&alpha_test_wgsl(test));
+    }
     body
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::{ShadingModel, TevArg, TevMode};
+    use crate::material::{ShadingModel, TevArg, TevDest, TevMode};
 
     /// `Rasc`/`Rasa` read the incoming tint, which the hardware's stage 0
     /// seeds before any texture enters. The GPU names it `lit_in`; if the two
@@ -497,15 +579,16 @@ mod tests {
     }
 
     /// `Konst` covers the rest of the hardware's constant-color selectors, and
-    /// the channel swap decides which component `APREV`/`TEXA` read. Both
+    /// the channel swap decides which component `RASA`/`TEXA` read. Both
     /// paths must agree: a drift moves every constant-tinted surface.
     #[test]
     fn konst_and_channel_swap_match_on_both_paths() {
         let mut model = ShadingModel::default();
         model.kcolors[0] = [0.1, 0.2, 0.3, 0.4];
         let mut stage = TevStage::with_mode(0, TevMode::Modulate);
-        // `APREV` reads the rasterized green, and the color `d` is the fixed
-        // gray `1/8`; `TEXA` reads the texel's red instead of its alpha.
+        // `APREV` reads the previous register's alpha, and the color `d` is
+        // the fixed gray `7/8`; `TEXA` reads the texel's red instead of its
+        // alpha.
         stage.ras_sel = 1;
         stage.tex_sel = 0;
         stage.color_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::Konst(1)];
@@ -514,19 +597,61 @@ mod tests {
 
         let raster = [0.9, 0.25, 0.0, 1.0];
         let out = evaluate_stages(&model, raster, &[]);
+        // The fixed grays run `8/8` down to `1/8`, so selector 1 is `7/8`.
+        assert_eq!(out[0], 0.875, "fixed gray 7/8 must reach the color channel");
         // alpha = d + (1 - TEXA) * a + TEXA * b, with no texel (white) so the
-        // lerp collapses to `b` = the swapped raster alpha.
-        assert_eq!(out[0], 0.125, "fixed gray 1/8 must reach the color channel");
-        assert_eq!(out[3], 0.25, "ras_sel must pick the raster green as alpha");
+        // lerp collapses to `b` = the previous register's alpha.
+        assert_eq!(out[3], 1.0, "APREV must read the previous alpha");
 
         let wgsl = wgsl_program(&model);
         assert!(
-            wgsl.contains("tev_regs[0].g"),
-            "swap must re-point APREV: {wgsl}"
+            wgsl.contains("tev_regs[0].a"),
+            "APREV must read the previous alpha: {wgsl}"
         );
         assert!(
-            wgsl.contains("0.125000"),
+            wgsl.contains("0.875000"),
             "fixed gray must lower to a literal: {wgsl}"
+        );
+    }
+
+    /// `RASA` reads the rasterized channel the stage's swap selects, while
+    /// `APREV` never swaps: the two operands must not trade places.
+    #[test]
+    fn rasa_reads_the_swapped_raster_channel() {
+        let mut model = ShadingModel::default();
+        let mut stage = TevStage::with_mode(0, TevMode::Modulate);
+        stage.ras_sel = 1;
+        stage.alpha_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::Rasa];
+        model.stages = vec![stage];
+
+        let out = evaluate_stages(&model, [0.9, 0.25, 0.0, 1.0], &[]);
+        assert_eq!(out[3], 0.25, "ras_sel must pick the raster green");
+
+        let wgsl = wgsl_program(&model);
+        assert!(
+            wgsl.contains("lit_in.g"),
+            "swap must re-point RASA: {wgsl}"
+        );
+    }
+
+    /// `A0`/`A1`/`A2` read an output register's alpha into the color channel.
+    #[test]
+    fn register_alpha_reads_the_output_register() {
+        let mut model = ShadingModel::default();
+        let mut writer = TevStage::with_mode(0, TevMode::Modulate);
+        writer.alpha_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::One];
+        writer.alpha_dest = TevDest::Reg0;
+        let mut reader = TevStage::with_mode(0, TevMode::Modulate);
+        reader.color_arg = [TevArg::Zero, TevArg::Zero, TevArg::Zero, TevArg::RegAlpha(0)];
+        model.stages = vec![writer, reader];
+
+        let out = evaluate_stages(&model, [0.5, 0.5, 0.5, 0.5], &[]);
+        assert_eq!(out[0], 1.0, "A0 must read register 0's alpha");
+
+        let wgsl = wgsl_program(&model);
+        assert!(
+            wgsl.contains("tev_regs[1].a"),
+            "A0 must lower to register 0's alpha: {wgsl}"
         );
     }
 }

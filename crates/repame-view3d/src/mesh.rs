@@ -378,7 +378,7 @@ pub fn shade(color: Rgb, dir: [i32; 3]) -> Rgb {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_extra {
     use super::*;
 
     #[test]

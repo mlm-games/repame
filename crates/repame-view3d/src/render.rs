@@ -971,14 +971,179 @@ pub struct MaterialUniform {
 const _: () = assert!(size_of::<MaterialUniform>() == 128);
 const _: () = assert!(super::material::MAX_TEX_UNITS == 8);
 
+/// The framebuffer copy shader: one triangle over the target, sampling the
+/// source through the copy's source transform and converting the sampled
+/// colour into the copy's pixel format.
+///
+/// The source is read in the display space the console's framebuffer holds
+/// (the copy's luma and quantisation are defined there), so an sRGB source
+/// is encoded back before the conversion and an sRGB target is written with
+/// the converted value decoded again.
+const COPY_WGSL: &str = r#"
+struct CopyParams {
+    offset: vec2<f32>,
+    scale: vec2<f32>,
+    flags: vec4<f32>,
+};
+
+@group(0) @binding(0) var src_smp: sampler;
+@group(0) @binding(1) var src_tex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> params: CopyParams;
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32((index << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(index & 2u) * 2.0 - 1.0;
+    out.pos = vec4<f32>(x, -y, 0.0, 1.0);
+    out.uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u)) * params.scale + params.offset;
+    return out;
+}
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    let lo = x / 12.92;
+    let hi = pow((x + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, x <= vec3<f32>(0.04045));
+}
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    let lo = x * 12.92;
+    let hi = 1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(hi, lo, x <= vec3<f32>(0.0031308));
+}
+
+fn intensity(rgb: vec3<f32>) -> f32 {
+    return dot(rgb, vec3<f32>(0.257, 0.504, 0.098)) + 16.0 / 255.0;
+}
+
+fn quantize4(v: f32) -> f32 {
+    return floor(v * 16.0) / 15.0;
+}
+
+fn sample_source(uv: vec2<f32>) -> vec4<f32> {
+    let c = textureSample(src_tex, src_smp, uv);
+    var a = c.a;
+    if (params.flags.x > 0.5) {
+        a = 1.0;
+    }
+    return vec4<f32>(c.rgb, a);
+}
+
+fn convert(c: vec4<f32>) -> vec4<f32> {
+    let mode = i32(params.flags.y + 0.5);
+    if (mode == 1) {
+        let i = quantize4(intensity(c.rgb));
+        return vec4<f32>(i, i, i, i);
+    }
+    if (mode == 2) {
+        let i = intensity(c.rgb);
+        return vec4<f32>(i, i, i, i);
+    }
+    if (mode == 3) {
+        let i = quantize4(intensity(c.rgb));
+        let a = quantize4(c.a);
+        return vec4<f32>(i, i, i, a);
+    }
+    if (mode == 4) {
+        let i = intensity(c.rgb);
+        return vec4<f32>(i, i, i, c.a);
+    }
+    if (mode == 5) {
+        return vec4<f32>(c.rgb, 1.0);
+    }
+    if (mode == 6) {
+        let r = quantize4(c.r);
+        return vec4<f32>(r, r, r, r);
+    }
+    if (mode == 7) {
+        let r = quantize4(c.r);
+        return vec4<f32>(r, r, r, quantize4(c.a));
+    }
+    if (mode == 8) {
+        return vec4<f32>(c.r, c.r, c.r, c.a);
+    }
+    if (mode == 9) {
+        return vec4<f32>(c.a, c.a, c.a, c.a);
+    }
+    if (mode == 10) {
+        return vec4<f32>(c.r, c.r, c.r, c.r);
+    }
+    if (mode == 11) {
+        return vec4<f32>(c.g, c.g, c.g, c.g);
+    }
+    if (mode == 12) {
+        return vec4<f32>(c.b, c.b, c.b, c.b);
+    }
+    if (mode == 13) {
+        return vec4<f32>(c.r, c.r, c.r, c.g);
+    }
+    if (mode == 14) {
+        return vec4<f32>(c.g, c.g, c.g, c.b);
+    }
+    return c;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let sampled = sample_source(in.uv);
+    var display = sampled.rgb;
+    if (params.flags.z > 0.5) {
+        display = linear_to_srgb(display);
+    }
+    var converted = convert(vec4<f32>(display, sampled.a));
+    if (params.flags.w > 0.5) {
+        converted = vec4<f32>(srgb_to_linear(converted.rgb), converted.a);
+    }
+    return converted;
+}
+"#;
+
+/// The copy pass's uniform: the source transform and the copy's flags.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct CopyUniform {
+    /// Source rect origin, as a fraction of the source's size.
+    offset: [f32; 2],
+    /// Source rect size, as a fraction of the source's size.
+    scale: [f32; 2],
+    /// `(opaque alpha, conversion mode, source is sRGB, target is sRGB)`.
+    flags: [f32; 4],
+}
+
+const _: () = assert!(size_of::<CopyUniform>() == 32);
+
+/// GPU state for the framebuffer copy passes: one shader, one bind layout,
+/// a nearest and a linear sampler, and a pipeline per destination format.
+struct CopyState {
+    layout: wgpu::BindGroupLayout,
+    module: wgpu::ShaderModule,
+    sampler_nearest: wgpu::Sampler,
+    sampler_linear: wgpu::Sampler,
+    pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    /// Bind groups for this frame's copy passes, keyed by [`PassSpec::index`].
+    binds: HashMap<u32, wgpu::BindGroup>,
+    /// Parameter buffers, keyed by [`PassSpec::index`]; the bind groups
+    /// reference them, so they must outlive the encode.
+    params: HashMap<u32, wgpu::Buffer>,
+}
+
 /// GPU state for fullscreen passes.
 struct FullscreenState {
     pipeline: wgpu::RenderPipeline,
     overlay_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
-    binds: HashMap<String, wgpu::BindGroup>,
+    /// Bind groups for this frame's fullscreen passes, keyed by
+    /// [`PassSpec::index`].
+    binds: HashMap<u32, wgpu::BindGroup>,
     layout: wgpu::BindGroupLayout,
-    tints: HashMap<String, wgpu::Buffer>,
+    tints: HashMap<u32, wgpu::Buffer>,
     present: Option<(String, wgpu::BindGroup)>,
     present_tint: Option<wgpu::Buffer>,
 }
@@ -992,6 +1157,11 @@ struct PassEntry {
     texture: wgpu::Texture,
     /// The target a resolve pass copies from, when it has one.
     source_texture: Option<wgpu::Texture>,
+    /// View of the target a copy pass samples, when it has one.
+    source_view: Option<wgpu::TextureView>,
+    /// Pixel size and format of the target a copy pass samples.
+    source_size: Option<(u32, u32)>,
+    source_format: Option<super::pass::RenderTargetFormat>,
 }
 
 /// A declared render target the batch owns: its texture and view, allocated
@@ -1921,6 +2091,12 @@ pub struct PassSpec {
     pub aux: Option<String>,
     /// Draws over the target's contents instead of clearing them.
     pub load: bool,
+    /// What a copy pass copies.
+    pub copy: Option<super::pass::CopySpec>,
+    /// Tint and opacity a fullscreen pass multiplies into its source.
+    pub tint: [f32; 4],
+    /// Targets whose writers this pass runs after.
+    pub depends_on: Vec<String>,
 }
 
 /// Uniform a post-process pass binds: the stage parameters, the source
@@ -2025,6 +2201,50 @@ fn make_post_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Fullscreen copy pipeline for one target format. The copy replaces
+/// (`REPLACE`) and carries no depth attachment.
+fn make_copy_pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("repame_view3d_copy_pl"),
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("repame_view3d_copy"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            ..Default::default()
+        },
+        depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
@@ -4189,7 +4409,9 @@ impl SceneBatch {
                 )
             }
             super::pass::PassKind::Render => pass_format(spec.target.format) == res.key.0,
-            super::pass::PassKind::Resolve | super::pass::PassKind::Fullscreen => true,
+            super::pass::PassKind::Resolve
+            | super::pass::PassKind::Fullscreen
+            | super::pass::PassKind::Copy => true,
         };
         for spec in &self.passes {
             if !supported(spec) {
@@ -4214,9 +4436,6 @@ impl SceneBatch {
             if !stale {
                 continue;
             }
-            if let Some(state) = res.fullscreen.as_mut() {
-                state.binds.remove(&spec.target.name);
-            }
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("repame_view3d_pass_target"),
                 size: wgpu::Extent3d {
@@ -4230,7 +4449,8 @@ impl SceneBatch {
                 format: pass_format(spec.target.format),
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -4267,7 +4487,13 @@ impl SceneBatch {
             .collect();
         res.pass_targets.retain(|name, _| live.contains(&name));
         if let Some(state) = res.fullscreen.as_mut() {
-            state.binds.retain(|name, _| live.contains(&name));
+            let live_indices: Vec<u32> = self
+                .passes
+                .iter()
+                .filter(|spec| supported(spec))
+                .map(|spec| spec.index)
+                .collect();
+            state.binds.retain(|index, _| live_indices.contains(index));
         }
     }
 
@@ -4296,6 +4522,9 @@ impl SceneBatch {
                     post: pass.post,
                     aux: pass.aux.clone(),
                     load: pass.load,
+                    copy: pass.copy,
+                    tint: pass.tint,
+                    depends_on: pass.depends_on.clone(),
                 }
             })
             .collect();
@@ -4770,7 +4999,7 @@ impl SceneBatch {
             if spec.kind == super::pass::PassKind::Fullscreen
                 && let Some(source) = spec.source.as_deref()
             {
-                SceneBatch::fullscreen_bind(device, queue, res, source);
+                SceneBatch::fullscreen_bind(device, queue, res, spec.index, source, spec.tint);
             }
         }
         let Some(spec) = res.presenting.clone() else {
@@ -4820,20 +5049,20 @@ impl SceneBatch {
         state.present = Some((spec.target.name.clone(), bind));
     }
 
-    /// Bind group sampling `source`, cached per target name.
+    /// Bind group sampling `source` for the pass `index`, with the pass's
+    /// own tint. Rebuilt every frame, so a reallocated source target never
+    /// leaves a stale view bound.
     fn fullscreen_bind(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         res: &mut SceneEntry,
+        index: u32,
         source: &str,
+        tint: [f32; 4],
     ) -> Option<wgpu::BindGroup> {
         let state = res.fullscreen.as_mut()?;
-        let existing = state.binds.get(source).cloned();
-        if let Some(bind) = existing {
-            return Some(bind);
-        }
         let view = res.pass_targets.get(source)?.view.clone();
-        let buffer = state.tints.entry(source.to_string()).or_insert_with(|| {
+        let buffer = state.tints.entry(index).or_insert_with(|| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("repame_view3d_fullscreen_tint"),
                 size: 16,
@@ -4841,7 +5070,7 @@ impl SceneBatch {
                 mapped_at_creation: false,
             })
         });
-        queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[1.0f32; 4]));
+        queue.write_buffer(buffer, 0, bytemuck::cast_slice(&tint));
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("repame_view3d_fullscreen_bg"),
             layout: &state.layout,
@@ -4860,8 +5089,176 @@ impl SceneBatch {
                 },
             ],
         });
-        state.binds.insert(source.to_string(), bind.clone());
+        state.binds.insert(index, bind.clone());
         Some(bind)
+    }
+
+    /// Builds the copy shader, its bind layout and the two samplers the
+    /// copy passes use.
+    fn sync_copy(&self, device: &wgpu::Device, res: &mut SceneEntry) {
+        let needs = self
+            .passes
+            .iter()
+            .any(|spec| spec.kind == super::pass::PassKind::Copy);
+        if !needs {
+            res.copy = None;
+            return;
+        }
+        if res.copy.is_some() {
+            return;
+        }
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("repame_view3d_copy"),
+            source: wgpu::ShaderSource::Wgsl(COPY_WGSL.into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("repame_view3d_copy_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("repame_view3d_copy_nearest"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let sampler_linear = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("repame_view3d_copy_linear"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        res.copy = Some(CopyState {
+            layout,
+            module,
+            sampler_nearest,
+            sampler_linear,
+            pipelines: HashMap::new(),
+            binds: HashMap::new(),
+            params: HashMap::new(),
+        });
+    }
+
+    /// Builds the copy pipelines and bind groups this frame's copy passes
+    /// need.
+    ///
+    /// The source transform comes from the copy's source rect and the source
+    /// target's size, so the rect is scaled into the target. A copy that
+    /// scales samples the source linearly, a copy that does not samples it
+    /// nearest.
+    fn warm_copy_binds(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        res: &mut SceneEntry,
+    ) {
+        for spec in &self.passes {
+            if spec.kind != super::pass::PassKind::Copy {
+                continue;
+            }
+            let Some(source) = spec.source.as_deref() else {
+                continue;
+            };
+            let Some(copy) = spec.copy.as_ref() else {
+                continue;
+            };
+            let Some(target) = res.pass_targets.get(source) else {
+                continue;
+            };
+            if !target.format.is_filterable() {
+                log::warn!(
+                    "scene_batch[{}]: copy pass '{}' cannot sample a {:?} source; pass skipped",
+                    self.id,
+                    spec.target.name,
+                    target.format
+                );
+                continue;
+            }
+            let rect = copy.rect;
+            if rect.width == 0 || rect.height == 0 {
+                continue;
+            }
+            let src_w = target.width.max(1) as f32;
+            let src_h = target.height.max(1) as f32;
+            let scaling = spec.target.width != rect.width || spec.target.height != rect.height;
+            let uniform = CopyUniform {
+                offset: [rect.x as f32 / src_w, rect.y as f32 / src_h],
+                scale: [rect.width as f32 / src_w, rect.height as f32 / src_h],
+                flags: [
+                    u32::from(copy.opaque_alpha || !target.format.has_alpha()) as f32,
+                    copy.format.mode() as f32,
+                    u32::from(target.format.is_srgb()) as f32,
+                    u32::from(spec.target.format.is_srgb()) as f32,
+                ],
+            };
+            let format = pass_format(spec.target.format);
+            let Some(state) = res.copy.as_mut() else {
+                return;
+            };
+            if !state.pipelines.contains_key(&format) {
+                let pipeline = make_copy_pipeline(device, &state.module, &state.layout, format);
+                state.pipelines.insert(format, pipeline);
+            }
+            let buffer = state.params.entry(spec.index).or_insert_with(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("repame_view3d_copy_params"),
+                    size: size_of::<CopyUniform>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+            queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
+            let sampler = if scaling {
+                &state.sampler_linear
+            } else {
+                &state.sampler_nearest
+            };
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("repame_view3d_copy_bg"),
+                layout: &state.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&target.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: buffer.as_entire_binding(),
+                    },
+                ],
+            });
+            state.binds.insert(spec.index, bind);
+        }
     }
 
     /// Builds the post-process shader, bind layout and sampler when the frame
@@ -6599,6 +6996,7 @@ impl SceneBatch {
             post: None,
             material_pipelines: Vec::new(),
             pass_targets: HashMap::new(),
+            copy: None,
             pass_specs: Vec::new(),
             fullscreen: None,
             presenting: None,
@@ -6717,8 +7115,10 @@ impl SceneBatch {
         self.sync_pass_targets(device, res);
         self.sync_fullscreen(device, res);
         self.sync_post(device, res);
+        self.sync_copy(device, res);
         self.warm_fullscreen_binds(device, queue, res);
         self.warm_post_binds(device, queue, res);
+        self.warm_copy_binds(device, queue, res);
         let prev = self
             .post
             .and_then(|post| post.previous_view_proj)
@@ -6955,6 +7355,9 @@ struct SceneEntry {
     material_pipelines: Vec<MaterialPipelines>,
     /// Pass targets by declared name, allocated on first use.
     pass_targets: HashMap<String, PassTarget>,
+    /// Framebuffer copy state: the shader, the samplers and this frame's
+    /// bind groups.
+    copy: Option<CopyState>,
     /// Fullscreen pass state: the pipeline, its sampler, and one bind
     /// group per source texture.
     fullscreen: Option<FullscreenState>,
@@ -7062,8 +7465,8 @@ pub fn prepare_scene_with_id(
         material_bind: wgpu::BindGroup,
         material_pipelines: Vec<MaterialPipelines>,
         passes: Vec<PassEntry>,
-        /// Source texture -> fullscreen bind group, built during upload.
-        fullscreen_binds: HashMap<String, wgpu::BindGroup>,
+        /// Pass index -> fullscreen bind group, built during upload.
+        fullscreen_binds: HashMap<u32, wgpu::BindGroup>,
         fullscreen_pipeline: Option<wgpu::RenderPipeline>,
         tex_bind: wgpu::BindGroup,
         shadow_bind: wgpu::BindGroup,
@@ -7096,6 +7499,13 @@ pub fn prepare_scene_with_id(
         depth_velocity_bind: wgpu::BindGroup,
         post_pipeline: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
         post_binds: HashMap<u32, wgpu::BindGroup>,
+        copy_pipeline: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+        copy_binds: HashMap<u32, wgpu::BindGroup>,
+        /// The scene texture array a published copy page is written into.
+        tex_array: wgpu::Texture,
+        /// Layer count and edge of the scene texture array.
+        tex_layers: u32,
+        tex_layer_size: u32,
         ranges: Vec<DrawRange>,
         particles: Option<ParticleSnapshot>,
         probe_captures: Option<ProbeCaptureSet>,
@@ -7196,6 +7606,21 @@ pub fn prepare_scene_with_id(
                                 .as_ref()
                                 .and_then(|name| res.pass_targets.get(name))
                                 .map(|target| target.texture.clone()),
+                            source_view: spec
+                                .source
+                                .as_ref()
+                                .and_then(|name| res.pass_targets.get(name))
+                                .map(|target| target.view.clone()),
+                            source_size: spec
+                                .source
+                                .as_ref()
+                                .and_then(|name| res.pass_targets.get(name))
+                                .map(|target| (target.width, target.height)),
+                            source_format: spec
+                                .source
+                                .as_ref()
+                                .and_then(|name| res.pass_targets.get(name))
+                                .map(|target| target.format),
                         })
                 })
                 .collect(),
@@ -7259,6 +7684,19 @@ pub fn prepare_scene_with_id(
                 .as_ref()
                 .map(|post| post.binds.clone())
                 .unwrap_or_default(),
+            copy_pipeline: res
+                .copy
+                .as_ref()
+                .map(|copy| copy.pipelines.clone())
+                .unwrap_or_default(),
+            copy_binds: res
+                .copy
+                .as_ref()
+                .map(|copy| copy.binds.clone())
+                .unwrap_or_default(),
+            tex_array: res.texture.clone(),
+            tex_layers: res.key.3,
+            tex_layer_size: res.key.2,
             ranges: res.last_ranges.clone(),
             particles: res.particles.as_ref().map(|gpu| ParticleSnapshot {
                 compute_prepare: gpu.compute_prepare.clone(),
@@ -7870,9 +8308,8 @@ pub fn prepare_scene_with_id(
                 Some((pipeline, bind))
             });
             let plain = snap.fullscreen_pipeline.as_ref().and_then(|pipeline| {
-                spec.source
-                    .as_deref()
-                    .and_then(|name| snap.fullscreen_binds.get(name))
+                snap.fullscreen_binds
+                    .get(&spec.index)
                     .map(|bind| (pipeline, bind))
             });
             if let Some((pipeline, bind)) = post.or(plain) {
@@ -7907,6 +8344,80 @@ pub fn prepare_scene_with_id(
                 full.set_pipeline(pipeline);
                 full.set_bind_group(0, bind, &[]);
                 full.draw(0..3, 0..1);
+            }
+            continue;
+        }
+        if spec.kind == super::pass::PassKind::Copy {
+            let format = pass_format(spec.target.format);
+            let Some(pipeline) = snap.copy_pipeline.get(&format) else {
+                continue;
+            };
+            let Some(bind) = snap.copy_binds.get(&spec.index) else {
+                continue;
+            };
+            let mut copied = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("repame_view3d_copy"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            copied.set_pipeline(pipeline);
+            copied.set_bind_group(0, bind, &[]);
+            copied.draw(0..3, 0..1);
+            drop(copied);
+            if let Some(page) = spec.copy.as_ref().and_then(|copy| copy.publish_page) {
+                let fits = page < snap.tex_layers
+                    && spec.target.format == super::pass::RenderTargetFormat::Rgba8UnormSrgb
+                    && spec.target.width <= snap.tex_layer_size
+                    && spec.target.height <= snap.tex_layer_size;
+                if fits {
+                    encoder.copy_texture_to_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &entry.texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &snap.tex_array,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d {
+                                x: 0,
+                                y: 0,
+                                z: page,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::Extent3d {
+                            width: spec.target.width.max(1),
+                            height: spec.target.height.max(1),
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                } else {
+                    log::warn!(
+                        "scene_batch[{id}]: copy pass '{}' cannot publish page {page}; \
+                         the page needs an Rgba8UnormSrgb target that fits the {}x{} array",
+                        spec.target.name,
+                        snap.tex_layer_size,
+                        snap.tex_layer_size
+                    );
+                }
             }
             continue;
         }
@@ -9055,6 +9566,9 @@ mod tests {
             post: None,
             aux: None,
             load: false,
+            copy: None,
+            tint: [1.0; 4],
+            depends_on: Vec::new(),
         }
     }
 

@@ -951,6 +951,9 @@ impl WgpuCallback for GpuViewport3d {
                 post: None,
                 aux: None,
                 load: false,
+                copy: None,
+                tint: [1.0; 4],
+                depends_on: Vec::new(),
             });
         }
         if !passes.is_empty()

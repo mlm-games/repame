@@ -40,8 +40,10 @@
 //! })
 //! ```
 
+pub mod buffer_arena;
 pub mod camera;
 pub mod chunk;
+pub mod descriptor_table;
 pub mod gizmos;
 pub mod gltf;
 pub mod lod;
@@ -67,12 +69,16 @@ pub mod vertex;
 pub mod viewport;
 pub mod voxel;
 
+pub use buffer_arena::{Alloc, ArenaError, BufferArena, GpuArena};
 pub use camera::{
     AabbColliders, CameraAttributes, CameraCollision, DampValue, FAR, NEAR, NoCollision,
     OPENGL_TO_WGPU, OrbitCamera, Smoothed, SmoothedCamera, SpringArm, SpringArmState,
     exp_decay, exp_decay_alpha, ray_aabb_entry, wrap_pi,
 };
 pub use chunk::{ChunkCache, ChunkDraw, ChunkEntry, validate_group};
+pub use descriptor_table::{
+    DEFAULT_PROBE_LIMIT, FALLBACK_INDEX, DescriptorTable, DescriptorTableError, fnv1a64,
+};
 pub use gizmos::{AXIS_X, AXIS_Y, AXIS_Z, GizmoColor, Gizmos, WHITE, YELLOW};
 pub use gltf::{
     ImportSkip, ImportedMesh, alpha_mode, fan_to_list, flatten_imported, import_slice, material_of,

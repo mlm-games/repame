@@ -423,6 +423,9 @@ impl PostProcess {
                 post: None,
                 aux: None,
                 load: false,
+                copy: None,
+                tint: [1.0; 4],
+                depends_on: Vec::new(),
             });
             depth_pass = Some(passes.len() as u32);
         }

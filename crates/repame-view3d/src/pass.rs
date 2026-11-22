@@ -49,6 +49,24 @@ impl RenderTargetFormat {
         matches!(self, Self::Depth32Float)
     }
 
+    /// The format carries an alpha channel.
+    pub const fn has_alpha(self) -> bool {
+        matches!(
+            self,
+            Self::Rgba8Unorm | Self::Rgba8UnormSrgb | Self::Bgra8Unorm | Self::Rgba16Float
+        )
+    }
+
+    /// The format stores display-encoded colour, so sampling it decodes.
+    pub const fn is_srgb(self) -> bool {
+        matches!(self, Self::Rgba8UnormSrgb)
+    }
+
+    /// The format can be sampled with a filtering sampler.
+    pub const fn is_filterable(self) -> bool {
+        !matches!(self, Self::R32Float | Self::Depth32Float)
+    }
+
     /// The target format matching a GPU texture format, or `None` when the
     /// batch cannot render into it. Lets a caller planning passes (post
     /// processing) pick a scene format that the batch's pipelines accept.
@@ -102,6 +120,135 @@ pub enum PassKind {
     Resolve,
     /// Fullscreen blit or post chain over the source.
     Fullscreen,
+    /// Copy a region of the source target into the target, converting the
+    /// pixel format on the way (the framebuffer copy the retail `GXCopyTex`
+    /// performs).
+    Copy,
+}
+
+/// Pixel format a [`PassKind::Copy`] pass writes into its target, mirroring
+/// the formats the retail `GXSetTexCopyDst` accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CopyFormat {
+    /// No conversion: the source's RGBA is written as it is.
+    Rgba8,
+    /// 4-bit intensity (`GX_TF_I4`): the source's luma, quantised to four
+    /// bits and written to every channel.
+    Intensity4,
+    /// 8-bit intensity (`GX_TF_I8`).
+    Intensity8,
+    /// 4-bit intensity and 4-bit alpha (`GX_TF_IA4`).
+    IntensityAlpha4,
+    /// 8-bit intensity and 8-bit alpha (`GX_TF_IA8`).
+    IntensityAlpha8,
+    /// 16-bit colour with an opaque alpha (`GX_TF_RGB565`).
+    Rgb565,
+    /// 4-bit red (`GX_CTF_R4`).
+    Red4,
+    /// 4-bit red and 4-bit alpha (`GX_CTF_RA4`).
+    RedAlpha4,
+    /// 8-bit red and 8-bit alpha (`GX_CTF_RA8`).
+    RedAlpha8,
+    /// 8-bit alpha (`GX_CTF_A8`).
+    Alpha8,
+    /// 8-bit red (`GX_CTF_R8`).
+    Red8,
+    /// 8-bit green (`GX_CTF_G8`).
+    Green8,
+    /// 8-bit blue (`GX_CTF_B8`).
+    Blue8,
+    /// 8-bit red and green (`GX_CTF_RG8`).
+    RedGreen8,
+    /// 8-bit green and blue (`GX_CTF_GB8`).
+    GreenBlue8,
+}
+
+impl CopyFormat {
+    /// The copy shader's conversion mode. The numbers are the shader's
+    /// contract and must not be renumbered.
+    pub const fn mode(self) -> u32 {
+        match self {
+            Self::Rgba8 => 0,
+            Self::Intensity4 => 1,
+            Self::Intensity8 => 2,
+            Self::IntensityAlpha4 => 3,
+            Self::IntensityAlpha8 => 4,
+            Self::Rgb565 => 5,
+            Self::Red4 => 6,
+            Self::RedAlpha4 => 7,
+            Self::RedAlpha8 => 8,
+            Self::Alpha8 => 9,
+            Self::Red8 => 10,
+            Self::Green8 => 11,
+            Self::Blue8 => 12,
+            Self::RedGreen8 => 13,
+            Self::GreenBlue8 => 14,
+        }
+    }
+}
+
+/// Region of a source target a copy reads, in pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CopyRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl CopyRect {
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// The whole source target.
+    pub const fn full(width: u32, height: u32) -> Self {
+        Self::new(0, 0, width, height)
+    }
+}
+
+/// What one [`PassKind::Copy`] pass copies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CopySpec {
+    /// Region of the source target read.
+    pub rect: CopyRect,
+    /// Pixel format written into the target.
+    pub format: CopyFormat,
+    /// The source had no alpha channel, so the copy writes an opaque alpha.
+    pub opaque_alpha: bool,
+    /// Texture-array page the copied target is published into, so a later
+    /// draw can sample it as an ordinary scene texture. The target's size
+    /// must fit the page, and its format must match the array's.
+    pub publish_page: Option<u32>,
+}
+
+impl CopySpec {
+    pub const fn new(rect: CopyRect, format: CopyFormat) -> Self {
+        Self {
+            rect,
+            format,
+            opaque_alpha: false,
+            publish_page: None,
+        }
+    }
+
+    /// The copy writes an opaque alpha, as the retail copy does when the
+    /// source framebuffer format has no alpha channel.
+    pub const fn with_opaque_alpha(mut self, opaque: bool) -> Self {
+        self.opaque_alpha = opaque;
+        self
+    }
+
+    /// Publishes the copied target into a texture-array page.
+    pub const fn with_page(mut self, page: u32) -> Self {
+        self.publish_page = Some(page);
+        self
+    }
 }
 
 /// One render target in a frame's pass list.
@@ -175,7 +322,8 @@ impl RenderTarget {
 pub struct RenderPass {
     pub target: RenderTarget,
     pub kind: PassKind,
-    /// Target sampled by [`PassKind::Resolve`] and [`PassKind::Fullscreen`].
+    /// Target sampled by [`PassKind::Resolve`], [`PassKind::Fullscreen`] and
+    /// [`PassKind::Copy`].
     pub source: Option<String>,
     /// Groups drawn by [`PassKind::Render`]; empty for the other kinds.
     pub groups: Vec<crate::MeshGroup>,
@@ -195,6 +343,15 @@ pub struct RenderPass {
     /// over an earlier pass's target are the engine's, not a declaration's.
     /// Defaults to `false`, the clearing pass.
     pub load: bool,
+    /// What a [`PassKind::Copy`] pass copies.
+    pub copy: Option<CopySpec>,
+    /// Tint and opacity a [`PassKind::Fullscreen`] pass multiplies into the
+    /// source it samples. Defaults to identity.
+    pub tint: [f32; 4],
+    /// Targets whose writers this pass runs after, for a pass that consumes
+    /// their contents without sampling them (a scene drawing a texture a
+    /// copy published, for instance).
+    pub depends_on: Vec<String>,
 }
 
 impl RenderPass {
@@ -209,6 +366,9 @@ impl RenderPass {
             post: None,
             aux: None,
             load: false,
+            copy: None,
+            tint: [1.0, 1.0, 1.0, 1.0],
+            depends_on: Vec::new(),
         }
     }
 
@@ -224,6 +384,29 @@ impl RenderPass {
             post: None,
             aux: None,
             load: false,
+            copy: None,
+            tint: [1.0, 1.0, 1.0, 1.0],
+            depends_on: Vec::new(),
+        }
+    }
+
+    /// A copy pass: the region `spec` names of `source` is copied into
+    /// `target`, scaled to the target's size and converted to the spec's
+    /// pixel format.
+    pub fn copy(source: impl Into<String>, target: RenderTarget, spec: CopySpec) -> Self {
+        Self {
+            target,
+            kind: PassKind::Copy,
+            source: Some(source.into()),
+            groups: Vec::new(),
+            presents: false,
+            overlay: [1.0, 1.0, 1.0, 1.0],
+            post: None,
+            aux: None,
+            load: false,
+            copy: Some(spec),
+            tint: [1.0, 1.0, 1.0, 1.0],
+            depends_on: Vec::new(),
         }
     }
 
@@ -246,6 +429,35 @@ impl RenderPass {
         self.post = Some(stage);
         self
     }
+
+    /// Multiplies the sampled source by `tint` in this fullscreen pass.
+    pub fn with_tint(mut self, tint: [f32; 4]) -> Self {
+        self.tint = tint;
+        self
+    }
+
+    /// Runs this pass after the pass that writes `target`.
+    pub fn after(mut self, target: impl Into<String>) -> Self {
+        self.depends_on.push(target.into());
+        self
+    }
+}
+
+/// A mesh group bound to a declared pass by name.
+#[derive(Clone, Debug)]
+pub struct PassGroup {
+    /// Name of the pass's target (the [`RenderTarget::name`] it declares).
+    pub pass: String,
+    pub group: crate::MeshGroup,
+}
+
+impl PassGroup {
+    pub fn new(pass: impl Into<String>, group: crate::MeshGroup) -> Self {
+        Self {
+            pass: pass.into(),
+            group,
+        }
+    }
 }
 
 /// Why a pass list was rejected.
@@ -255,9 +467,14 @@ pub enum PassError {
     SampleCountUnsupported,
     MissingSource,
     UnknownSource,
+    /// A dependency names a target no pass declares.
+    UnknownDependency,
     DuplicateTarget,
     TooManyTargets,
     SizeMismatch,
+    /// A copy pass writes into a target the batch cannot render into as a
+    /// colour attachment.
+    InvalidCopyTarget,
     /// More than one pass claims the screen. Only the first is composited,
     /// so the rest render every frame and are never seen.
     MultiplePresenting,
@@ -300,10 +517,17 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
         {
             return Err(PassError::DuplicateTarget);
         }
-        if matches!(pass.kind, PassKind::Resolve | PassKind::Fullscreen)
-            && pass.source.is_none()
+        if matches!(
+            pass.kind,
+            PassKind::Resolve | PassKind::Fullscreen | PassKind::Copy
+        ) && pass.source.is_none()
         {
             return Err(PassError::MissingSource);
+        }
+        if pass.kind == PassKind::Copy {
+            if pass.target.format.is_depth() || pass.copy.is_none() {
+                return Err(PassError::InvalidCopyTarget);
+            }
         }
         names.push((&pass.target.name, &pass.target));
     }
@@ -325,6 +549,11 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
             && !names.iter().any(|(name, _)| *name == aux)
         {
             return Err(PassError::UnknownSource);
+        }
+        for dependency in &pass.depends_on {
+            if !names.iter().any(|(name, _)| *name == dependency) {
+                return Err(PassError::UnknownDependency);
+            }
         }
     }
     // A dependency cycle would leave passes unordered: reject the list
@@ -358,6 +587,8 @@ pub fn validate_passes(passes: &[RenderPass]) -> Result<(), PassError> {
 ///
 /// - a pass that samples a named target (`source`, `aux`) runs after the
 ///   pass that writes it;
+/// - a pass that names a target in `depends_on` runs after the pass that
+///   writes it;
 /// - a [`PassKind::Depth`] or [`PassKind::Occlusion`] pass runs after every
 ///   [`TargetSemantics::SceneColor`] pass, because it replays that scene's
 ///   geometry (and the engine's same-frame occlusion phase draws after it).
@@ -391,15 +622,19 @@ pub fn pass_order(passes: &[RenderPass]) -> Vec<usize> {
     order
 }
 
-/// Indices `index` must run after: the writers of the targets it samples,
-/// plus, for the depth replays, every scene-color render pass.
+/// Indices `index` must run after: the writers of the targets it samples or
+/// depends on, plus, for the depth replays, every scene-color render pass.
 fn dependencies(passes: &[RenderPass], index: usize) -> Vec<usize> {
     let pass = &passes[index];
     let mut deps = Vec::new();
-    for name in [pass.source.as_deref(), pass.aux.as_deref()]
-        .into_iter()
-        .flatten()
-    {
+    let named = [
+        pass.source.as_deref(),
+        pass.aux.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(pass.depends_on.iter().map(|name| name.as_str()));
+    for name in named {
         if let Some(from) = passes.iter().position(|other| other.target.name == name)
             && !deps.contains(&from)
         {
@@ -458,6 +693,9 @@ mod tests {
             post: None,
             aux: None,
             load: false,
+            copy: None,
+            tint: [1.0; 4],
+            depends_on: Vec::new(),
         }
     }
 

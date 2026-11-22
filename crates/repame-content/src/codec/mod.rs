@@ -1,6 +1,6 @@
-//! Texture containers and block codecs.
+//! Texture containers, block codecs and the retail archive containers.
 //!
-//! Two layers:
+//! Three layers:
 //!
 //! * **Containers** ([`dds`], [`ktx2`]) parse level/size/format/mips into a
 //!   [`TextureInfo`] without touching the pixel payload.
@@ -9,10 +9,14 @@
 //!   recognised format (BC2, BC6H, ETC/EAC, ASTC, Basis supercompression,
 //!   half/float formats) is refused with [`ContentErrorKind::Unsupported`],
 //!   never approximated.
+//! * **Archives** ([`rarc`], [`rel`], [`yaz0`]) read the containers a
+//!   GameCube disc ships: the RARC volume a game mounts, the relocatable
+//!   object it loads and the Yaz0 stream the retail ripper expands before
+//!   either is read.
 //!
-//! [`stream`] is the per-level path on top of both: it opens a header, exposes
-//! each level's byte range, and reads (and decodes) only the level asked for,
-//! from a file, a slice, or a package entry.
+//! [`stream`] is the per-level path on top of the texture layers: it opens a
+//! header, exposes each level's byte range, and reads (and decodes) only the
+//! level asked for, from a file, a slice, or a package entry.
 //!
 //! [`ContentErrorKind::Unsupported`]: crate::ContentErrorKind::Unsupported
 
@@ -20,7 +24,10 @@ pub mod bc;
 pub mod bc7;
 pub mod dds;
 pub mod ktx2;
+pub mod rarc;
+pub mod rel;
 pub mod stream;
+pub mod yaz0;
 
 use std::path::Path;
 

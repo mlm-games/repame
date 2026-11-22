@@ -3989,12 +3989,27 @@ impl SceneBatch {
     /// Cascade matrices fit here from the camera (pass `cam.eye()`,
     /// `cam.view_matrix()`, and the inverse view-proj): the same sources
     /// the viewport feeds per frame, so the fit and the pixels agree.
+    /// Fit cascade splits using the camera's default depth range.
     pub fn set_rig(
         &mut self,
         rig: &LightRig,
         cam_eye: [f32; 3],
         cam_view: glam::Mat4,
         cam_inv_view_proj: glam::Mat4,
+    ) {
+        self.set_rig_clipped(rig, cam_eye, cam_view, cam_inv_view_proj, super::camera::NEAR, super::camera::FAR);
+    }
+
+    /// Fit cascade splits across `(near, far)`. Pass the frame's clip planes so shadow
+    /// coverage extends as far as the rendered view.
+    pub fn set_rig_clipped(
+        &mut self,
+        rig: &LightRig,
+        cam_eye: [f32; 3],
+        cam_view: glam::Mat4,
+        cam_inv_view_proj: glam::Mat4,
+        near: f32,
+        far: f32,
     ) {
         self.set_light(rig.sun);
         let mut points: Vec<super::shadow::PointLight> = rig.points.clone();
@@ -4105,8 +4120,8 @@ impl SceneBatch {
                     cam_view,
                     cam_inv_view_proj,
                     dir,
-                    super::camera::NEAR,
-                    super::camera::FAR,
+                    near,
+                    far,
                 );
                 let mut vps = [
                     &mut self.camera.cascade_vp0,

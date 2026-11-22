@@ -63,11 +63,25 @@ impl OrbitCamera {
     }
 
     pub fn proj_matrix(&self, aspect: f32) -> Mat4 {
-        OPENGL_TO_WGPU * perspective_gl(self.fov_y_deg.to_radians(), aspect.max(0.01), NEAR, FAR)
+        self.proj_matrix_clipped(aspect, NEAR, FAR)
+    }
+
+    /// Projection with explicit clip planes. Games that need a farther view than the
+    /// default [`FAR`] set [`Frame3d::clip`](crate::Frame3d::clip); the frame's
+    /// `view_proj` calls this with those planes.
+    pub fn proj_matrix_clipped(&self, aspect: f32, near: f32, far: f32) -> Mat4 {
+        let near = near.max(0.001);
+        let far = far.max(near + 0.001);
+        OPENGL_TO_WGPU * perspective_gl(self.fov_y_deg.to_radians(), aspect.max(0.01), near, far)
     }
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
         self.proj_matrix(aspect) * self.view_matrix()
+    }
+
+    /// View-projection with explicit clip planes; pairs with [`Frame3d::clip`](crate::Frame3d).
+    pub fn view_proj_clipped(&self, aspect: f32, near: f32, far: f32) -> Mat4 {
+        self.proj_matrix_clipped(aspect, near, far) * self.view_matrix()
     }
 
     /// Drag deltas in dp. Horizontal orbits, vertical tilts.

@@ -46,10 +46,12 @@ pub struct PageLevel {
 /// Everything the viewport draws this frame. Plain data, snapshot per frame.
 ///
 /// Framing contract (single source of truth): the GPU camera uniform is
-/// `cam.view_proj(aspect)` where `aspect = viewport_w / viewport_h` from
-/// the painted rect; picks invert through the same camera via
+/// [`Frame3d::view_proj`](Frame3d::view_proj) at `aspect = viewport_w / viewport_h`
+/// from the painted rect; picks invert through the same camera via
 /// [`OrbitCamera::screen_ray`]. One camera, two consumers, they cannot
-/// disagree.
+/// disagree on framing. [`clip`](Frame3d::clip) overrides the far plane for rendering and
+/// shadow cascades; picks through [`OrbitCamera::screen_ray`] keep the camera's default
+/// range, which yields the same world ray (only the depth row differs).
 ///
 /// Textures ride the same snapshot: [`Frame3d::uploads`] feeds the batch
 /// texture array once per frame (games drain their image/atlas source
@@ -63,6 +65,10 @@ pub struct PageLevel {
 #[derive(Clone, Debug)]
 pub struct Frame3d {
     pub cam: OrbitCamera,
+    /// Optional `(near, far)` clip planes for this frame. `None` uses the camera's
+    /// default [`NEAR`](crate::NEAR)/[`FAR`](crate::FAR). Raise `far` for scenes whose
+    /// geometry extends past the default 2000-unit horizon.
+    pub clip: Option<[f32; 2]>,
     /// World-space mesh groups. Depth-tested groups occlude; groups with
     /// `depth_test = false` always draw (ground decals, editor gizmos).
     pub groups: Vec<MeshGroup>,
@@ -239,6 +245,7 @@ impl Default for Frame3d {
     fn default() -> Self {
         Self {
             cam: OrbitCamera::default(),
+            clip: None,
             groups: Vec::new(),
             materials: Vec::new(),
             uploads: Vec::new(),
@@ -274,6 +281,16 @@ impl Frame3d {
             16.0 / 9.0
         } else {
             (viewport_px[0] / viewport_px[1]).max(0.01)
+        }
+    }
+
+    /// View-projection for this frame: the camera's matrix unless `clip` overrides
+    /// the depth range. The viewport draws with this same matrix, so a game that sets
+    /// `clip` sees exactly the projection it asked for.
+    pub fn view_proj(&self, aspect: f32) -> Mat4 {
+        match self.clip {
+            Some([near, far]) => self.cam.view_proj_clipped(aspect, near, far),
+            None => self.cam.view_proj(aspect),
         }
     }
 
@@ -1011,7 +1028,7 @@ impl WgpuCallback for GpuViewport3d {
             }
         }
         let desc = self.effective_desc();
-        let view_proj = self.input.cam.view_proj(aspect);
+        let view_proj = self.input.view_proj(aspect);
         let eye = self.input.cam.eye();
         let mut batch = SceneBatch::with_desc(self.batch_id.clone(), desc);
         batch.set_camera(view_proj);
@@ -1027,11 +1044,14 @@ impl WgpuCallback for GpuViewport3d {
                 if let Some(attributes) = &self.input.attributes {
                     attributes.apply_to(&mut rig.sun);
                 }
-                batch.set_rig(
+                let [near, far] = self.input.clip.unwrap_or([crate::NEAR, crate::FAR]);
+                batch.set_rig_clipped(
                     &rig,
                     eye.into(),
                     self.input.cam.view_matrix(),
                     view_proj.inverse(),
+                    near,
+                    far,
                 );
             }
             None => {
@@ -1259,6 +1279,32 @@ mod tests {
             dist: 30.0,
             fov_y_deg: 30.0,
         }
+    }
+
+    /// A frame's clip override must reach the projection: raising `far` pushes the
+    /// depth range out so distant geometry is no longer clipped at the default horizon.
+    #[test]
+    fn frame_clip_override_reaches_projection() {
+        let base = Frame3d {
+            cam: orbit(),
+            ..Frame3d::default()
+        };
+        let default_m = base.view_proj(16.0 / 9.0);
+        let far = Frame3d {
+            cam: orbit(),
+            clip: Some([NEAR, 100_000.0]),
+            ..Frame3d::default()
+        };
+        let far_m = far.view_proj(16.0 / 9.0);
+        // A farther far plane changes the depth column of the projection. Compare
+        // the row-2 elements (glam column z) of both matrices.
+        let cols = |m: Mat4| [m.x_axis.z, m.y_axis.z, m.z_axis.z, m.w_axis.z];
+        let a = cols(default_m);
+        let b = cols(far_m);
+        assert!(
+            a.iter().zip(b).any(|(x, y)| (x - y).abs() > 1e-7),
+            "clip override must change the projection's depth row: {a:?} vs {b:?}"
+        );
     }
 
     /// Pickable slab under the camera (top face at y = 2, wide enough that

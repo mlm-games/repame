@@ -13,8 +13,8 @@
 //! on the fallback path: reflection probes lose roughness-based LOD and the
 //! prefilter loop uses implicit derivatives, so reflections are blurrier or
 //! less precise on old GL. Rendering still works everywhere; only fidelity
-//! changes. Modern GL 4.x also takes the fallback path (conservative), which
-//! costs the same fidelity there.
+//! changes. Modern GL 4.x and all browser devices also take the fallback path
+//! (conservative), costing the same fidelity there.
 
 /// Whether explicit-LOD sampling (`textureSampleLevel`) is available.
 ///
@@ -25,7 +25,18 @@
 /// synchronous check: an error-scope probe would return a JS Promise on the
 /// WebGPU backend, which cannot be resolved from a WASM render callback.
 pub fn explicit_lod_supported(device: &wgpu::Device) -> bool {
-    !matches!(device.adapter_info().backend, wgpu::Backend::Gl)
+    match device.adapter_info().backend {
+        // Native GL: naga's GLSL backend lacks TEXTURE_LEVELS on old drivers.
+        wgpu::Backend::Gl => false,
+        // In the browser wgpu reports BrowserWebGpu even when Firefox/Dawn
+        // implements WebGPU on top of an old OpenGL driver (e.g. Radeon HD
+        // 3200), where shader translation rejects TEXTURE_LEVELS. We cannot
+        // query the underlying driver from here, so take the safe path for all
+        // browser devices: implicit LOD renders everywhere, explicit LOD may not.
+        wgpu::Backend::BrowserWebGpu => false,
+        // Vulkan, Metal, DX12 and null backends all support explicit LOD.
+        _ => true,
+    }
 }
 
 /// Create a WGSL shader module, rewriting explicit-LOD samples when the
